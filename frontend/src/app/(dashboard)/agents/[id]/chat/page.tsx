@@ -1,42 +1,50 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, Fragment } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
-    ArrowLeft,
     Bot,
     Plus,
     Send,
-    Trash2,
-    MessageSquare,
+    Search,
     Loader2,
     User,
     Sparkles,
-    Shield,
+    ChevronDown,
+    ChevronRight,
+    CheckCircle2,
+    Clock,
+    ArrowUp,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
-    AlertDialog,
-    AlertDialogAction,
-    AlertDialogCancel,
-    AlertDialogContent,
-    AlertDialogDescription,
-    AlertDialogFooter,
-    AlertDialogHeader,
-    AlertDialogTitle,
-    AlertDialogTrigger,
-} from '@/components/ui/alert-dialog';
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
 import { getAgents } from '@/lib/api/agents';
-import { getSessions, createSession, deleteSession, getMessages } from '@/lib/api/sessions';
+import { getSessions, createSession, getMessages } from '@/lib/api/sessions';
 import { API_URL } from '@/lib/constants';
 import { getToken } from '@/lib/auth';
 import type { Agent, Session, Message } from '@/types';
 
+interface ToolCallEvent {
+    id: string;
+    name: string;
+    args?: string;
+    type: 'tool' | 'agent';
+    status: 'running' | 'done';
+    result?: string;
+}
+
 interface ChatMessage extends Message {
     isStreaming?: boolean;
+    toolCalls?: ToolCallEvent[];
 }
 
 export default function ChatPage() {
@@ -45,41 +53,53 @@ export default function ChatPage() {
     const workspace = useActiveWorkspace();
     const agentId = params.id as string;
 
+    const [agents, setAgents] = useState<Agent[]>([]);
     const [agent, setAgent] = useState<Agent | null>(null);
     const [sessions, setSessions] = useState<Session[]>([]);
     const [activeSession, setActiveSession] = useState<Session | null>(null);
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [input, setInput] = useState('');
-    const [loadingAgent, setLoadingAgent] = useState(true);
+    const [agentSearch, setAgentSearch] = useState('');
+    const [loadingAgents, setLoadingAgents] = useState(true);
     const [loadingSessions, setLoadingSessions] = useState(true);
     const [loadingMessages, setLoadingMessages] = useState(false);
     const [sending, setSending] = useState(false);
+    const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set());
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    const toggleToolCall = (key: string) => {
+        setExpandedToolCalls((prev) => {
+            const next = new Set(prev);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+        });
+    };
 
     const scrollToBottom = useCallback(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, []);
 
-    // Fetch agent
+    // Fetch all agents
     useEffect(() => {
         if (!workspace) return;
-        const fetchAgent = async () => {
+        const fetch = async () => {
             try {
-                const agents = await getAgents(workspace.id);
-                const found = agents.find((a: Agent) => a.id === agentId);
-                setAgent(found || null);
+                const data = await getAgents(workspace.id);
+                setAgents(data);
+                setAgent(data.find((a: Agent) => a.id === agentId) || null);
             } catch {
-                toast.error('Failed to load agent');
+                toast.error('Failed to load agents');
             } finally {
-                setLoadingAgent(false);
+                setLoadingAgents(false);
             }
         };
-        fetchAgent();
+        fetch();
     }, [workspace, agentId]);
 
-    // Fetch sessions
+    // Fetch sessions for current agent
     const fetchSessions = useCallback(async () => {
         if (!workspace) return;
         try {
@@ -103,7 +123,7 @@ export default function ChatPage() {
             setMessages([]);
             return;
         }
-        const fetchMessages = async () => {
+        const fetch = async () => {
             try {
                 setLoadingMessages(true);
                 const data = await getMessages(workspace.id, activeSession.id);
@@ -114,10 +134,9 @@ export default function ChatPage() {
                 setLoadingMessages(false);
             }
         };
-        fetchMessages();
+        fetch();
     }, [workspace, activeSession]);
 
-    // Scroll to bottom on new messages
     useEffect(() => {
         scrollToBottom();
     }, [messages, scrollToBottom]);
@@ -125,11 +144,7 @@ export default function ChatPage() {
     const handleNewSession = async () => {
         if (!workspace) return;
         try {
-            const session = await createSession(
-                workspace.id,
-                agentId,
-                `Chat ${sessions.length + 1}`
-            );
+            const session = await createSession(workspace.id, agentId, `Chat ${sessions.length + 1}`);
             setSessions((prev) => [...prev, session]);
             setActiveSession(session);
         } catch {
@@ -137,19 +152,8 @@ export default function ChatPage() {
         }
     };
 
-    const handleDeleteSession = async (sessionId: string) => {
-        if (!workspace) return;
-        try {
-            await deleteSession(workspace.id, agentId, sessionId);
-            if (activeSession?.id === sessionId) {
-                setActiveSession(null);
-                setMessages([]);
-            }
-            setSessions((prev) => prev.filter((s) => s.id !== sessionId));
-            toast.success('Session deleted');
-        } catch {
-            toast.error('Failed to delete session');
-        }
+    const handleAgentSwitch = (id: string) => {
+        router.push(`/agents/${id}/chat`);
     };
 
     const sendMessage = async () => {
@@ -159,7 +163,6 @@ export default function ChatPage() {
         setInput('');
         setSending(true);
 
-        // Optimistically add user message
         const userMsg: ChatMessage = {
             id: `temp-user-${Date.now()}`,
             sessionId: activeSession.id,
@@ -169,7 +172,6 @@ export default function ChatPage() {
             createdAt: new Date().toISOString(),
         };
 
-        // Add empty assistant message with streaming
         const assistantMsg: ChatMessage = {
             id: `temp-assistant-${Date.now()}`,
             sessionId: activeSession.id,
@@ -184,18 +186,15 @@ export default function ChatPage() {
 
         try {
             const token = getToken();
-            const response = await fetch(
-                `${API_URL}/api/sessions/${activeSession.id}/chat`,
-                {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        Authorization: `Bearer ${token}`,
-                        'x-workspace-id': workspace.id,
-                    },
-                    body: JSON.stringify({ message: content }),
-                }
-            );
+            const response = await fetch(`${API_URL}/api/sessions/${activeSession.id}/chat`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                    'x-workspace-id': workspace.id,
+                },
+                body: JSON.stringify({ message: content }),
+            });
 
             if (!response.ok) throw new Error('Failed to send message');
             if (!response.body) throw new Error('No response body');
@@ -215,12 +214,9 @@ export default function ChatPage() {
                     if (line.startsWith('data: ')) {
                         const data = line.slice(6);
                         if (data === '[DONE]') {
-                            // Mark complete
                             setMessages((prev) =>
                                 prev.map((m) =>
-                                    m.id === assistantMsg.id
-                                        ? { ...m, content: fullContent, isStreaming: false }
-                                        : m
+                                    m.id === assistantMsg.id ? { ...m, content: fullContent, isStreaming: false } : m
                                 )
                             );
                             continue;
@@ -231,15 +227,29 @@ export default function ChatPage() {
                                 fullContent += parsed.content;
                                 setMessages((prev) =>
                                     prev.map((m) =>
-                                        m.id === assistantMsg.id
-                                            ? { ...m, content: fullContent }
-                                            : m
+                                        m.id === assistantMsg.id ? { ...m, content: fullContent } : m
                                     )
                                 );
                             }
-                            if (parsed.error) {
-                                toast.error(parsed.error);
+                            if (parsed.toolCall) {
+                                const tc = parsed.toolCall as ToolCallEvent;
+                                setMessages((prev) =>
+                                    prev.map((m) => {
+                                        if (m.id !== assistantMsg.id) return m;
+                                        const existing = m.toolCalls || [];
+                                        if (tc.status === 'running') {
+                                            return { ...m, toolCalls: [...existing, tc] };
+                                        }
+                                        return {
+                                            ...m,
+                                            toolCalls: existing.map((et) =>
+                                                et.id === tc.id ? { ...et, status: tc.status, result: tc.result, name: tc.name } : et
+                                            ),
+                                        };
+                                    })
+                                );
                             }
+                            if (parsed.error) toast.error(parsed.error);
                         } catch {
                             // Ignore parse errors
                         }
@@ -248,7 +258,6 @@ export default function ChatPage() {
             }
         } catch {
             toast.error('Failed to send message');
-            // Remove the streaming message on error
             setMessages((prev) => prev.filter((m) => m.id !== assistantMsg.id));
         } finally {
             setSending(false);
@@ -262,7 +271,6 @@ export default function ChatPage() {
         }
     };
 
-    // Auto-resize textarea
     useEffect(() => {
         if (textareaRef.current) {
             textareaRef.current.style.height = 'auto';
@@ -270,7 +278,11 @@ export default function ChatPage() {
         }
     }, [input]);
 
-    if (loadingAgent) {
+    const filteredAgents = agentSearch
+        ? agents.filter((a) => a.name.toLowerCase().includes(agentSearch.toLowerCase()))
+        : agents;
+
+    if (loadingAgents) {
         return (
             <div className="flex h-[calc(100vh-120px)] items-center justify-center">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -280,220 +292,252 @@ export default function ChatPage() {
 
     return (
         <div className="flex h-[calc(100vh-120px)] -m-6 -mt-6">
-            {/* Session sidebar */}
-            <div className="w-[260px] flex-shrink-0 border-r border-border/60 bg-card flex flex-col">
-                {/* Sidebar header */}
-                <div className="p-4 border-b border-border/60">
-                    <div className="flex items-center gap-2 mb-3">
+            {/* Left — Agent list */}
+            <div className="w-[220px] flex-shrink-0 border-r border-border bg-card flex flex-col">
+                <div className="p-3 border-b border-border">
+                    <div className="flex items-center justify-between mb-2">
+                        <h2 className="text-sm font-semibold">Agents</h2>
                         <Button
-                            variant="ghost"
                             size="icon"
-                            className="h-7 w-7"
+                            variant="ghost"
+                            className="h-6 w-6"
                             onClick={() => router.push('/agents')}
-                            id="back-to-agents-btn"
                         >
-                            <ArrowLeft className="h-4 w-4" />
-                        </Button>
-                        <div className="flex items-center gap-2 min-w-0 flex-1">
-                            <Bot className="h-4 w-4 text-violet-600 flex-shrink-0" />
-                            <span className="text-sm font-semibold truncate">
-                                {agent?.name || 'Agent'}
-                            </span>
-                        </div>
-                    </div>
-                    <div className="flex gap-1.5 mb-2">
-                        <Button
-                            size="sm"
-                            variant="default"
-                            className="flex-1 gap-1 text-xs"
-                        >
-                            <MessageSquare className="h-3 w-3" />
-                            Chat
-                        </Button>
-                        <Button
-                            size="sm"
-                            variant="outline"
-                            className="flex-1 gap-1 text-xs"
-                            onClick={() => router.push(`/agents/${agentId}/permissions`)}
-                        >
-                            <Shield className="h-3 w-3" />
-                            Permissions
+                            <Plus className="h-3.5 w-3.5" />
                         </Button>
                     </div>
-                    <Button
-                        size="sm"
-                        variant="outline"
-                        className="w-full gap-1.5"
-                        onClick={handleNewSession}
-                        id="new-session-btn"
-                    >
-                        <Plus className="h-3.5 w-3.5" />
-                        New Session
-                    </Button>
+                    <div className="relative">
+                        <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                        <Input
+                            placeholder="Search agents..."
+                            value={agentSearch}
+                            onChange={(e) => setAgentSearch(e.target.value)}
+                            className="h-8 pl-7 text-xs"
+                        />
+                    </div>
                 </div>
 
-                {/* Session list */}
-                <div className="flex-1 overflow-y-auto p-2 space-y-1">
-                    {loadingSessions ? (
-                        Array.from({ length: 3 }).map((_, i) => (
-                            <div key={i} className="p-3">
-                                <Skeleton className="h-4 w-28" />
+                <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5">
+                    {filteredAgents.map((a) => (
+                        <button
+                            key={a.id}
+                            className={`w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                                a.id === agentId
+                                    ? 'bg-accent text-accent-foreground'
+                                    : 'hover:bg-muted text-muted-foreground hover:text-foreground'
+                            }`}
+                            onClick={() => handleAgentSwitch(a.id)}
+                        >
+                            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 flex-shrink-0">
+                                <Bot className="h-4 w-4 text-primary" />
                             </div>
-                        ))
-                    ) : sessions.length === 0 ? (
-                        <div className="flex flex-col items-center justify-center h-32 text-center px-4">
-                            <MessageSquare className="h-5 w-5 text-muted-foreground/50 mb-2" />
-                            <p className="text-xs text-muted-foreground">
-                                No sessions yet. Start a new one.
-                            </p>
-                        </div>
-                    ) : (
-                        sessions.map((session) => (
-                            <div
-                                key={session.id}
-                                className={`group flex items-center gap-2 rounded-lg px-3 py-2.5 cursor-pointer transition-all duration-150 hover:bg-accent ${activeSession?.id === session.id
-                                        ? 'bg-accent ring-1 ring-border'
-                                        : ''
-                                    }`}
-                                onClick={() => setActiveSession(session)}
-                                id={`session-item-${session.id}`}
-                            >
-                                <MessageSquare className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
-                                <span className="text-sm truncate flex-1">
-                                    {session.title}
-                                </span>
-                                <AlertDialog>
-                                    <AlertDialogTrigger asChild>
-                                        <button
-                                            className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
-                                            onClick={(e) => e.stopPropagation()}
-                                            id={`delete-session-${session.id}`}
-                                        >
-                                            <Trash2 className="h-3 w-3" />
-                                        </button>
-                                    </AlertDialogTrigger>
-                                    <AlertDialogContent>
-                                        <AlertDialogHeader>
-                                            <AlertDialogTitle>Delete Session</AlertDialogTitle>
-                                            <AlertDialogDescription>
-                                                Are you sure? This will delete all messages in this session.
-                                            </AlertDialogDescription>
-                                        </AlertDialogHeader>
-                                        <AlertDialogFooter>
-                                            <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                            <AlertDialogAction
-                                                onClick={() => handleDeleteSession(session.id)}
-                                                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                                            >
-                                                Delete
-                                            </AlertDialogAction>
-                                        </AlertDialogFooter>
-                                    </AlertDialogContent>
-                                </AlertDialog>
+                            <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium truncate">{a.name}</p>
+                                <p className="text-[11px] text-muted-foreground truncate">
+                                    {a.model.split('/').pop()}
+                                </p>
                             </div>
-                        ))
-                    )}
+                            {a.id === agentId && (
+                                <ChevronRight className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                            )}
+                        </button>
+                    ))}
                 </div>
             </div>
 
-            {/* Chat area */}
+            {/* Right — Chat area */}
             <div className="flex-1 flex flex-col bg-background">
+                {/* Chat header with agent info + session dropdown */}
+                <div className="h-14 border-b border-border px-4 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+                            <Bot className="h-4 w-4 text-primary" />
+                        </div>
+                        <div>
+                            <p className="text-sm font-semibold">{agent?.name || 'Agent'}</p>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                        {/* Session dropdown */}
+                        <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                                <Button variant="outline" size="sm" className="gap-2 text-xs h-8">
+                                    <Clock className="h-3.5 w-3.5" />
+                                    {activeSession ? (
+                                        <>
+                                            {activeSession.title}
+                                            <span className="text-muted-foreground">
+                                                {new Date(activeSession.createdAt).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}
+                                            </span>
+                                        </>
+                                    ) : (
+                                        'Select session'
+                                    )}
+                                    <ChevronDown className="h-3 w-3" />
+                                </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-[240px]">
+                                {loadingSessions ? (
+                                    <div className="p-2">
+                                        <Skeleton className="h-4 w-32" />
+                                    </div>
+                                ) : sessions.length === 0 ? (
+                                    <div className="p-3 text-center text-xs text-muted-foreground">
+                                        No sessions yet
+                                    </div>
+                                ) : (
+                                    sessions.map((s) => (
+                                        <DropdownMenuItem
+                                            key={s.id}
+                                            className={`text-xs ${activeSession?.id === s.id ? 'bg-accent' : ''}`}
+                                            onClick={() => setActiveSession(s)}
+                                        >
+                                            <span className="flex-1 truncate">{s.title}</span>
+                                            <span className="text-muted-foreground ml-2">
+                                                {new Date(s.createdAt).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}
+                                            </span>
+                                        </DropdownMenuItem>
+                                    ))
+                                )}
+                            </DropdownMenuContent>
+                        </DropdownMenu>
+
+                        <Button size="sm" variant="outline" className="gap-1.5 text-xs h-8" onClick={handleNewSession}>
+                            <Plus className="h-3.5 w-3.5" />
+                            New Chat
+                        </Button>
+                    </div>
+                </div>
+
+                {/* Messages area */}
                 {activeSession ? (
                     <>
-                        {/* Chat header */}
-                        <div className="h-14 border-b border-border/60 px-6 flex items-center">
-                            <h2 className="text-sm font-medium">{activeSession.title}</h2>
-                        </div>
+                        <div className="flex-1 overflow-y-auto">
+                            <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
+                                {loadingMessages ? (
+                                    <div className="space-y-6">
+                                        {Array.from({ length: 3 }).map((_, i) => (
+                                            <div key={i} className="space-y-2">
+                                                <Skeleton className="h-4 w-48" />
+                                                <Skeleton className="h-16 w-full rounded-lg" />
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : messages.length === 0 ? (
+                                    <div className="flex flex-col items-center justify-center h-full min-h-[400px] text-center gap-3">
+                                        <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center">
+                                            <Sparkles className="h-5 w-5 text-primary/60" />
+                                        </div>
+                                        <p className="text-sm text-muted-foreground">
+                                            Send a message to start chatting with {agent?.name || 'your agent'}.
+                                        </p>
+                                    </div>
+                                ) : (
+                                    messages.map((msg) => (
+                                        <Fragment key={msg.id}>
+                                            {/* Tool call indicators */}
+                                            {msg.toolCalls && msg.toolCalls.length > 0 && (
+                                                <div className="space-y-1.5">
+                                                    {msg.toolCalls.map((tc) => {
+                                                        const key = `${msg.id}-${tc.id}`;
+                                                        const isExpanded = expandedToolCalls.has(key);
+                                                        const isDone = tc.status === 'done';
+                                                        return (
+                                                            <div key={tc.id}>
+                                                                <button
+                                                                    className="w-full flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs hover:bg-accent/50 transition-colors"
+                                                                    onClick={() => isDone && toggleToolCall(key)}
+                                                                >
+                                                                    {isDone ? (
+                                                                        <CheckCircle2 className="h-3.5 w-3.5 text-primary flex-shrink-0" />
+                                                                    ) : (
+                                                                        <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin flex-shrink-0" />
+                                                                    )}
+                                                                    <span className="flex-1 text-left truncate text-muted-foreground">
+                                                                        {tc.name}
+                                                                        {tc.args && !isDone ? `: ${tc.args}` : ''}
+                                                                    </span>
+                                                                    {isDone && (
+                                                                        isExpanded
+                                                                            ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                                                                            : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                                                                    )}
+                                                                </button>
+                                                                {isDone && tc.result && isExpanded && (
+                                                                    <div className="mt-1 rounded-lg border border-border bg-muted/50 px-3 py-2 text-[11px] text-muted-foreground font-mono max-h-[160px] overflow-y-auto whitespace-pre-wrap">
+                                                                        {tc.result}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
 
-                        {/* Messages */}
-                        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-                            {loadingMessages ? (
-                                <div className="space-y-4">
-                                    {Array.from({ length: 3 }).map((_, i) => (
-                                        <div key={i} className={`flex gap-3 ${i % 2 === 0 ? 'justify-end' : ''}`}>
-                                            <div className={`max-w-[70%] ${i % 2 === 0 ? 'order-2' : ''}`}>
-                                                <Skeleton className="h-12 w-64 rounded-2xl" />
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            ) : messages.length === 0 ? (
-                                <div className="flex flex-col items-center justify-center h-full text-center gap-3">
-                                    <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-violet-500/10 to-blue-500/10 flex items-center justify-center">
-                                        <Sparkles className="h-6 w-6 text-violet-500/60" />
-                                    </div>
-                                    <div>
-                                        <p className="text-sm font-medium text-muted-foreground">
-                                            Start the conversation
-                                        </p>
-                                        <p className="text-xs text-muted-foreground/70 mt-1">
-                                            Send a message to begin chatting with your agent.
-                                        </p>
-                                    </div>
-                                </div>
-                            ) : (
-                                messages.map((msg) => (
-                                    <div
-                                        key={msg.id}
-                                        className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'
-                                            }`}
-                                    >
-                                        {msg.role !== 'user' && (
-                                            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-violet-500/20 to-blue-500/20 flex-shrink-0 mt-1">
-                                                <Bot className="h-4 w-4 text-violet-600" />
-                                            </div>
-                                        )}
-                                        <div
-                                            className={`max-w-[70%] rounded-2xl px-4 py-3 ${msg.role === 'user'
-                                                    ? 'bg-gradient-to-r from-violet-600 to-blue-600 text-white'
-                                                    : 'bg-muted/70 border border-border/40'
-                                                }`}
-                                        >
-                                            <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-                                                {msg.content}
-                                                {msg.isStreaming && (
-                                                    <span className="inline-block w-2 h-4 ml-0.5 bg-current animate-pulse rounded-sm" />
-                                                )}
-                                            </p>
-                                        </div>
-                                        {msg.role === 'user' && (
-                                            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary flex-shrink-0 mt-1">
-                                                <User className="h-4 w-4 text-primary-foreground" />
-                                            </div>
-                                        )}
-                                    </div>
-                                ))
-                            )}
-                            <div ref={messagesEndRef} />
+                                            {/* Message */}
+                                            {(msg.content || msg.isStreaming || msg.role === 'user') && (
+                                                <div className={msg.role === 'user' ? 'flex justify-end' : ''}>
+                                                    {msg.role === 'user' ? (
+                                                        <div className="bg-primary text-primary-foreground rounded-2xl rounded-br-sm px-4 py-2.5 max-w-[80%]">
+                                                            <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                                                                {msg.content}
+                                                            </p>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="flex gap-3">
+                                                            <div className="flex h-7 w-7 items-center justify-center rounded-full bg-muted flex-shrink-0 mt-0.5">
+                                                                <Bot className="h-3.5 w-3.5 text-muted-foreground" />
+                                                            </div>
+                                                            <div className="flex-1 min-w-0">
+                                                                <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5">
+                                                                    <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                                                                        {msg.content}
+                                                                        {msg.isStreaming && !msg.content && (
+                                                                            <span className="inline-flex gap-1">
+                                                                                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '0ms' }} />
+                                                                                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '150ms' }} />
+                                                                                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '300ms' }} />
+                                                                            </span>
+                                                                        )}
+                                                                    </p>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </Fragment>
+                                    ))
+                                )}
+                                <div ref={messagesEndRef} />
+                            </div>
                         </div>
 
                         {/* Input bar */}
-                        <div className="border-t border-border/60 p-4">
-                            <div className="flex items-end gap-3 max-w-4xl mx-auto">
-                                <div className="flex-1 relative">
-                                    <textarea
-                                        ref={textareaRef}
-                                        value={input}
-                                        onChange={(e) => setInput(e.target.value)}
-                                        onKeyDown={handleKeyDown}
-                                        placeholder="Type a message... (Enter to send, Shift+Enter for new line)"
-                                        className="w-full resize-none rounded-xl border border-border/60 bg-muted/30 px-4 py-3 pr-12 text-sm focus:outline-none focus:ring-2 focus:ring-ring/50 min-h-[48px] max-h-[160px] transition-colors"
-                                        rows={1}
-                                        disabled={sending}
-                                        id="chat-input"
-                                    />
-                                </div>
+                        <div className="border-t border-border p-4">
+                            <div className="max-w-3xl mx-auto relative">
+                                <textarea
+                                    ref={textareaRef}
+                                    value={input}
+                                    onChange={(e) => setInput(e.target.value)}
+                                    onKeyDown={handleKeyDown}
+                                    placeholder="Ask your agent..."
+                                    className="w-full resize-none rounded-xl border border-border bg-card px-4 py-3 pr-12 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring min-h-[48px] max-h-[160px] transition-colors"
+                                    rows={1}
+                                    disabled={sending}
+                                />
                                 <Button
                                     onClick={sendMessage}
                                     disabled={!input.trim() || sending}
                                     size="icon"
-                                    className="h-12 w-12 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-700 hover:to-blue-700 flex-shrink-0"
-                                    id="send-message-btn"
+                                    variant="ghost"
+                                    className="absolute right-2 bottom-2 h-8 w-8 rounded-lg"
                                 >
                                     {sending ? (
                                         <Loader2 className="h-4 w-4 animate-spin" />
                                     ) : (
-                                        <Send className="h-4 w-4" />
+                                        <ArrowUp className="h-4 w-4" />
                                     )}
                                 </Button>
                             </div>
@@ -501,24 +545,20 @@ export default function ChatPage() {
                     </>
                 ) : (
                     <div className="flex-1 flex flex-col items-center justify-center text-center gap-4">
-                        <div className="h-16 w-16 rounded-2xl bg-gradient-to-br from-violet-500/10 to-blue-500/10 flex items-center justify-center">
-                            <MessageSquare className="h-7 w-7 text-muted-foreground/40" />
+                        <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center">
+                            <Sparkles className="h-6 w-6 text-muted-foreground/40" />
                         </div>
                         <div>
-                            <p className="text-lg font-medium text-muted-foreground">
-                                Select a session
+                            <p className="text-base font-medium text-muted-foreground">
+                                Start a conversation
                             </p>
                             <p className="text-sm text-muted-foreground/70 mt-1">
-                                Choose a session or create a new one to start chatting.
+                                Select a session from the dropdown or create a new one.
                             </p>
                         </div>
-                        <Button
-                            variant="outline"
-                            onClick={handleNewSession}
-                            className="gap-1.5 mt-2"
-                        >
+                        <Button variant="outline" onClick={handleNewSession} className="gap-1.5 mt-2">
                             <Plus className="h-4 w-4" />
-                            New Session
+                            New Chat
                         </Button>
                     </div>
                 )}

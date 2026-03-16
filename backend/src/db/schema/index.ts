@@ -18,3 +18,5 @@ export { schedules, scheduleTargetTypeEnum } from "./schedules.ts";
 export { credits } from "./credits.ts";
 export { creditLogs } from "./creditLogs.ts";
 export { inputChannels, channelTypeEnum } from "./inputChannels.ts";
+export { integrations, integrationStatusEnum } from "./integrations.ts";
+export { agentIntegrations } from "./agentIntegrations.ts";

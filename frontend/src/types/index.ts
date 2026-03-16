@@ -64,7 +64,7 @@ export interface AgentPermission {
     id: string;
     workspaceId: string;
     agentId: string;
-    resourceType: 'tool' | 'kb' | 'skill';
+    resourceType: 'tool' | 'kb' | 'skill' | 'agent';
     resourceId: string;
     allowed: boolean;
     createdAt: string;
@@ -127,6 +127,26 @@ export interface WorkflowStep {
     taskId: string;
     order: number;
     createdAt: string;
+}
+
+export interface Integration {
+    id: string;
+    workspaceId: string;
+    composioToolkitSlug: string;
+    composioConnectionId: string;
+    name: string;
+    status: 'active' | 'inactive' | 'pending' | 'failed';
+    metadata: Record<string, unknown>;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface Toolkit {
+    slug: string;
+    name: string;
+    description: string;
+    logo: string;
+    isConnected: boolean;
 }
 
 export interface Schedule {

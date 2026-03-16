@@ -11,6 +11,9 @@ import { permissionRepository } from "../repositories/permission.repository.ts";
 import { toolRepository } from "../repositories/tool.repository.ts";
 import { skillRepository } from "../repositories/skill.repository.ts";
 import { kbService } from "../services/kb.service.ts";
+import { buildAgentCallerTool } from "../lib/agent-tool.ts";
+import { integrationRepository } from "../repositories/integration.repository.ts";
+import { getComposioClient } from "../lib/composio.ts";
 import { logger } from "../lib/logger.ts";
 import { HumanMessage } from "@langchain/core/messages";
 
@@ -196,6 +199,70 @@ export async function createAgentGraph(
         }
     }
 
+    // --- Collect agent-as-tool (agent delegation) ---
+    const allowedAgentIds = await permissionRepository.getAllowedResourceIds(
+        agentId,
+        workspaceId,
+        "agent"
+    );
+
+    // Filter out self-calling
+    const delegateAgentIds = allowedAgentIds.filter((id) => id !== agentId);
+
+    for (const targetAgentId of delegateAgentIds) {
+        try {
+            const agentTool = await buildAgentCallerTool(
+                agentId,
+                targetAgentId,
+                workspaceId
+            );
+            if (agentTool) {
+                langchainTools.push(agentTool);
+            }
+        } catch (error) {
+            logger.warn(
+                { error, targetAgentId },
+                "Failed to build agent caller tool, skipping"
+            );
+        }
+    }
+
+    // --- Collect Composio integration tools ---
+    let composioToolCount = 0;
+    try {
+        const agentIntegrations = await integrationRepository.findByAgent(
+            agentId,
+            workspaceId
+        );
+        const activeIntegrations = agentIntegrations.filter(
+            (i) => i.status === "active"
+        );
+
+        if (activeIntegrations.length > 0) {
+            const composio = getComposioClient();
+            const toolkitSlugs = activeIntegrations.map(
+                (i) => i.composioToolkitSlug
+            );
+
+            const session = await composio.create(workspaceId, {
+                toolkits: toolkitSlugs,
+            });
+            const composioTools = await session.tools();
+
+            if (Array.isArray(composioTools)) {
+                for (const tool of composioTools) {
+                    langchainTools.push(tool as unknown as DynamicStructuredTool);
+                }
+                composioToolCount = composioTools.length;
+            }
+        }
+    } catch (error) {
+        logger.warn(
+            { error, agentId },
+            "Failed to load Composio tools, proceeding without them"
+        );
+    }
+
     // --- Collect KB IDs for RAG ---
     const allowedKbIds = await permissionRepository.getAllowedResourceIds(
         agentId,
@@ -218,10 +285,12 @@ export async function createAgentGraph(
         {
             agentId,
             toolCount: langchainTools.length,
+            delegateAgents: delegateAgentIds.length,
+            composioTools: composioToolCount,
             kbCount: allowedKbIds.length,
             skillCount: permittedSkills.length,
         },
-        "Agent graph created with tools, KBs, and skills"
+        "Agent graph created"
     );
 
     // Bind tools to LLM if any exist

@@ -193,7 +193,7 @@ export function CreateAgentSheet({
                             : 'Configure a new AI agent for your workspace.'}
                     </SheetDescription>
                 </SheetHeader>
-
+                {/* <SheetContent> */}
                 <form onSubmit={handleSubmit(onSubmit)} className="space-y-6 mt-6 px-1">
                     {/* Name */}
                     <div className="space-y-2">

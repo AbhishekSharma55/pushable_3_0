@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { HumanMessage } from "@langchain/core/messages";
+import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
 import { sessionService } from "../services/session.service.ts";
 import { messageRepository } from "../repositories/message.repository.ts";
 import { createAgentGraph } from "../graphs/agent.graph.ts";
@@ -82,9 +82,67 @@ export async function chatRoutes(fastify: FastifyInstance) {
             );
 
             for await (const [message] of stream) {
-                // Only stream AI message content chunks
+                if (!message) continue;
+
+                // Detect AI tool_calls → emit toolCall event for each
                 if (
-                    message &&
+                    message instanceof AIMessage &&
+                    message.tool_calls &&
+                    message.tool_calls.length > 0
+                ) {
+                    for (const tc of message.tool_calls) {
+                        const isAgent = tc.name.startsWith("agent_");
+                        const displayName = isAgent
+                            ? `Delegating to ${tc.name.replace(/^agent_/, "").replace(/_/g, " ")}`
+                            : tc.name;
+                        const argsPreview = tc.args
+                            ? Object.entries(tc.args)
+                                .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
+                                .join(", ")
+                                .slice(0, 150)
+                            : "";
+
+                        reply.raw.write(
+                            `data: ${JSON.stringify({
+                                toolCall: {
+                                    id: tc.id,
+                                    name: displayName,
+                                    args: argsPreview,
+                                    type: isAgent ? "agent" : "tool",
+                                    status: "running",
+                                },
+                            })}\n\n`
+                        );
+                    }
+                    continue; // Don't stream the AI message that contains tool_calls
+                }
+
+                // Detect tool responses → emit toolResult event
+                if (message instanceof ToolMessage) {
+                    const isAgent = message.name?.startsWith("agent_");
+                    const displayName = isAgent
+                        ? `Delegated to ${(message.name || "").replace(/^agent_/, "").replace(/_/g, " ")}`
+                        : message.name || "tool";
+                    const resultText = typeof message.content === "string"
+                        ? message.content.slice(0, 300)
+                        : "";
+
+                    reply.raw.write(
+                        `data: ${JSON.stringify({
+                            toolCall: {
+                                id: message.tool_call_id,
+                                name: displayName,
+                                type: isAgent ? "agent" : "tool",
+                                status: "done",
+                                result: resultText,
+                            },
+                        })}\n\n`
+                    );
+                    continue;
+                }
+
+                // Stream AI message content chunks
+                if (
                     "content" in message &&
                     typeof message.content === "string" &&
                     message.content

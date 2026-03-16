@@ -12,6 +12,7 @@ export const resourceTypeEnum = pgEnum("resource_type", [
     "tool",
     "kb",
     "skill",
+    "agent",
 ]);
 
 export const agentPermissions = pgTable("agent_permissions", {

@@ -93,9 +93,8 @@ export function Sidebar() {
     );
 
     const switchWorkspace = (ws: Workspace) => {
-        setActiveWorkspace(ws);
         localStorage.setItem(ACTIVE_WORKSPACE_KEY, JSON.stringify(ws));
-        router.refresh();
+        window.location.href = '/';
     };
 
     const handleCreateWorkspace = async () => {

@@ -6,7 +6,7 @@ import { AppError, UnauthorizedError } from "../lib/errors.ts";
 const setPermissionsSchema = z.object({
     permissions: z.array(
         z.object({
-            resourceType: z.enum(["tool", "kb", "skill"]),
+            resourceType: z.enum(["tool", "kb", "skill", "agent"]),
             resourceId: z.string().uuid(),
             allowed: z.boolean(),
         })

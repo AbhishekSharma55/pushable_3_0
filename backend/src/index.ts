@@ -18,6 +18,7 @@ import { skillRoutes } from "./routes/skills.ts";
 import { taskRoutes } from "./routes/tasks.ts";
 import { workflowRoutes } from "./routes/workflows.ts";
 import { scheduleRoutes } from "./routes/schedules.ts";
+import { integrationRoutes } from "./routes/integrations.ts";
 import { startWorkers, stopWorkers } from "./lib/workers.ts";
 import { initScheduler } from "./lib/scheduler.ts";
 import { taskQueue, workflowQueue } from "./lib/queue.ts";
@@ -77,6 +78,7 @@ await app.register(skillRoutes, { prefix: "/api" });
 await app.register(taskRoutes, { prefix: "/api" });
 await app.register(workflowRoutes, { prefix: "/api" });
 await app.register(scheduleRoutes, { prefix: "/api" });
+await app.register(integrationRoutes, { prefix: "/api" });
 
 const port = Number(process.env.PORT) || 4000;
 await app.listen({ port, host: "0.0.0.0" });

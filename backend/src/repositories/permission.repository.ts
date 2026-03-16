@@ -6,7 +6,7 @@ export const permissionRepository = {
     async setPermission(data: {
         agentId: string;
         workspaceId: string;
-        resourceType: "tool" | "kb" | "skill";
+        resourceType: "tool" | "kb" | "skill" | "agent";
         resourceId: string;
         allowed: boolean;
     }) {
@@ -54,7 +54,7 @@ export const permissionRepository = {
     async getPermissionsByType(
         agentId: string,
         workspaceId: string,
-        resourceType: "tool" | "kb" | "skill"
+        resourceType: "tool" | "kb" | "skill" | "agent"
     ) {
         return db
             .select()
@@ -71,7 +71,7 @@ export const permissionRepository = {
     async getAllowedResourceIds(
         agentId: string,
         workspaceId: string,
-        resourceType: "tool" | "kb" | "skill"
+        resourceType: "tool" | "kb" | "skill" | "agent"
     ): Promise<string[]> {
         const permissions = await db
             .select()
@@ -90,7 +90,7 @@ export const permissionRepository = {
     async deletePermission(
         agentId: string,
         resourceId: string,
-        resourceType: "tool" | "kb" | "skill"
+        resourceType: "tool" | "kb" | "skill" | "agent"
     ) {
         await db
             .delete(agentPermissions)

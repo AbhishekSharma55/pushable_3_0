@@ -1,19 +1,30 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef, Fragment } from 'react';
 import { useRouter } from 'next/navigation';
 import {
     Bot,
     Plus,
     Trash2,
-    MessageSquare,
     Pencil,
+    Sparkles,
+    Send,
+    Search,
+    Loader2,
+    MessageSquare,
+    Settings,
+    ChevronDown,
+    ChevronRight,
+    CheckCircle2,
+    Clock,
+    ArrowUp,
+    Shield,
     Cpu,
     Thermometer,
-    Sparkles,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -27,20 +38,76 @@ import {
     AlertDialogTitle,
     AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { CreateAgentSheet } from '@/components/agents/create-agent-sheet';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
 import { getAgents, deleteAgent } from '@/lib/api/agents';
-import type { Agent } from '@/types';
+import { getSessions, createSession, getMessages } from '@/lib/api/sessions';
+import { API_URL } from '@/lib/constants';
+import { getToken } from '@/lib/auth';
+import type { Agent, Session, Message } from '@/types';
+
+interface ToolCallEvent {
+    id: string;
+    name: string;
+    args?: string;
+    type: 'tool' | 'agent';
+    status: 'running' | 'done';
+    result?: string;
+}
+
+interface ChatMessage extends Message {
+    isStreaming?: boolean;
+    toolCalls?: ToolCallEvent[];
+}
+
+type ViewMode = 'chat' | 'settings';
 
 export default function AgentsPage() {
     const workspace = useActiveWorkspace();
     const router = useRouter();
+
+    // Agent list state
     const [agents, setAgents] = useState<Agent[]>([]);
     const [loading, setLoading] = useState(true);
     const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
     const [sheetOpen, setSheetOpen] = useState(false);
     const [editAgent, setEditAgent] = useState<Agent | null>(null);
+    const [agentSearch, setAgentSearch] = useState('');
+    const [viewMode, setViewMode] = useState<ViewMode>('chat');
 
+    // Chat state
+    const [sessions, setSessions] = useState<Session[]>([]);
+    const [activeSession, setActiveSession] = useState<Session | null>(null);
+    const [messages, setMessages] = useState<ChatMessage[]>([]);
+    const [chatInput, setChatInput] = useState('');
+    const [loadingSessions, setLoadingSessions] = useState(false);
+    const [loadingMessages, setLoadingMessages] = useState(false);
+    const [sending, setSending] = useState(false);
+    const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set());
+
+    const messagesEndRef = useRef<HTMLDivElement>(null);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    const toggleToolCall = (key: string) => {
+        setExpandedToolCalls((prev) => {
+            const next = new Set(prev);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+        });
+    };
+
+    const scrollToBottom = useCallback(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, []);
+
+    // Fetch agents
     const fetchAgents = useCallback(async () => {
         if (!workspace) return;
         try {
@@ -54,9 +121,61 @@ export default function AgentsPage() {
         }
     }, [workspace]);
 
+    useEffect(() => { fetchAgents(); }, [fetchAgents]);
+
+    // Fetch sessions when agent changes
     useEffect(() => {
-        fetchAgents();
-    }, [fetchAgents]);
+        if (!workspace || !selectedAgent) {
+            setSessions([]);
+            setActiveSession(null);
+            setMessages([]);
+            return;
+        }
+        const fetch = async () => {
+            try {
+                setLoadingSessions(true);
+                const data = await getSessions(workspace.id, selectedAgent.id);
+                setSessions(data);
+                setActiveSession(null);
+                setMessages([]);
+            } catch {
+                toast.error('Failed to load sessions');
+            } finally {
+                setLoadingSessions(false);
+            }
+        };
+        fetch();
+    }, [workspace, selectedAgent]);
+
+    // Load messages when session changes
+    useEffect(() => {
+        if (!workspace || !activeSession) {
+            setMessages([]);
+            return;
+        }
+        const fetch = async () => {
+            try {
+                setLoadingMessages(true);
+                const data = await getMessages(workspace.id, activeSession.id);
+                setMessages(data);
+            } catch {
+                toast.error('Failed to load messages');
+            } finally {
+                setLoadingMessages(false);
+            }
+        };
+        fetch();
+    }, [workspace, activeSession]);
+
+    useEffect(() => { scrollToBottom(); }, [messages, scrollToBottom]);
+
+    // Auto-resize textarea
+    useEffect(() => {
+        if (textareaRef.current) {
+            textareaRef.current.style.height = 'auto';
+            textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 160)}px`;
+        }
+    }, [chatInput]);
 
     const handleDelete = async (id: string) => {
         if (!workspace) return;
@@ -70,134 +189,160 @@ export default function AgentsPage() {
         }
     };
 
-    const handleEdit = (agent: Agent) => {
-        setEditAgent(agent);
-        setSheetOpen(true);
+    const handleSelectAgent = (agent: Agent) => {
+        setSelectedAgent(agent);
+        setViewMode('chat');
     };
 
-    const handleCreate = () => {
-        setEditAgent(null);
-        setSheetOpen(true);
+    const handleNewSession = async () => {
+        if (!workspace || !selectedAgent) return;
+        try {
+            const session = await createSession(workspace.id, selectedAgent.id, `Chat ${sessions.length + 1}`);
+            setSessions((prev) => [...prev, session]);
+            setActiveSession(session);
+        } catch {
+            toast.error('Failed to create session');
+        }
     };
 
-    const handleSheetSuccess = () => {
-        fetchAgents();
-        setSelectedAgent(null);
+    const sendMessage = async () => {
+        if (!chatInput.trim() || !workspace || !activeSession || sending) return;
+        const content = chatInput.trim();
+        setChatInput('');
+        setSending(true);
+
+        const userMsg: ChatMessage = {
+            id: `temp-user-${Date.now()}`, sessionId: activeSession.id,
+            role: 'user', content, tokenCount: 0, createdAt: new Date().toISOString(),
+        };
+        const assistantMsg: ChatMessage = {
+            id: `temp-assistant-${Date.now()}`, sessionId: activeSession.id,
+            role: 'assistant', content: '', tokenCount: 0, createdAt: new Date().toISOString(), isStreaming: true,
+        };
+        setMessages((prev) => [...prev, userMsg, assistantMsg]);
+
+        try {
+            const token = getToken();
+            const response = await fetch(`${API_URL}/api/sessions/${activeSession.id}/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
+                body: JSON.stringify({ message: content }),
+            });
+            if (!response.ok || !response.body) throw new Error('Failed');
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let fullContent = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                for (const line of decoder.decode(value, { stream: true }).split('\n')) {
+                    if (!line.startsWith('data: ')) continue;
+                    const data = line.slice(6);
+                    if (data === '[DONE]') {
+                        setMessages((prev) => prev.map((m) => m.id === assistantMsg.id ? { ...m, content: fullContent, isStreaming: false } : m));
+                        continue;
+                    }
+                    try {
+                        const parsed = JSON.parse(data);
+                        if (parsed.content) {
+                            fullContent += parsed.content;
+                            setMessages((prev) => prev.map((m) => m.id === assistantMsg.id ? { ...m, content: fullContent } : m));
+                        }
+                        if (parsed.toolCall) {
+                            const tc = parsed.toolCall as ToolCallEvent;
+                            setMessages((prev) => prev.map((m) => {
+                                if (m.id !== assistantMsg.id) return m;
+                                const existing = m.toolCalls || [];
+                                if (tc.status === 'running') return { ...m, toolCalls: [...existing, tc] };
+                                return { ...m, toolCalls: existing.map((et) => et.id === tc.id ? { ...et, status: tc.status, result: tc.result, name: tc.name } : et) };
+                            }));
+                        }
+                        if (parsed.error) toast.error(parsed.error);
+                    } catch { /* ignore */ }
+                }
+            }
+        } catch {
+            toast.error('Failed to send message');
+            setMessages((prev) => prev.filter((m) => m.id !== assistantMsg.id));
+        } finally {
+            setSending(false);
+        }
     };
 
-    const modelColor = (model: string) => {
-        if (model.includes('gpt-4o-mini')) return 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20';
-        if (model.includes('gpt-4o')) return 'bg-blue-500/10 text-blue-600 border-blue-500/20';
-        if (model.includes('gpt-4')) return 'bg-violet-500/10 text-violet-600 border-violet-500/20';
-        if (model.includes('claude')) return 'bg-amber-500/10 text-amber-600 border-amber-500/20';
-        return 'bg-muted text-muted-foreground';
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
     };
+
+    const filteredAgents = agentSearch
+        ? agents.filter((a) => a.name.toLowerCase().includes(agentSearch.toLowerCase()))
+        : agents;
 
     return (
         <div className="space-y-6">
             {/* Header */}
             <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500/20 to-blue-500/20">
-                    <Bot className="h-5 w-5 text-violet-600" />
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
+                    <Bot className="h-5 w-5 text-primary" />
                 </div>
                 <div>
                     <h1 className="text-2xl font-bold tracking-tight">Agents</h1>
-                    <p className="text-sm text-muted-foreground">
-                        Create and manage your AI employees
-                    </p>
+                    <p className="text-sm text-muted-foreground">Create and manage your AI employees</p>
                 </div>
             </div>
 
             {/* Two-column layout */}
-            <div className="flex gap-6 h-[calc(100vh-200px)]">
-                {/* Left panel — Agent list */}
-                <div className="w-[320px] flex-shrink-0 flex flex-col rounded-xl border border-border/60 bg-card overflow-hidden">
-                    <div className="p-4 border-b border-border/60 flex items-center justify-between">
-                        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
-                            Agents
-                        </h2>
-                        <Button
-                            size="sm"
-                            onClick={handleCreate}
-                            className="gap-1.5"
-                            id="create-agent-btn"
-                        >
-                            <Plus className="h-3.5 w-3.5" />
+            <div className="flex gap-0 h-[calc(100vh-200px)] rounded-xl border border-border overflow-hidden">
+                {/* Left — Agent list */}
+                <div className="w-[280px] flex-shrink-0 border-r border-border bg-card flex flex-col">
+                    <div className="p-3 border-b border-border flex items-center justify-between">
+                        <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Agents</h2>
+                        <Button size="sm" onClick={() => { setEditAgent(null); setSheetOpen(true); }} className="gap-1.5 h-7 text-xs">
+                            <Plus className="h-3 w-3" />
                             New Agent
                         </Button>
                     </div>
-
-                    <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                    <div className="px-3 pt-2 pb-1">
+                        <div className="relative">
+                            <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                            <Input placeholder="Search agents..." value={agentSearch} onChange={(e) => setAgentSearch(e.target.value)} className="h-8 pl-7 text-xs" />
+                        </div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5">
                         {loading ? (
                             Array.from({ length: 4 }).map((_, i) => (
-                                <div key={i} className="p-3 space-y-2">
-                                    <Skeleton className="h-4 w-32" />
-                                    <Skeleton className="h-3 w-20" />
-                                </div>
+                                <div key={i} className="p-2.5 space-y-2"><Skeleton className="h-4 w-32" /><Skeleton className="h-3 w-20" /></div>
                             ))
-                        ) : agents.length === 0 ? (
-                            <div className="flex flex-col items-center justify-center h-full text-center px-4 gap-3">
-                                <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center">
-                                    <Sparkles className="h-5 w-5 text-muted-foreground" />
-                                </div>
-                                <div>
-                                    <p className="text-sm font-medium">No agents yet</p>
-                                    <p className="text-xs text-muted-foreground mt-1">
-                                        Create your first agent to get started.
-                                    </p>
-                                </div>
+                        ) : filteredAgents.length === 0 ? (
+                            <div className="flex flex-col items-center justify-center h-full text-center px-4 gap-2">
+                                <Sparkles className="h-5 w-5 text-muted-foreground/50" />
+                                <p className="text-xs text-muted-foreground">No agents yet</p>
                             </div>
                         ) : (
-                            agents.map((agent) => (
+                            filteredAgents.map((agent) => (
                                 <div
                                     key={agent.id}
-                                    className={`group relative flex items-center gap-3 rounded-lg px-3 py-3 cursor-pointer transition-all duration-150 hover:bg-accent ${selectedAgent?.id === agent.id
-                                            ? 'bg-accent ring-1 ring-border'
-                                            : ''
-                                        }`}
-                                    onClick={() => setSelectedAgent(agent)}
-                                    id={`agent-item-${agent.id}`}
+                                    className={`group relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 cursor-pointer transition-colors ${
+                                        selectedAgent?.id === agent.id ? 'bg-accent text-accent-foreground' : 'hover:bg-muted'
+                                    }`}
+                                    onClick={() => handleSelectAgent(agent)}
                                 >
-                                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500/15 to-blue-500/15 flex-shrink-0">
-                                        <Bot className="h-4 w-4 text-violet-600" />
+                                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 flex-shrink-0">
+                                        <Bot className="h-4 w-4 text-primary" />
                                     </div>
                                     <div className="flex-1 min-w-0">
-                                        <p className="text-sm font-medium truncate">
-                                            {agent.name}
-                                        </p>
-                                        <Badge
-                                            variant="outline"
-                                            className={`text-[10px] px-1.5 py-0 mt-1 ${modelColor(agent.model)}`}
-                                        >
-                                            {agent.model}
-                                        </Badge>
+                                        <p className="text-sm font-medium truncate">{agent.name}</p>
+                                        <p className="text-[11px] text-muted-foreground truncate">{agent.model.split('/').pop()}</p>
                                     </div>
                                     <AlertDialog>
                                         <AlertDialogTrigger asChild>
-                                            <button
-                                                className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
-                                                onClick={(e) => e.stopPropagation()}
-                                                id={`delete-agent-${agent.id}`}
-                                            >
-                                                <Trash2 className="h-3.5 w-3.5" />
+                                            <button className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive" onClick={(e) => e.stopPropagation()}>
+                                                <Trash2 className="h-3 w-3" />
                                             </button>
                                         </AlertDialogTrigger>
                                         <AlertDialogContent>
-                                            <AlertDialogHeader>
-                                                <AlertDialogTitle>Delete Agent</AlertDialogTitle>
-                                                <AlertDialogDescription>
-                                                    Are you sure you want to delete &quot;{agent.name}&quot;? This action cannot be undone.
-                                                </AlertDialogDescription>
-                                            </AlertDialogHeader>
-                                            <AlertDialogFooter>
-                                                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                                <AlertDialogAction
-                                                    onClick={() => handleDelete(agent.id)}
-                                                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                                                >
-                                                    Delete
-                                                </AlertDialogAction>
-                                            </AlertDialogFooter>
+                                            <AlertDialogHeader><AlertDialogTitle>Delete Agent</AlertDialogTitle><AlertDialogDescription>Delete &quot;{agent.name}&quot;? This cannot be undone.</AlertDialogDescription></AlertDialogHeader>
+                                            <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => handleDelete(agent.id)} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">Delete</AlertDialogAction></AlertDialogFooter>
                                         </AlertDialogContent>
                                     </AlertDialog>
                                 </div>
@@ -206,131 +351,215 @@ export default function AgentsPage() {
                     </div>
                 </div>
 
-                {/* Right panel — Agent detail */}
-                <div className="flex-1 rounded-xl border border-border/60 bg-card overflow-hidden">
+                {/* Right — Content area */}
+                <div className="flex-1 flex flex-col bg-background">
                     {selectedAgent ? (
-                        <div className="h-full flex flex-col">
-                            {/* Agent header */}
-                            <div className="p-6 border-b border-border/60">
-                                <div className="flex items-start justify-between">
-                                    <div className="flex items-center gap-4">
-                                        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500/20 to-blue-500/20">
-                                            <Bot className="h-7 w-7 text-violet-600" />
-                                        </div>
-                                        <div>
-                                            <h2 className="text-xl font-semibold">{selectedAgent.name}</h2>
-                                            <div className="flex items-center gap-3 mt-1.5">
-                                                <Badge
-                                                    variant="outline"
-                                                    className={`text-xs ${modelColor(selectedAgent.model)}`}
-                                                >
-                                                    <Cpu className="h-3 w-3 mr-1" />
-                                                    {selectedAgent.model}
-                                                </Badge>
-                                                <Badge variant="outline" className="text-xs bg-muted/50">
-                                                    <Thermometer className="h-3 w-3 mr-1" />
-                                                    {selectedAgent.temperature}
-                                                </Badge>
+                        <>
+                            {/* Top bar with agent name + toggle + actions */}
+                            <div className="h-14 border-b border-border px-4 flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+                                        <Bot className="h-4 w-4 text-primary" />
+                                    </div>
+                                    <p className="text-sm font-semibold">{selectedAgent.name}</p>
+
+                                    {/* View toggle */}
+                                    <div className="flex items-center bg-muted rounded-lg p-0.5 ml-2">
+                                        <button
+                                            className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                                                viewMode === 'chat' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                                            }`}
+                                            onClick={() => setViewMode('chat')}
+                                        >
+                                            <MessageSquare className="h-3 w-3" />
+                                            Chat
+                                        </button>
+                                        <button
+                                            className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                                                viewMode === 'settings' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                                            }`}
+                                            onClick={() => setViewMode('settings')}
+                                        >
+                                            <Settings className="h-3 w-3" />
+                                            Settings
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center gap-2">
+                                    {viewMode === 'chat' && (
+                                        <>
+                                            <DropdownMenu>
+                                                <DropdownMenuTrigger asChild>
+                                                    <Button variant="outline" size="sm" className="gap-2 text-xs h-8">
+                                                        <Clock className="h-3.5 w-3.5" />
+                                                        {activeSession ? (
+                                                            <>
+                                                                {activeSession.title}
+                                                                <span className="text-muted-foreground">
+                                                                    {new Date(activeSession.createdAt).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}
+                                                                </span>
+                                                            </>
+                                                        ) : 'Select session'}
+                                                        <ChevronDown className="h-3 w-3" />
+                                                    </Button>
+                                                </DropdownMenuTrigger>
+                                                <DropdownMenuContent align="end" className="w-[240px]">
+                                                    {loadingSessions ? <div className="p-2"><Skeleton className="h-4 w-32" /></div> :
+                                                    sessions.length === 0 ? <div className="p-3 text-center text-xs text-muted-foreground">No sessions yet</div> :
+                                                    sessions.map((s) => (
+                                                        <DropdownMenuItem key={s.id} className={`text-xs ${activeSession?.id === s.id ? 'bg-accent' : ''}`} onClick={() => setActiveSession(s)}>
+                                                            <span className="flex-1 truncate">{s.title}</span>
+                                                            <span className="text-muted-foreground ml-2">{new Date(s.createdAt).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}</span>
+                                                        </DropdownMenuItem>
+                                                    ))}
+                                                </DropdownMenuContent>
+                                            </DropdownMenu>
+                                            <Button size="sm" variant="outline" className="gap-1.5 text-xs h-8" onClick={handleNewSession}><Plus className="h-3.5 w-3.5" />New Chat</Button>
+                                        </>
+                                    )}
+                                    {viewMode === 'settings' && (
+                                        <>
+                                            <Button variant="outline" size="sm" className="gap-1.5 text-xs h-8" onClick={() => { setEditAgent(selectedAgent); setSheetOpen(true); }}><Pencil className="h-3 w-3" />Edit</Button>
+                                            <Button variant="outline" size="sm" className="gap-1.5 text-xs h-8" onClick={() => router.push(`/agents/${selectedAgent.id}/permissions`)}><Shield className="h-3 w-3" />Permissions</Button>
+                                        </>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Chat view */}
+                            {viewMode === 'chat' && (
+                                activeSession ? (
+                                    <>
+                                        <div className="flex-1 overflow-y-auto">
+                                            <div className="max-w-5xl mx-auto px-4 py-6 space-y-6">
+                                                {loadingMessages ? (
+                                                    <div className="space-y-6">{Array.from({ length: 3 }).map((_, i) => <div key={i} className="space-y-2"><Skeleton className="h-4 w-48" /><Skeleton className="h-16 w-full rounded-lg" /></div>)}</div>
+                                                ) : messages.length === 0 ? (
+                                                    <div className="flex flex-col items-center justify-center h-full min-h-[400px] text-center gap-3">
+                                                        <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center"><Sparkles className="h-5 w-5 text-primary/60" /></div>
+                                                        <p className="text-sm text-muted-foreground">Send a message to start chatting with {selectedAgent.name}.</p>
+                                                    </div>
+                                                ) : (
+                                                    messages.map((msg) => (
+                                                        <Fragment key={msg.id}>
+                                                            {msg.toolCalls && msg.toolCalls.length > 0 && (
+                                                                <div className="space-y-1.5">
+                                                                    {msg.toolCalls.map((tc) => {
+                                                                        const key = `${msg.id}-${tc.id}`;
+                                                                        const isExpanded = expandedToolCalls.has(key);
+                                                                        const isDone = tc.status === 'done';
+                                                                        return (
+                                                                            <div key={tc.id}>
+                                                                                <button className="w-full flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs hover:bg-accent/50 transition-colors" onClick={() => isDone && toggleToolCall(key)}>
+                                                                                    {isDone ? <CheckCircle2 className="h-3.5 w-3.5 text-primary flex-shrink-0" /> : <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin flex-shrink-0" />}
+                                                                                    <span className="flex-1 text-left truncate text-muted-foreground">{tc.name}{tc.args && !isDone ? `: ${tc.args}` : ''}</span>
+                                                                                    {isDone && (isExpanded ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />)}
+                                                                                </button>
+                                                                                {isDone && tc.result && isExpanded && <div className="mt-1 rounded-lg border border-border bg-muted/50 px-3 py-2 text-[11px] text-muted-foreground font-mono max-h-[160px] overflow-y-auto whitespace-pre-wrap">{tc.result}</div>}
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            )}
+                                                            {(msg.content || msg.isStreaming || msg.role === 'user') && (
+                                                                <div className={msg.role === 'user' ? 'flex justify-end' : ''}>
+                                                                    {msg.role === 'user' ? (
+                                                                        <div className="bg-primary text-primary-foreground rounded-2xl rounded-br-sm px-4 py-2.5 max-w-[80%]">
+                                                                            <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.content}</p>
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div className="flex gap-3">
+                                                                            <div className="flex h-7 w-7 items-center justify-center rounded-full bg-muted flex-shrink-0 mt-0.5"><Bot className="h-3.5 w-3.5 text-muted-foreground" /></div>
+                                                                            <div className="flex-1 min-w-0">
+                                                                                <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5">
+                                                                                    <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                                                                                        {msg.content}
+                                                                                        {msg.isStreaming && !msg.content && (
+                                                                                            <span className="inline-flex gap-1">
+                                                                                                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '0ms' }} />
+                                                                                                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '150ms' }} />
+                                                                                                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '300ms' }} />
+                                                                                            </span>
+                                                                                        )}
+                                                                                    </p>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            )}
+                                                        </Fragment>
+                                                    ))
+                                                )}
+                                                <div ref={messagesEndRef} />
                                             </div>
                                         </div>
+                                        <div className="border-t border-border p-4">
+                                            <div className="max-w-5xl mx-auto relative">
+                                                <textarea ref={textareaRef} value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Ask your agent..." className="w-full resize-none rounded-xl border border-border bg-card px-4 py-3 pr-12 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring min-h-[48px] max-h-[160px] transition-colors" rows={1} disabled={sending} />
+                                                <Button onClick={sendMessage} disabled={!chatInput.trim() || sending} size="icon" variant="ghost" className="absolute right-2 bottom-2 h-8 w-8 rounded-lg">
+                                                    {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
+                                                </Button>
+                                            </div>
+                                        </div>
+                                    </>
+                                ) : (
+                                    <div className="flex-1 flex flex-col items-center justify-center text-center gap-4">
+                                        <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center"><Sparkles className="h-6 w-6 text-muted-foreground/40" /></div>
+                                        <div>
+                                            <p className="text-base font-medium text-muted-foreground">Start a conversation</p>
+                                            <p className="text-sm text-muted-foreground/70 mt-1">Select a session or create a new one.</p>
+                                        </div>
+                                        <Button variant="outline" onClick={handleNewSession} className="gap-1.5 mt-2"><Plus className="h-4 w-4" />New Chat</Button>
                                     </div>
-                                    <div className="flex gap-2">
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => handleEdit(selectedAgent)}
-                                            className="gap-1.5"
-                                            id="edit-agent-btn"
-                                        >
-                                            <Pencil className="h-3.5 w-3.5" />
-                                            Edit
-                                        </Button>
-                                        <Button
-                                            size="sm"
-                                            onClick={() => router.push(`/agents/${selectedAgent.id}/chat`)}
-                                            className="gap-1.5 bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-700 hover:to-blue-700"
-                                            id="open-chat-btn"
-                                        >
-                                            <MessageSquare className="h-3.5 w-3.5" />
-                                            Open Chat
-                                        </Button>
-                                    </div>
-                                </div>
-                            </div>
+                                )
+                            )}
 
-                            {/* Agent details */}
-                            <div className="flex-1 p-6 overflow-y-auto space-y-6">
-                                <div>
-                                    <h3 className="text-sm font-medium text-muted-foreground mb-2">
-                                        System Prompt
-                                    </h3>
-                                    <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
-                                        <p className="text-sm leading-relaxed whitespace-pre-wrap">
-                                            {selectedAgent.systemPrompt || (
-                                                <span className="text-muted-foreground italic">
-                                                    No system prompt configured. Using default: &quot;You are a helpful assistant.&quot;
-                                                </span>
-                                            )}
-                                        </p>
+                            {/* Settings view */}
+                            {viewMode === 'settings' && (
+                                <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                                    <div>
+                                        <h3 className="text-sm font-medium text-muted-foreground mb-2">Model</h3>
+                                        <div className="flex items-center gap-3">
+                                            <Badge variant="outline" className="text-xs"><Cpu className="h-3 w-3 mr-1" />{selectedAgent.model}</Badge>
+                                            <Badge variant="outline" className="text-xs bg-muted/50"><Thermometer className="h-3 w-3 mr-1" />{selectedAgent.temperature}</Badge>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <h3 className="text-sm font-medium text-muted-foreground mb-2">System Prompt</h3>
+                                        <div className="rounded-lg bg-muted/50 border border-border p-4">
+                                            <p className="text-sm leading-relaxed whitespace-pre-wrap">
+                                                {selectedAgent.systemPrompt || <span className="text-muted-foreground italic">No system prompt configured.</span>}
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="rounded-lg bg-muted/50 border border-border p-4">
+                                            <p className="text-xs font-medium text-muted-foreground mb-1">Created</p>
+                                            <p className="text-sm font-medium">{new Date(selectedAgent.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</p>
+                                        </div>
+                                        <div className="rounded-lg bg-muted/50 border border-border p-4">
+                                            <p className="text-xs font-medium text-muted-foreground mb-1">Last Updated</p>
+                                            <p className="text-sm font-medium">{new Date(selectedAgent.updatedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</p>
+                                        </div>
                                     </div>
                                 </div>
-
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
-                                        <p className="text-xs font-medium text-muted-foreground mb-1">
-                                            Created
-                                        </p>
-                                        <p className="text-sm font-medium">
-                                            {new Date(selectedAgent.createdAt).toLocaleDateString('en-US', {
-                                                month: 'short',
-                                                day: 'numeric',
-                                                year: 'numeric',
-                                            })}
-                                        </p>
-                                    </div>
-                                    <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
-                                        <p className="text-xs font-medium text-muted-foreground mb-1">
-                                            Last Updated
-                                        </p>
-                                        <p className="text-sm font-medium">
-                                            {new Date(selectedAgent.updatedAt).toLocaleDateString('en-US', {
-                                                month: 'short',
-                                                day: 'numeric',
-                                                year: 'numeric',
-                                            })}
-                                        </p>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
+                            )}
+                        </>
                     ) : (
-                        <div className="h-full flex flex-col items-center justify-center text-center px-8 gap-4">
-                            <div className="h-16 w-16 rounded-2xl bg-gradient-to-br from-violet-500/10 to-blue-500/10 flex items-center justify-center">
-                                <Bot className="h-8 w-8 text-muted-foreground/50" />
-                            </div>
+                        <div className="flex-1 flex flex-col items-center justify-center text-center px-8 gap-4">
+                            <div className="h-16 w-16 rounded-2xl bg-muted flex items-center justify-center"><Bot className="h-8 w-8 text-muted-foreground/50" /></div>
                             <div>
-                                <p className="text-lg font-medium text-muted-foreground">
-                                    Select an agent
-                                </p>
-                                <p className="text-sm text-muted-foreground/70 mt-1">
-                                    Choose an agent from the list to view details and start chatting.
-                                </p>
+                                <p className="text-lg font-medium text-muted-foreground">Select an agent</p>
+                                <p className="text-sm text-muted-foreground/70 mt-1">Choose an agent from the list to view details and start chatting.</p>
                             </div>
                         </div>
                     )}
                 </div>
             </div>
 
-            {/* Create/Edit Sheet */}
-            {workspace && (
-                <CreateAgentSheet
-                    open={sheetOpen}
-                    onOpenChange={setSheetOpen}
-                    workspaceId={workspace.id}
-                    agent={editAgent}
-                    onSuccess={handleSheetSuccess}
-                />
-            )}
+            {workspace && <CreateAgentSheet open={sheetOpen} onOpenChange={setSheetOpen} workspaceId={workspace.id} agent={editAgent} onSuccess={() => { fetchAgents(); setSelectedAgent(null); }} />}
         </div>
     );
 }

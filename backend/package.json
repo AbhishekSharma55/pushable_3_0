@@ -17,6 +17,8 @@
   "license": "ISC",
   "packageManager": "pnpm@10.26.2",
   "dependencies": {
+    "@composio/core": "^0.6.5",
+    "@composio/langchain": "^0.6.5",
     "@fastify/cors": "^11.2.0",
     "@fastify/jwt": "^10.0.0",
     "@fastify/multipart": "^9.4.0",

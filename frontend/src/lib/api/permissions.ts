@@ -2,7 +2,7 @@ import { apiClient } from './client';
 import type { AgentPermission } from '@/types';
 
 export interface SetPermissionInput {
-    resourceType: 'tool' | 'kb' | 'skill';
+    resourceType: 'tool' | 'kb' | 'skill' | 'agent';
     resourceId: string;
     allowed: boolean;
 }

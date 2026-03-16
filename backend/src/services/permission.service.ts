@@ -5,7 +5,7 @@ export const permissionService = {
         agentId: string,
         workspaceId: string,
         permissions: {
-            resourceType: "tool" | "kb" | "skill";
+            resourceType: "tool" | "kb" | "skill" | "agent";
             resourceId: string;
             allowed: boolean;
         }[]

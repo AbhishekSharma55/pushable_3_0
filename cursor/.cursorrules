@@ -1,0 +1,75 @@
+# Pushable AI — Cursor Rules
+
+## Project Overview
+Multi-tenant AI Employee platform. Two apps in a monorepo:
+- `apps/web` — Next.js 15 + shadcn/ui (Vercel)
+- `apps/server` — Fastify + LangGraph JS (Contabo)
+- `packages/db` — Drizzle schema + migrations (shared)
+- `packages/types` — Shared TypeScript types
+
+## General Rules
+- TypeScript strict mode everywhere. No `any`. Ever.
+- No unused imports, no unused variables.
+- No `console.log` in production code. Use a logger utility.
+- Every file must have a single clear responsibility.
+- Never put business logic in API route handlers. Route → Service → DB.
+- Never hardcode strings. Use constants files.
+- All secrets come from environment variables only.
+
+## Naming Conventions
+- Files: `kebab-case.ts`
+- Components: `PascalCase.tsx`
+- Functions/variables: `camelCase`
+- DB tables: `snake_case`
+- Constants: `SCREAMING_SNAKE_CASE`
+- Zod schemas: `[entity]Schema` (e.g. `createAgentSchema`)
+- Types/Interfaces: `PascalCase` with no `I` prefix
+
+## Folder Structure Rules
+- All API route logic lives in `services/`, not in the route file itself
+- All DB queries live in `repositories/`, called only from services
+- All shared types live in `packages/types`
+- All Drizzle schema lives in `packages/db/schema/`
+- One file per DB table in schema folder
+- Components go in `components/[module]/` — never dump in root components
+
+## Database Rules (CRITICAL)
+- Every query MUST be scoped by `workspaceId`. No exceptions.
+- Never query without RLS or explicit workspace filter.
+- All DB operations go through repository functions. No raw SQL in routes or services.
+- Migrations via `drizzle-kit` only. Never manually alter tables.
+- Every table must have: `id`, `workspaceId`, `createdAt`, `updatedAt`
+
+## API Rules (apps/server)
+- All routes follow REST: GET/POST/PUT/DELETE
+- All request bodies validated with Zod before touching the DB
+- All responses follow `{ data, error, meta }` shape
+- HTTP errors use proper status codes — never return 200 with error inside
+- Auth middleware runs on every protected route
+
+## Frontend Rules (apps/web)
+- Use shadcn/ui components. Never write custom UI from scratch if shadcn has it.
+- Server components by default. Add `"use client"` only when necessary.
+- All API calls go through `lib/api/` client functions. No raw fetch in components.
+- All forms use `react-hook-form` + Zod resolver.
+- No inline styles. Tailwind only.
+- Loading states and error states are mandatory for every async component.
+
+## LangGraph Rules
+- Each agent run gets its own thread ID derived from `sessionId`
+- All graph definitions live in `apps/server/src/graphs/`
+- Checkpointer is always Postgres-based (never in-memory)
+- Tool definitions live in `apps/server/src/tools/`
+- Never call LangGraph directly from Next.js — always via passthrough proxy
+
+## Error Handling
+- All async functions wrapped in try/catch
+- Services throw typed errors (create custom error classes)
+- Routes catch and return appropriate HTTP status
+- Frontend shows toast on error using sonner
+
+## Git Rules
+- Commit messages: `type(scope): message` — e.g. `feat(agents): add tool assignment`
+- Types: feat, fix, chore, refactor, docs
+- Never commit `.env` files
+- One feature = one commit (don't mix concerns)

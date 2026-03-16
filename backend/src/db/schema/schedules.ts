@@ -17,7 +17,7 @@ export const schedules = pgTable("schedules", {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id")
         .notNull()
-        .references(() => workspaces.id),
+        .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     targetType: scheduleTargetTypeEnum("target_type").notNull(),

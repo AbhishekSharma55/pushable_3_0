@@ -279,12 +279,42 @@ export default function ToolsPage() {
                                     </h3>
                                     <div className="rounded-lg bg-muted/50 border border-border/40 p-4 space-y-3">
                                         {selectedTool.type === 'function' && (
-                                            <div>
-                                                <p className="text-xs font-medium text-muted-foreground">Webhook URL</p>
-                                                <p className="text-sm font-mono mt-0.5">
-                                                    {(selectedTool.config as Record<string, unknown>).webhookUrl as string || 'Not configured'}
-                                                </p>
-                                            </div>
+                                            <>
+                                                <div className="flex gap-4">
+                                                    <div>
+                                                        <p className="text-xs font-medium text-muted-foreground">Method</p>
+                                                        <Badge variant="outline" className="mt-0.5 font-mono text-xs">
+                                                            {((selectedTool.config as Record<string, unknown>).method as string || 'POST').toUpperCase()}
+                                                        </Badge>
+                                                    </div>
+                                                    <div className="flex-1">
+                                                        <p className="text-xs font-medium text-muted-foreground">Webhook URL</p>
+                                                        <p className="text-sm font-mono mt-0.5 break-all">
+                                                            {(selectedTool.config as Record<string, unknown>).webhookUrl as string || 'Not configured'}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                                {(() => {
+                                                    const url = (selectedTool.config as Record<string, unknown>).webhookUrl as string || '';
+                                                    const vars = url.match(/\{\{(\w+)\}\}/g)?.map(m => m.slice(2, -2)) || [];
+                                                    if (vars.length === 0) return null;
+                                                    return (
+                                                        <div>
+                                                            <p className="text-xs font-medium text-muted-foreground mb-1">URL Variables</p>
+                                                            <div className="flex flex-wrap gap-1.5">
+                                                                {vars.map((v) => (
+                                                                    <span key={v} className="inline-flex items-center rounded-md bg-blue-500/10 px-2 py-0.5 text-xs font-mono text-blue-700 ring-1 ring-blue-500/20">
+                                                                        {v}
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                            <p className="text-[11px] text-muted-foreground mt-1">
+                                                                The AI agent fills these values at runtime.
+                                                            </p>
+                                                        </div>
+                                                    );
+                                                })()}
+                                            </>
                                         )}
                                         {selectedTool.type === 'mcp' && (
                                             <>

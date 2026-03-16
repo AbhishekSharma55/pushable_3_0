@@ -6,7 +6,7 @@ export const credits = pgTable("credits", {
     workspaceId: uuid("workspace_id")
         .unique()
         .notNull()
-        .references(() => workspaces.id),
+        .references(() => workspaces.id, { onDelete: "cascade" }),
     balance: integer("balance").default(1000).notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

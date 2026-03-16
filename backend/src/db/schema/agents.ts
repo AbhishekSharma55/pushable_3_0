@@ -5,7 +5,7 @@ export const agents = pgTable("agents", {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id")
         .notNull()
-        .references(() => workspaces.id),
+        .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     systemPrompt: text("system_prompt"),
     model: text("model").default("gpt-4o-mini").notNull(),

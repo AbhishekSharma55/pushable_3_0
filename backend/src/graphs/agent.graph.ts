@@ -9,7 +9,10 @@ import { z } from "zod";
 import { agentRepository } from "../repositories/agent.repository.ts";
 import { permissionRepository } from "../repositories/permission.repository.ts";
 import { toolRepository } from "../repositories/tool.repository.ts";
+import { skillRepository } from "../repositories/skill.repository.ts";
+import { kbService } from "../services/kb.service.ts";
 import { logger } from "../lib/logger.ts";
+import { HumanMessage } from "@langchain/core/messages";
 
 let checkpointerInstance: PostgresSaver | null = null;
 
@@ -81,29 +84,68 @@ export async function createAgentGraph(
             const config = tool.config as Record<string, unknown>;
 
             if (tool.type === "function") {
-                // Create a LangChain tool that POSTs to the webhook URL
+                // Create a LangChain tool that calls the webhook URL
                 const webhookUrl = config.webhookUrl as string;
                 if (!webhookUrl) {
                     logger.warn({ toolId: tool.id }, "Function tool missing webhookUrl, skipping");
                     continue;
                 }
 
+                const method = ((config.method as string) || "POST").toUpperCase();
+
+                // Parse {{var}} placeholders from URL to build dynamic schema
+                const varPattern = /\{\{(\w+)\}\}/g;
+                const urlVars: string[] = [];
+                let match;
+                while ((match = varPattern.exec(webhookUrl)) !== null) {
+                    if (!urlVars.includes(match[1])) {
+                        urlVars.push(match[1]);
+                    }
+                }
+
+                // Build schema: one field per URL variable + optional body input
+                const schemaFields: Record<string, z.ZodTypeAny> = {};
+                for (const v of urlVars) {
+                    schemaFields[v] = z.string().describe(`Value for {{${v}}} in the URL`);
+                }
+                // Always include a general input/body field for POST payloads
+                if (method === "POST") {
+                    schemaFields["input"] = z.string().describe("The input/body to send to the tool").optional();
+                }
+                // If no URL vars and not POST, add a fallback input field
+                if (urlVars.length === 0 && method !== "POST") {
+                    schemaFields["input"] = z.string().describe("The input to send to the tool").optional();
+                }
+
                 const functionTool = new DynamicStructuredTool({
                     name: tool.name.replace(/[^a-zA-Z0-9_-]/g, "_"),
                     description: tool.description || `Execute ${tool.name}`,
-                    schema: z.object({
-                        input: z.string().describe("The input to send to the tool"),
-                    }),
-                    func: async ({ input }) => {
+                    schema: z.object(schemaFields),
+                    func: async (params) => {
+                        // Interpolate {{var}} placeholders in the URL
+                        let resolvedUrl = webhookUrl;
+                        for (const v of urlVars) {
+                            const value = params[v] as string;
+                            resolvedUrl = resolvedUrl.replace(
+                                new RegExp(`\\{\\{${v}\\}\\}`, "g"),
+                                encodeURIComponent(value)
+                            );
+                        }
+
                         const controller = new AbortController();
                         const timeout = setTimeout(() => controller.abort(), 30_000);
                         try {
-                            const response = await fetch(webhookUrl, {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ input }),
+                            const fetchOptions: RequestInit = {
+                                method,
                                 signal: controller.signal,
-                            });
+                            };
+
+                            if (method === "POST") {
+                                fetchOptions.headers = { "Content-Type": "application/json" };
+                                fetchOptions.body = JSON.stringify({ input: params.input ?? "" });
+                            }
+
+                            const response = await fetch(resolvedUrl, fetchOptions);
                             return await response.text();
                         } catch (error) {
                             logger.error({ error, toolId: tool.id }, "Function tool call failed");
@@ -154,9 +196,32 @@ export async function createAgentGraph(
         }
     }
 
+    // --- Collect KB IDs for RAG ---
+    const allowedKbIds = await permissionRepository.getAllowedResourceIds(
+        agentId,
+        workspaceId,
+        "kb"
+    );
+
+    // --- Collect Skills ---
+    const allowedSkillIds = await permissionRepository.getAllowedResourceIds(
+        agentId,
+        workspaceId,
+        "skill"
+    );
+    const permittedSkills = await skillRepository.findByIds(
+        allowedSkillIds,
+        workspaceId
+    );
+
     logger.info(
-        { agentId, toolCount: langchainTools.length },
-        "Agent graph created with tools"
+        {
+            agentId,
+            toolCount: langchainTools.length,
+            kbCount: allowedKbIds.length,
+            skillCount: permittedSkills.length,
+        },
+        "Agent graph created with tools, KBs, and skills"
     );
 
     // Bind tools to LLM if any exist
@@ -164,10 +229,60 @@ export async function createAgentGraph(
         ? llm.bindTools(langchainTools)
         : llm;
 
+    // Build skills section once (static across turns)
+    let skillsSection = "";
+    if (permittedSkills.length > 0) {
+        const skillLines = permittedSkills
+            .map((s) => `- ${s.name}: ${s.instructions}`)
+            .join("\n");
+        skillsSection = `\n\nSkills you must apply:\n${skillLines}`;
+    }
+
     const agentNode = async (state: typeof MessagesAnnotation.State) => {
-        const systemMsg = new SystemMessage(
+        // Build dynamic system prompt
+        let systemPromptParts: string[] = [];
+
+        // 1. KB context (RAG) — query using latest user message
+        if (allowedKbIds.length > 0) {
+            const lastUserMsg = [...state.messages]
+                .reverse()
+                .find((m) => m instanceof HumanMessage);
+            if (lastUserMsg && typeof lastUserMsg.content === "string") {
+                try {
+                    const results = await kbService.queryKB(
+                        allowedKbIds,
+                        lastUserMsg.content,
+                        workspaceId,
+                        5
+                    );
+                    if (results.length > 0) {
+                        const context = results
+                            .map((r) => r.content)
+                            .join("\n\n---\n\n");
+                        systemPromptParts.push(
+                            `Relevant context from knowledge base:\n${context}`
+                        );
+                    }
+                } catch (error) {
+                    logger.warn(
+                        { error, agentId },
+                        "KB query failed, proceeding without context"
+                    );
+                }
+            }
+        }
+
+        // 2. Agent's base system prompt
+        systemPromptParts.push(
             agent.systemPrompt ?? "You are a helpful assistant."
         );
+
+        // 3. Skills instructions
+        if (skillsSection) {
+            systemPromptParts.push(skillsSection);
+        }
+
+        const systemMsg = new SystemMessage(systemPromptParts.join("\n\n"));
         const response = await llmWithTools.invoke([systemMsg, ...state.messages]);
         return { messages: [response] };
     };

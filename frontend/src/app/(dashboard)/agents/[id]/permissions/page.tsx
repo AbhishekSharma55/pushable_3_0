@@ -15,13 +15,14 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
-import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
 import { getAgents } from '@/lib/api/agents';
 import { getTools } from '@/lib/api/tools';
+import { getKBs } from '@/lib/api/kb';
+import { getSkills } from '@/lib/api/skills';
 import { getAgentPermissions, setAgentPermissions } from '@/lib/api/permissions';
-import type { Agent, Tool, AgentPermission } from '@/types';
+import type { Agent, Tool, KnowledgeBase, Skill, AgentPermission } from '@/types';
 
 export default function AgentPermissionsPage() {
     const params = useParams();
@@ -31,6 +32,8 @@ export default function AgentPermissionsPage() {
 
     const [agent, setAgent] = useState<Agent | null>(null);
     const [tools, setTools] = useState<Tool[]>([]);
+    const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
+    const [skillsList, setSkillsList] = useState<Skill[]>([]);
     const [permissions, setPermissions] = useState<AgentPermission[]>([]);
     const [loading, setLoading] = useState(true);
     const [savingIds, setSavingIds] = useState<Set<string>>(new Set());
@@ -39,14 +42,17 @@ export default function AgentPermissionsPage() {
         if (!workspace) return;
         try {
             setLoading(true);
-            const [agentsList, toolsList, permsList] = await Promise.all([
+            const [agentsList, toolsList, kbsList, skillsData, permsList] = await Promise.all([
                 getAgents(workspace.id),
                 getTools(workspace.id),
+                getKBs(workspace.id),
+                getSkills(workspace.id),
                 getAgentPermissions(workspace.id, agentId),
             ]);
-            const found = agentsList.find((a: Agent) => a.id === agentId);
-            setAgent(found || null);
+            setAgent(agentsList.find((a: Agent) => a.id === agentId) || null);
             setTools(toolsList);
+            setKbs(kbsList);
+            setSkillsList(skillsData);
             setPermissions(permsList);
         } catch {
             toast.error('Failed to load data');
@@ -59,25 +65,28 @@ export default function AgentPermissionsPage() {
         fetchData();
     }, [fetchData]);
 
-    const isToolAllowed = (toolId: string) => {
+    const isAllowed = (resourceId: string, resourceType: string) => {
         const perm = permissions.find(
-            (p) => p.resourceId === toolId && p.resourceType === 'tool'
+            (p) => p.resourceId === resourceId && p.resourceType === resourceType
         );
         return perm?.allowed ?? false;
     };
 
-    const handleToggle = async (toolId: string, allowed: boolean) => {
+    const handleToggle = async (
+        resourceId: string,
+        resourceType: 'tool' | 'kb' | 'skill',
+        allowed: boolean
+    ) => {
         if (!workspace) return;
 
-        // Optimistically update UI
         const prevPermissions = [...permissions];
         setPermissions((prev) => {
             const existing = prev.find(
-                (p) => p.resourceId === toolId && p.resourceType === 'tool'
+                (p) => p.resourceId === resourceId && p.resourceType === resourceType
             );
             if (existing) {
                 return prev.map((p) =>
-                    p.resourceId === toolId && p.resourceType === 'tool'
+                    p.resourceId === resourceId && p.resourceType === resourceType
                         ? { ...p, allowed }
                         : p
                 );
@@ -85,31 +94,31 @@ export default function AgentPermissionsPage() {
             return [
                 ...prev,
                 {
-                    id: `temp-${toolId}`,
+                    id: `temp-${resourceId}`,
                     workspaceId: workspace.id,
                     agentId,
-                    resourceType: 'tool' as const,
-                    resourceId: toolId,
+                    resourceType,
+                    resourceId,
                     allowed,
                     createdAt: new Date().toISOString(),
                 },
             ];
         });
 
-        setSavingIds((prev) => new Set(prev).add(toolId));
+        const key = `${resourceType}-${resourceId}`;
+        setSavingIds((prev) => new Set(prev).add(key));
 
         try {
             await setAgentPermissions(workspace.id, agentId, [
-                { resourceType: 'tool', resourceId: toolId, allowed },
+                { resourceType, resourceId, allowed },
             ]);
         } catch {
-            // Revert on error
             setPermissions(prevPermissions);
             toast.error('Failed to update permission');
         } finally {
             setSavingIds((prev) => {
                 const next = new Set(prev);
-                next.delete(toolId);
+                next.delete(key);
                 return next;
             });
         }
@@ -154,7 +163,7 @@ export default function AgentPermissionsPage() {
                 </div>
             </div>
 
-            {/* Tabs: Chat | Permissions */}
+            {/* Tabs */}
             <Tabs defaultValue="permissions">
                 <TabsList>
                     <TabsTrigger
@@ -177,83 +186,167 @@ export default function AgentPermissionsPage() {
                         {tools.length === 0 ? (
                             <div className="rounded-xl border border-dashed border-border/60 p-8 text-center">
                                 <p className="text-sm text-muted-foreground">
-                                    No tools configured yet. Create tools first to assign them to this agent.
+                                    No tools configured yet. Create tools first to assign them.
                                 </p>
                             </div>
                         ) : (
                             <div className="space-y-2">
-                                {tools.map((tool) => (
-                                    <div
-                                        key={tool.id}
-                                        className="flex items-center justify-between rounded-lg border border-border/60 bg-card px-4 py-3"
-                                    >
-                                        <div className="flex items-center gap-3">
-                                            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500/15 to-cyan-500/15 flex-shrink-0">
-                                                <Wrench className="h-4 w-4 text-blue-600" />
-                                            </div>
-                                            <div>
-                                                <p className="text-sm font-medium">{tool.name}</p>
-                                                <div className="flex items-center gap-1.5 mt-0.5">
-                                                    <Badge
-                                                        variant="outline"
-                                                        className={`text-[10px] px-1.5 py-0 ${typeBadge(tool.type)}`}
-                                                    >
-                                                        {tool.type}
-                                                    </Badge>
-                                                    {tool.isGlobal && (
+                                {tools.map((tool) => {
+                                    const key = `tool-${tool.id}`;
+                                    return (
+                                        <div
+                                            key={tool.id}
+                                            className="flex items-center justify-between rounded-lg border border-border/60 bg-card px-4 py-3"
+                                        >
+                                            <div className="flex items-center gap-3">
+                                                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500/15 to-cyan-500/15 flex-shrink-0">
+                                                    <Wrench className="h-4 w-4 text-blue-600" />
+                                                </div>
+                                                <div>
+                                                    <p className="text-sm font-medium">{tool.name}</p>
+                                                    <div className="flex items-center gap-1.5 mt-0.5">
                                                         <Badge
                                                             variant="outline"
-                                                            className="text-[10px] px-1.5 py-0 bg-amber-500/10 text-amber-600 border-amber-500/20"
+                                                            className={`text-[10px] px-1.5 py-0 ${typeBadge(tool.type)}`}
                                                         >
-                                                            <Globe className="h-2.5 w-2.5 mr-0.5" />
-                                                            global
+                                                            {tool.type}
                                                         </Badge>
-                                                    )}
+                                                        {tool.isGlobal && (
+                                                            <Badge
+                                                                variant="outline"
+                                                                className="text-[10px] px-1.5 py-0 bg-amber-500/10 text-amber-600 border-amber-500/20"
+                                                            >
+                                                                <Globe className="h-2.5 w-2.5 mr-0.5" />
+                                                                global
+                                                            </Badge>
+                                                        )}
+                                                    </div>
                                                 </div>
                                             </div>
+                                            <div className="flex items-center gap-2">
+                                                {savingIds.has(key) && (
+                                                    <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                                                )}
+                                                <Switch
+                                                    checked={isAllowed(tool.id, 'tool')}
+                                                    onCheckedChange={(checked) =>
+                                                        handleToggle(tool.id, 'tool', checked)
+                                                    }
+                                                    disabled={savingIds.has(key)}
+                                                />
+                                            </div>
                                         </div>
-                                        <div className="flex items-center gap-2">
-                                            {savingIds.has(tool.id) && (
-                                                <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                                            )}
-                                            <Switch
-                                                checked={isToolAllowed(tool.id)}
-                                                onCheckedChange={(checked) =>
-                                                    handleToggle(tool.id, checked)
-                                                }
-                                                disabled={savingIds.has(tool.id)}
-                                            />
-                                        </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                             </div>
                         )}
                     </div>
 
-                    {/* Knowledge Bases Section - Placeholder */}
+                    {/* Knowledge Bases Section */}
                     <div>
                         <div className="flex items-center gap-2 mb-4">
                             <BookOpen className="h-4 w-4 text-emerald-600" />
                             <h2 className="text-lg font-semibold">Knowledge Bases</h2>
                         </div>
-                        <div className="rounded-xl border border-dashed border-border/60 p-8 text-center">
-                            <p className="text-sm text-muted-foreground">
-                                Coming soon — knowledge base permissions will be available in a future update.
-                            </p>
-                        </div>
+
+                        {kbs.length === 0 ? (
+                            <div className="rounded-xl border border-dashed border-border/60 p-8 text-center">
+                                <p className="text-sm text-muted-foreground">
+                                    No knowledge bases yet. Create a KB and upload documents first.
+                                </p>
+                            </div>
+                        ) : (
+                            <div className="space-y-2">
+                                {kbs.map((kb) => {
+                                    const key = `kb-${kb.id}`;
+                                    return (
+                                        <div
+                                            key={kb.id}
+                                            className="flex items-center justify-between rounded-lg border border-border/60 bg-card px-4 py-3"
+                                        >
+                                            <div className="flex items-center gap-3">
+                                                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500/15 to-teal-500/15 flex-shrink-0">
+                                                    <BookOpen className="h-4 w-4 text-emerald-600" />
+                                                </div>
+                                                <div>
+                                                    <p className="text-sm font-medium">{kb.name}</p>
+                                                    {kb.description && (
+                                                        <p className="text-xs text-muted-foreground truncate max-w-[300px] mt-0.5">
+                                                            {kb.description}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                {savingIds.has(key) && (
+                                                    <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                                                )}
+                                                <Switch
+                                                    checked={isAllowed(kb.id, 'kb')}
+                                                    onCheckedChange={(checked) =>
+                                                        handleToggle(kb.id, 'kb', checked)
+                                                    }
+                                                    disabled={savingIds.has(key)}
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
                     </div>
 
-                    {/* Skills Section - Placeholder */}
+                    {/* Skills Section */}
                     <div>
                         <div className="flex items-center gap-2 mb-4">
                             <Zap className="h-4 w-4 text-amber-600" />
                             <h2 className="text-lg font-semibold">Skills</h2>
                         </div>
-                        <div className="rounded-xl border border-dashed border-border/60 p-8 text-center">
-                            <p className="text-sm text-muted-foreground">
-                                Coming soon — skill permissions will be available in a future update.
-                            </p>
-                        </div>
+
+                        {skillsList.length === 0 ? (
+                            <div className="rounded-xl border border-dashed border-border/60 p-8 text-center">
+                                <p className="text-sm text-muted-foreground">
+                                    No skills yet. Create skills to assign them to agents.
+                                </p>
+                            </div>
+                        ) : (
+                            <div className="space-y-2">
+                                {skillsList.map((skill) => {
+                                    const key = `skill-${skill.id}`;
+                                    return (
+                                        <div
+                                            key={skill.id}
+                                            className="flex items-center justify-between rounded-lg border border-border/60 bg-card px-4 py-3"
+                                        >
+                                            <div className="flex items-center gap-3">
+                                                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-amber-500/15 to-orange-500/15 flex-shrink-0">
+                                                    <Zap className="h-4 w-4 text-amber-600" />
+                                                </div>
+                                                <div>
+                                                    <p className="text-sm font-medium">{skill.name}</p>
+                                                    <p className="text-xs text-muted-foreground truncate max-w-[300px] mt-0.5">
+                                                        {skill.instructions.slice(0, 60)}
+                                                        {skill.instructions.length > 60 ? '...' : ''}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                {savingIds.has(key) && (
+                                                    <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                                                )}
+                                                <Switch
+                                                    checked={isAllowed(skill.id, 'skill')}
+                                                    onCheckedChange={(checked) =>
+                                                        handleToggle(skill.id, 'skill', checked)
+                                                    }
+                                                    disabled={savingIds.has(key)}
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
                     </div>
                 </TabsContent>
             </Tabs>

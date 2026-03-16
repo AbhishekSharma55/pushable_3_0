@@ -62,22 +62,46 @@ export const toolService = {
             throw new NotFoundError("Tool not found");
         }
 
-        const config = tool.config as { webhookUrl?: string };
+        const config = tool.config as {
+            webhookUrl?: string;
+            method?: string;
+        };
         if (!config.webhookUrl) {
             throw new Error("Tool has no webhook URL configured");
+        }
+
+        const method = (config.method || "POST").toUpperCase();
+
+        // Interpolate {{var}} placeholders in the URL
+        let resolvedUrl = config.webhookUrl;
+        const varPattern = /\{\{(\w+)\}\}/g;
+        let match;
+        while ((match = varPattern.exec(config.webhookUrl)) !== null) {
+            const varName = match[1];
+            const value = input[varName];
+            if (value !== undefined) {
+                resolvedUrl = resolvedUrl.replace(
+                    new RegExp(`\\{\\{${varName}\\}\\}`, "g"),
+                    encodeURIComponent(String(value))
+                );
+            }
         }
 
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 30_000);
 
         try {
-            const response = await fetch(config.webhookUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ input }),
+            const fetchOptions: RequestInit = {
+                method,
                 signal: controller.signal,
-            });
+            };
 
+            if (method === "POST") {
+                fetchOptions.headers = { "Content-Type": "application/json" };
+                fetchOptions.body = JSON.stringify({ input });
+            }
+
+            const response = await fetch(resolvedUrl, fetchOptions);
             const text = await response.text();
             return text;
         } catch (error) {

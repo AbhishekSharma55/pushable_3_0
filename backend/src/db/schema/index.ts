@@ -7,6 +7,7 @@ export { sessions } from "./sessions.ts";
 export { messages, messageRoleEnum } from "./messages.ts";
 export { knowledgeBases } from "./knowledgeBases.ts";
 export { kbDocuments } from "./kbDocuments.ts";
+export { kbChunks } from "./kbChunks.ts";
 export { skills } from "./skills.ts";
 export { tools, toolTypeEnum } from "./tools.ts";
 export { agentPermissions, resourceTypeEnum } from "./agentPermissions.ts";

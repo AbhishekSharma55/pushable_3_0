@@ -13,10 +13,10 @@ export const tasks = pgTable("tasks", {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id")
         .notNull()
-        .references(() => workspaces.id),
+        .references(() => workspaces.id, { onDelete: "cascade" }),
     agentId: uuid("agent_id")
         .notNull()
-        .references(() => agents.id),
+        .references(() => agents.id, { onDelete: "cascade" }),
     title: text("title").notNull(),
     description: text("description"),
     status: taskStatusEnum("status").default("pending").notNull(),

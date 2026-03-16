@@ -1,4 +1,4 @@
-import { eq, and, or, isNull } from "drizzle-orm";
+import { eq, or } from "drizzle-orm";
 import { db } from "../db/client.ts";
 import { tools } from "../db/schema/index.ts";
 

@@ -31,12 +31,20 @@ const toolSchema = z.object({
     name: z.string().min(1, 'Name is required'),
     description: z.string().optional(),
     type: z.enum(['mcp', 'function']),
-    isGlobal: z.boolean().default(false),
+    isGlobal: z.boolean(),
     webhookUrl: z.string().optional(),
+    httpMethod: z.enum(['GET', 'POST']),
     mcpUrl: z.string().optional(),
     mcpApiKey: z.string().optional(),
     mcpToolNames: z.string().optional(),
 });
+
+/** Extract {{var}} names from a URL template */
+function extractUrlVars(url: string): string[] {
+    const matches = url.match(/\{\{(\w+)\}\}/g);
+    if (!matches) return [];
+    return [...new Set(matches.map((m) => m.slice(2, -2)))];
+}
 
 type ToolFormData = z.infer<typeof toolSchema>;
 
@@ -72,6 +80,7 @@ export function CreateToolSheet({
             type: 'function',
             isGlobal: false,
             webhookUrl: '',
+            httpMethod: 'POST',
             mcpUrl: '',
             mcpApiKey: '',
             mcpToolNames: '',
@@ -80,6 +89,10 @@ export function CreateToolSheet({
 
     const toolType = watch('type');
     const isGlobal = watch('isGlobal');
+    const webhookUrl = watch('webhookUrl');
+    const httpMethod = watch('httpMethod');
+
+    const detectedVars = extractUrlVars(webhookUrl || '');
 
     useEffect(() => {
         if (tool) {
@@ -90,6 +103,7 @@ export function CreateToolSheet({
                 type: tool.type,
                 isGlobal: tool.isGlobal,
                 webhookUrl: (config.webhookUrl as string) ?? '',
+                httpMethod: ((config.method as string) || 'POST') as 'GET' | 'POST',
                 mcpUrl: (config.url as string) ?? '',
                 mcpApiKey: (config.apiKey as string) ?? '',
                 mcpToolNames: Array.isArray(config.toolNames)
@@ -103,6 +117,7 @@ export function CreateToolSheet({
                 type: 'function',
                 isGlobal: false,
                 webhookUrl: '',
+                httpMethod: 'POST',
                 mcpUrl: '',
                 mcpApiKey: '',
                 mcpToolNames: '',
@@ -116,6 +131,7 @@ export function CreateToolSheet({
 
             if (data.type === 'function') {
                 config.webhookUrl = data.webhookUrl;
+                config.method = data.httpMethod;
             } else {
                 config.url = data.mcpUrl;
                 if (data.mcpApiKey) config.apiKey = data.mcpApiKey;
@@ -152,7 +168,7 @@ export function CreateToolSheet({
 
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent className="sm:max-w-lg overflow-y-auto">
+            <SheetContent className="sm:max-w-lg overflow-y-auto px-6">
                 <SheetHeader>
                     <SheetTitle className="text-xl font-semibold">
                         {isEdit ? 'Edit Tool' : 'Create Tool'}
@@ -209,14 +225,56 @@ export function CreateToolSheet({
 
                     {/* Dynamic config fields */}
                     {toolType === 'function' && (
-                        <div className="space-y-2">
-                            <Label htmlFor="tool-webhook-url">Webhook URL</Label>
-                            <Input
-                                id="tool-webhook-url"
-                                placeholder="https://api.example.com/webhook"
-                                {...register('webhookUrl')}
-                            />
-                        </div>
+                        <>
+                            <div className="space-y-2">
+                                <Label>HTTP Method</Label>
+                                <Select
+                                    value={httpMethod}
+                                    onValueChange={(val: 'GET' | 'POST') => setValue('httpMethod', val)}
+                                >
+                                    <SelectTrigger id="tool-http-method">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="GET">GET</SelectItem>
+                                        <SelectItem value="POST">POST</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
+
+                            <div className="space-y-2">
+                                <Label htmlFor="tool-webhook-url">Webhook URL</Label>
+                                <Input
+                                    id="tool-webhook-url"
+                                    placeholder="https://api.example.com/weather/{{city}}"
+                                    {...register('webhookUrl')}
+                                />
+                                <p className="text-xs text-muted-foreground">
+                                    Use <code className="px-1 py-0.5 rounded bg-muted text-[11px]">{'{{variable}}'}</code> for dynamic parameters the AI will fill at runtime.
+                                </p>
+                            </div>
+
+                            {detectedVars.length > 0 && (
+                                <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3">
+                                    <p className="text-xs font-medium text-blue-600 mb-1.5">
+                                        Detected variables
+                                    </p>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {detectedVars.map((v) => (
+                                            <span
+                                                key={v}
+                                                className="inline-flex items-center rounded-md bg-blue-500/10 px-2 py-0.5 text-xs font-mono text-blue-700 ring-1 ring-blue-500/20"
+                                            >
+                                                {v}
+                                            </span>
+                                        ))}
+                                    </div>
+                                    <p className="text-[11px] text-muted-foreground mt-1.5">
+                                        The AI agent will provide values for these when calling this tool.
+                                    </p>
+                                </div>
+                            )}
+                        </>
                     )}
 
                     {toolType === 'mcp' && (

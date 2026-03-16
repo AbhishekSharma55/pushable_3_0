@@ -69,3 +69,75 @@ export interface AgentPermission {
     allowed: boolean;
     createdAt: string;
 }
+
+export interface KnowledgeBase {
+    id: string;
+    workspaceId: string;
+    name: string;
+    description: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface KBDocument {
+    id: string;
+    workspaceId: string;
+    kbId: string;
+    filename: string;
+    chunkCount: number;
+    createdAt: string;
+}
+
+export interface Skill {
+    id: string;
+    workspaceId: string;
+    name: string;
+    description: string | null;
+    origin: string | null;
+    instructions: string;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface Task {
+    id: string;
+    workspaceId: string;
+    agentId: string;
+    title: string;
+    description: string | null;
+    status: 'pending' | 'running' | 'done' | 'failed';
+    result: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface Workflow {
+    id: string;
+    workspaceId: string;
+    name: string;
+    createdAt: string;
+    updatedAt: string;
+    steps?: WorkflowStep[];
+}
+
+export interface WorkflowStep {
+    id: string;
+    workspaceId: string;
+    workflowId: string;
+    taskId: string;
+    order: number;
+    createdAt: string;
+}
+
+export interface Schedule {
+    id: string;
+    workspaceId: string;
+    name: string;
+    cron: string;
+    targetType: 'task' | 'workflow';
+    targetId: string;
+    enabled: boolean;
+    lastRunAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+}

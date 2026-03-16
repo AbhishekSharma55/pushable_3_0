@@ -13,7 +13,7 @@ export const toolTypeEnum = pgEnum("tool_type", ["mcp", "function"]);
 
 export const tools = pgTable("tools", {
     id: uuid("id").primaryKey().defaultRandom(),
-    workspaceId: uuid("workspace_id").references(() => workspaces.id),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description"),
     type: toolTypeEnum("type").notNull(),

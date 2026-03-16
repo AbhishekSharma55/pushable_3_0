@@ -19,7 +19,7 @@ export const messages = pgTable("messages", {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id")
         .notNull()
-        .references(() => workspaces.id),
+        .references(() => workspaces.id, { onDelete: "cascade" }),
     sessionId: uuid("session_id")
         .notNull()
         .references(() => sessions.id, { onDelete: "cascade" }),

@@ -6,7 +6,7 @@ export const sessions = pgTable("sessions", {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id")
         .notNull()
-        .references(() => workspaces.id),
+        .references(() => workspaces.id, { onDelete: "cascade" }),
     agentId: uuid("agent_id")
         .notNull()
         .references(() => agents.id, { onDelete: "cascade" }),

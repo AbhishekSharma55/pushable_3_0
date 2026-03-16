@@ -13,6 +13,14 @@ import { chatRoutes } from "./routes/chat.ts";
 import { llmRoutes } from "./routes/llm.ts";
 import { toolRoutes } from "./routes/tools.ts";
 import { permissionRoutes } from "./routes/permissions.ts";
+import { kbRoutes } from "./routes/kb.ts";
+import { skillRoutes } from "./routes/skills.ts";
+import { taskRoutes } from "./routes/tasks.ts";
+import { workflowRoutes } from "./routes/workflows.ts";
+import { scheduleRoutes } from "./routes/schedules.ts";
+import { startWorkers, stopWorkers } from "./lib/workers.ts";
+import { initScheduler } from "./lib/scheduler.ts";
+import { taskQueue, workflowQueue } from "./lib/queue.ts";
 
 const app = Fastify({ logger: false });
 
@@ -64,7 +72,30 @@ await app.register(chatRoutes, { prefix: "/api" });
 await app.register(llmRoutes, { prefix: "/api" });
 await app.register(toolRoutes, { prefix: "/api" });
 await app.register(permissionRoutes, { prefix: "/api" });
+await app.register(kbRoutes, { prefix: "/api" });
+await app.register(skillRoutes, { prefix: "/api" });
+await app.register(taskRoutes, { prefix: "/api" });
+await app.register(workflowRoutes, { prefix: "/api" });
+await app.register(scheduleRoutes, { prefix: "/api" });
 
 const port = Number(process.env.PORT) || 4000;
 await app.listen({ port, host: "0.0.0.0" });
+
+// Start workers and scheduler after app is ready
+startWorkers();
+await initScheduler();
+
 logger.info(`Server running on port ${port}`);
+
+// Graceful shutdown
+const shutdown = async () => {
+  logger.info("Shutting down...");
+  await stopWorkers();
+  await taskQueue.close();
+  await workflowQueue.close();
+  await app.close();
+  process.exit(0);
+};
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);

@@ -8,7 +8,7 @@ const createToolSchema = z.object({
     description: z.string().optional(),
     type: z.enum(["mcp", "function"]),
     isGlobal: z.boolean().default(false),
-    config: z.record(z.unknown()).default({}),
+    config: z.record(z.string(), z.unknown()).default({}),
 });
 
 const updateToolSchema = z.object({
@@ -16,7 +16,7 @@ const updateToolSchema = z.object({
     description: z.string().optional(),
     type: z.enum(["mcp", "function"]).optional(),
     isGlobal: z.boolean().optional(),
-    config: z.record(z.unknown()).optional(),
+    config: z.record(z.string(), z.unknown()).optional(),
 });
 
 export async function toolRoutes(fastify: FastifyInstance) {

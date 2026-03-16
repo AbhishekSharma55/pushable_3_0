@@ -20,3 +20,5 @@ export { creditLogs } from "./creditLogs.ts";
 export { inputChannels, channelTypeEnum } from "./inputChannels.ts";
 export { integrations, integrationStatusEnum } from "./integrations.ts";
 export { agentIntegrations } from "./agentIntegrations.ts";
+export { browserProfiles, browserProfileStatusEnum } from "./browserProfiles.ts";
+export { browserSessions, browserSessionStatusEnum } from "./browserSessions.ts";

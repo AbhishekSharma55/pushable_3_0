@@ -25,7 +25,14 @@
       "Bash(PGPASSWORD=abhishek0003 psql -h localhost -U postgres -d pushable_ai -c \"SELECT id, name, composio_toolkit_slug, metadata FROM integrations;\" 2>&1)",
       "Bash(ls:*)",
       "Bash(which docker-compose:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(tree:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker exec:*)",
+      "Bash(docker rm:*)",
+      "Bash(gh api:*)",
+      "Bash(curl:*)"
     ]
   }
 }

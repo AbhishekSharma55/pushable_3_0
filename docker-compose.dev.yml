@@ -2,6 +2,8 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    ports:
+      - "5432:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: abhishek0003
@@ -38,6 +40,7 @@ services:
       REDIS_URL: redis://redis:6379
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-ak_sYMIgmVF81jyVXtDGmWQ}
       FRONTEND_URL: http://localhost:3000
+      BROWSER_SERVICE_URL: http://browser-service:8080
     depends_on:
       postgres:
         condition: service_healthy
@@ -46,6 +49,28 @@ services:
     volumes:
       - ./backend/src:/app/src
 
+  browser-service:
+    build:
+      context: .
+      dockerfile: browser-service/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      PROFILES_DIR: /app/profiles
+      ALLOWED_ORIGINS: http://localhost:3000
+      SCREENSHOT_INTERVAL_MS: "200"
+      SCREENSHOT_QUALITY: "60"
+      SCREENSHOT_WIDTH: "1920"
+      SCREENSHOT_HEIGHT: "1080"
+      CAPSOLVER_API_KEY: ${CAPSOLVER_API_KEY:-CAP-EE4E7B31B78FB28FB7488B481872E8EF41ED238F170D21EF8420588FFEC5D2F5}
+      CAPSOLVER_EXTENSION_ENABLED: "true"
+    volumes:
+      - ./browser-service/profiles:/app/profiles
+      - ./browser-service/src:/app/src
+      - ./browser-service/extensions:/app/extensions
+
   frontend:
     build: ./frontend
     restart: unless-stopped
@@ -53,6 +78,7 @@ services:
       - "3000:3000"
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:4000
+      NEXT_PUBLIC_BROWSER_WS_URL: ws://localhost:8080
     depends_on:
       - backend
     volumes:

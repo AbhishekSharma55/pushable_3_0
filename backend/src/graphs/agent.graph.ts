@@ -16,6 +16,7 @@ import { integrationRepository } from "../repositories/integration.repository.ts
 import { getComposioClient } from "../lib/composio.ts";
 import { logger } from "../lib/logger.ts";
 import { HumanMessage } from "@langchain/core/messages";
+import { buildBrowserTools } from "../tools/browser.tools.ts";
 
 let checkpointerInstance: PostgresSaver | null = null;
 
@@ -260,6 +261,17 @@ export async function createAgentGraph(
         logger.warn(
             { error, agentId },
             "Failed to load Composio tools, proceeding without them"
+        );
+    }
+
+    // --- 5. Browser tools (if agent has browser profile assigned) ---
+    try {
+        const browserTools = await buildBrowserTools(agentId, workspaceId);
+        langchainTools.push(...browserTools);
+    } catch (error) {
+        logger.warn(
+            { error, agentId },
+            "Failed to load browser tools, proceeding without them"
         );
     }
 

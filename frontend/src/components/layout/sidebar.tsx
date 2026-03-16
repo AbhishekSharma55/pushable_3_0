@@ -17,6 +17,7 @@ import {
     ChevronDown,
     Plus,
     Blocks,
+    Globe,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -47,6 +48,7 @@ const navItems = [
     { label: 'Dashboard', href: '/', icon: LayoutDashboard },
     { label: 'Agents', href: '/agents', icon: Bot },
     {label: 'Integrations', href: '/integrations', icon: Blocks },
+    { label: 'Browser', href: '/browser-profiles', icon: Globe },
     { label: 'Knowledge Base', href: '/kb', icon: BookOpen },
     { label: 'Skills', href: '/skills', icon: Zap },
     { label: 'Tools', href: '/tools', icon: Wrench },

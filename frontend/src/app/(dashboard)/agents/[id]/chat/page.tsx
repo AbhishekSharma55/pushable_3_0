@@ -15,6 +15,8 @@ import {
     CheckCircle2,
     Clock,
     ArrowUp,
+    Monitor,
+    Square,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -29,9 +31,13 @@ import {
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
 import { getAgents } from '@/lib/api/agents';
 import { getSessions, createSession, getMessages } from '@/lib/api/sessions';
+import { getProfiles, startSession as startBrowserSession, endSession as endBrowserSession } from '@/lib/api/browser';
+import { BrowserPreview } from '@/components/browser/browser-preview';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { API_URL } from '@/lib/constants';
 import { getToken } from '@/lib/auth';
-import type { Agent, Session, Message } from '@/types';
+import type { Agent, Session, Message, BrowserProfile } from '@/types';
 
 interface ToolCallEvent {
     id: string;
@@ -65,6 +71,13 @@ export default function ChatPage() {
     const [loadingMessages, setLoadingMessages] = useState(false);
     const [sending, setSending] = useState(false);
     const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set());
+
+    // Browser preview state
+    const [browserProfile, setBrowserProfile] = useState<BrowserProfile | null>(null);
+    const [browserWsUrl, setBrowserWsUrl] = useState<string | null>(null);
+    const [browserSessionId, setBrowserSessionId] = useState<string | null>(null);
+    const [startingBrowser, setStartingBrowser] = useState(false);
+    const [showBrowserPreview, setShowBrowserPreview] = useState(false);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -154,6 +167,50 @@ export default function ChatPage() {
 
     const handleAgentSwitch = (id: string) => {
         router.push(`/agents/${id}/chat`);
+    };
+
+    // Fetch browser profile for this agent
+    useEffect(() => {
+        if (!workspace || !agentId) return;
+        getProfiles(workspace.id)
+            .then((profiles) => {
+                const assigned = profiles.find(
+                    (p) => p.assignedAgentId === agentId && p.status === 'active'
+                );
+                setBrowserProfile(assigned || null);
+            })
+            .catch(() => {});
+    }, [workspace, agentId]);
+
+    const handleStartBrowser = async () => {
+        if (!workspace || !browserProfile) return;
+        setStartingBrowser(true);
+        try {
+            const { sessionId, wsUrl } = await startBrowserSession(
+                workspace.id,
+                browserProfile.id,
+                agentId
+            );
+            setBrowserSessionId(sessionId);
+            setBrowserWsUrl(wsUrl);
+            setShowBrowserPreview(true);
+        } catch {
+            toast.error('Failed to start browser session');
+        } finally {
+            setStartingBrowser(false);
+        }
+    };
+
+    const handleStopBrowser = async () => {
+        if (!workspace || !browserSessionId) return;
+        try {
+            await endBrowserSession(workspace.id, browserSessionId);
+        } catch {
+            // ignore
+        }
+        setBrowserWsUrl(null);
+        setBrowserSessionId(null);
+        setShowBrowserPreview(false);
     };
 
     const sendMessage = async () => {
@@ -407,12 +464,56 @@ export default function ChatPage() {
                             <Plus className="h-3.5 w-3.5" />
                             New Chat
                         </Button>
+
+                        {browserProfile && (
+                            <>
+                                {browserWsUrl ? (
+                                    <>
+                                        <Button
+                                            size="sm"
+                                            variant="outline"
+                                            className="gap-1.5 text-xs h-8"
+                                            onClick={() => setShowBrowserPreview(!showBrowserPreview)}
+                                        >
+                                            <Monitor className="h-3.5 w-3.5" />
+                                            {showBrowserPreview ? 'Hide' : 'Show'} Browser
+                                        </Button>
+                                        <Button
+                                            size="sm"
+                                            variant="outline"
+                                            className="gap-1.5 text-xs h-8 text-red-600 hover:text-red-700"
+                                            onClick={handleStopBrowser}
+                                        >
+                                            <Square className="h-3.5 w-3.5" />
+                                            Stop
+                                        </Button>
+                                    </>
+                                ) : (
+                                    <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="gap-1.5 text-xs h-8"
+                                        onClick={handleStartBrowser}
+                                        disabled={startingBrowser}
+                                    >
+                                        {startingBrowser ? (
+                                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                        ) : (
+                                            <Monitor className="h-3.5 w-3.5" />
+                                        )}
+                                        Start Browser
+                                    </Button>
+                                )}
+                            </>
+                        )}
                     </div>
                 </div>
 
                 {/* Messages area */}
                 {activeSession ? (
-                    <>
+                    <div className="flex-1 flex min-h-0">
+                        {/* Chat column */}
+                        <div className={`flex flex-col ${showBrowserPreview && browserWsUrl ? 'w-1/2' : 'flex-1'}`}>
                         <div className="flex-1 overflow-y-auto">
                             <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
                                 {loadingMessages ? (
@@ -491,16 +592,19 @@ export default function ChatPage() {
                                                             </div>
                                                             <div className="flex-1 min-w-0">
                                                                 <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5">
-                                                                    <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-                                                                        {msg.content}
-                                                                        {msg.isStreaming && !msg.content && (
-                                                                            <span className="inline-flex gap-1">
-                                                                                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '0ms' }} />
-                                                                                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '150ms' }} />
-                                                                                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '300ms' }} />
-                                                                            </span>
-                                                                        )}
-                                                                    </p>
+                                                                    {msg.isStreaming && !msg.content ? (
+                                                                        <span className="inline-flex gap-1">
+                                                                            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '0ms' }} />
+                                                                            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '150ms' }} />
+                                                                            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '300ms' }} />
+                                                                        </span>
+                                                                    ) : (
+                                                                        <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-code:text-xs prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-muted prose-pre:p-3 prose-pre:rounded-lg">
+                                                                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                                                {msg.content}
+                                                                            </ReactMarkdown>
+                                                                        </div>
+                                                                    )}
                                                                 </div>
                                                             </div>
                                                         </div>
@@ -542,7 +646,19 @@ export default function ChatPage() {
                                 </Button>
                             </div>
                         </div>
-                    </>
+                        </div>
+
+                        {/* Browser preview column */}
+                        {showBrowserPreview && browserWsUrl && browserSessionId && (
+                            <div className="w-1/2 border-l border-border p-3 overflow-y-auto">
+                                <BrowserPreview
+                                    wsUrl={browserWsUrl}
+                                    sessionId={browserSessionId}
+                                    onClose={() => setShowBrowserPreview(false)}
+                                />
+                            </div>
+                        )}
+                    </div>
                 ) : (
                     <div className="flex-1 flex flex-col items-center justify-center text-center gap-4">
                         <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center">

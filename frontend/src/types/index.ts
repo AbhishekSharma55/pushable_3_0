@@ -161,3 +161,27 @@ export interface Schedule {
     createdAt: string;
     updatedAt: string;
 }
+
+export interface BrowserProfile {
+    id: string;
+    workspaceId: string;
+    name: string;
+    profilePath: string;
+    assignedAgentId: string | null;
+    os: string;
+    status: 'active' | 'inactive';
+    metadata: Record<string, unknown>;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface BrowserSession {
+    id: string;
+    workspaceId: string;
+    profileId: string;
+    agentId: string | null;
+    taskId: string | null;
+    status: 'starting' | 'active' | 'closed' | 'error';
+    createdAt: string;
+    closedAt: string | null;
+}

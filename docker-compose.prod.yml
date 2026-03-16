@@ -1,0 +1,91 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-abhishek0003}
+      POSTGRES_DB: ${POSTGRES_DB:-pushable_ai}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-4000}:4000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-abhishek0003}@postgres:5432/${POSTGRES_DB:-pushable_ai}
+      JWT_SECRET: ${JWT_SECRET:-pushable-ai-super-secret-jwt-key-32chars}
+      PORT: "4000"
+      OPENROUTER_KEY: ${OPENROUTER_KEY:-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}
+      REDIS_URL: redis://redis:6379
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-ak_sYMIgmVF81jyVXtDGmWQ}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      BROWSER_SERVICE_URL: http://browser-service:8080
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  browser-service:
+    build:
+      context: .
+      dockerfile: browser-service/Dockerfile.prod
+    restart: unless-stopped
+    ports:
+      - "${BROWSER_SERVICE_PORT:-8080}:8080"
+    environment:
+      PORT: "8080"
+      PROFILES_DIR: /app/profiles
+      ALLOWED_ORIGINS: ${FRONTEND_URL:-http://localhost:3000}
+      SCREENSHOT_INTERVAL_MS: "200"
+      SCREENSHOT_QUALITY: "60"
+      SCREENSHOT_WIDTH: "1920"
+      SCREENSHOT_HEIGHT: "1080"
+      CAPSOLVER_API_KEY: ${CAPSOLVER_API_KEY:-CAP-EE4E7B31B78FB28FB7488B481872E8EF41ED238F170D21EF8420588FFEC5D2F5}
+      CAPSOLVER_EXTENSION_ENABLED: ${CAPSOLVER_EXTENSION_ENABLED:-true}
+    volumes:
+      - browser_profiles:/app/profiles
+      - browser_extensions:/app/extensions
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+        NEXT_PUBLIC_BROWSER_WS_URL: ${NEXT_PUBLIC_BROWSER_WS_URL:-ws://localhost:8080}
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  redisdata:
+  browser_profiles:
+  browser_extensions:

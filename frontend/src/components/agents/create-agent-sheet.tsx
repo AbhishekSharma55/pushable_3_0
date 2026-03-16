@@ -35,7 +35,7 @@ const agentSchema = z.object({
     temperature: z.number().min(0).max(2).default(0.7),
 });
 
-type AgentFormData = z.infer<typeof agentSchema>;
+type AgentFormData = z.input<typeof agentSchema>;
 
 interface CreateAgentSheetProps {
     open: boolean;
@@ -182,7 +182,7 @@ export function CreateAgentSheet({
 
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent className="sm:max-w-lg overflow-y-auto">
+            <SheetContent className="sm:max-w-lg overflow-y-auto px-6">
                 <SheetHeader>
                     <SheetTitle className="text-xl font-semibold">
                         {isEdit ? 'Edit Agent' : 'Create Agent'}

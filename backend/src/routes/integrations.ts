@@ -6,7 +6,14 @@ import { AppError, UnauthorizedError } from "../lib/errors.ts";
 const connectSchema = z.object({
     toolkitSlug: z.string().min(1),
     name: z.string().min(1),
+    connectionLabel: z.string().min(2, "Connection name must be at least 2 characters"),
+    connectionDescription: z.string().optional(),
     logo: z.string().optional(),
+});
+
+const updateConnectionSchema = z.object({
+    connectionLabel: z.string().min(2).optional(),
+    connectionDescription: z.string().optional(),
 });
 
 export async function integrationRoutes(fastify: FastifyInstance) {
@@ -64,6 +71,8 @@ export async function integrationRoutes(fastify: FastifyInstance) {
             workspaceId,
             toolkitSlug: body.toolkitSlug,
             name: body.name,
+            connectionLabel: body.connectionLabel,
+            connectionDescription: body.connectionDescription,
             logo: body.logo,
             redirectUrl: `${frontendUrl}/integrations/callback`,
         });
@@ -94,6 +103,19 @@ export async function integrationRoutes(fastify: FastifyInstance) {
             workspaceId
         );
         return { data: result };
+    });
+
+    // PUT /integrations/:id
+    fastify.put("/integrations/:id", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { id } = request.params as { id: string };
+        const body = updateConnectionSchema.parse(request.body);
+        const updated = await integrationService.updateConnection(
+            id,
+            workspaceId,
+            body
+        );
+        return { data: updated };
     });
 
     // DELETE /integrations/:id

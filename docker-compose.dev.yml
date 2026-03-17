@@ -39,7 +39,7 @@ services:
       OPENROUTER_KEY: ${OPENROUTER_KEY:-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}
       REDIS_URL: redis://redis:6379
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-ak_sYMIgmVF81jyVXtDGmWQ}
-      FRONTEND_URL: http://localhost:3000
+      FRONTEND_URL: http://192.168.1.9:3000
       BROWSER_SERVICE_URL: http://browser-service:8080
     depends_on:
       postgres:
@@ -59,7 +59,7 @@ services:
     environment:
       PORT: "8080"
       PROFILES_DIR: /app/profiles
-      ALLOWED_ORIGINS: http://localhost:3000
+      ALLOWED_ORIGINS: http://192.168.1.9:3000
       SCREENSHOT_INTERVAL_MS: "200"
       SCREENSHOT_QUALITY: "60"
       SCREENSHOT_WIDTH: "1920"
@@ -77,8 +77,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:4000
-      NEXT_PUBLIC_BROWSER_WS_URL: ws://localhost:8080
+      NEXT_PUBLIC_API_URL: http://192.168.1.9:4000
+      NEXT_PUBLIC_BROWSER_WS_URL: ws://192.168.1.9:8080
     depends_on:
       - backend
     volumes:

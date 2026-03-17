@@ -17,6 +17,17 @@ const updateAgentSchema = z.object({
     temperature: z.number().min(0).max(2).optional(),
 });
 
+const systemPermissionsSchema = z.object({
+    systemLevelAccess: z.boolean(),
+    canManageKB: z.boolean(),
+    canManageSkills: z.boolean(),
+    canManageTools: z.boolean(),
+    canManageSchedules: z.boolean(),
+    canManageTasks: z.boolean(),
+    canManageChannels: z.boolean(),
+    canManageAgents: z.boolean(),
+});
+
 export async function agentRoutes(fastify: FastifyInstance) {
     // Auth preHandler for all routes
     fastify.addHook("onRequest", async (request) => {
@@ -77,5 +88,18 @@ export async function agentRoutes(fastify: FastifyInstance) {
         const { id } = request.params as { id: string };
         await agentService.deleteAgent(id, workspaceId);
         return reply.status(204).send();
+    });
+
+    // PUT /agents/:id/system-permissions
+    fastify.put("/agents/:id/system-permissions", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { id } = request.params as { id: string };
+        const body = systemPermissionsSchema.parse(request.body);
+        const agent = await agentService.updateSystemPermissions(
+            id,
+            workspaceId,
+            body
+        );
+        return { data: agent };
     });
 }

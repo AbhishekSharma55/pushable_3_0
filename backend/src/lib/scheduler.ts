@@ -11,20 +11,23 @@ export async function registerJob(schedule: {
     cron: string;
     targetType: "task" | "workflow";
     targetId: string;
+    timezone?: string;
 }) {
     const queue =
         schedule.targetType === "task" ? taskQueue : workflowQueue;
     const payload =
         schedule.targetType === "task"
-            ? { taskId: schedule.targetId, workspaceId: schedule.workspaceId }
+            ? { taskId: schedule.targetId, workspaceId: schedule.workspaceId, scheduleId: schedule.id }
             : {
                 workflowId: schedule.targetId,
                 workspaceId: schedule.workspaceId,
+                scheduleId: schedule.id,
             };
 
     await queue.add(`schedule-${schedule.id}`, payload, {
         repeat: {
             pattern: schedule.cron,
+            tz: schedule.timezone || "UTC",
         },
         jobId: `schedule-${schedule.id}`,
     });
@@ -35,7 +38,7 @@ export async function registerJob(schedule: {
     });
 
     logger.info(
-        { scheduleId: schedule.id, cron: schedule.cron },
+        { scheduleId: schedule.id, cron: schedule.cron, tz: schedule.timezone },
         "Scheduled job registered"
     );
 }
@@ -68,6 +71,7 @@ export async function resumeJob(schedule: {
     cron: string;
     targetType: "task" | "workflow";
     targetId: string;
+    timezone?: string;
 }) {
     await registerJob(schedule);
 }

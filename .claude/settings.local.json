@@ -1,6 +1,7 @@
 {
   "permissions": {
     "allow": [
+      "*",
       "Bash(cd:*)",
       "Bash(npx drizzle-kit:*)",
       "Bash(node:*)",
@@ -32,7 +33,16 @@
       "Bash(docker exec:*)",
       "Bash(docker rm:*)",
       "Bash(gh api:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(docker run:*)",
+      "Bash(xxd -r -p)",
+      "Bash(ls /home/ibr-ubuntu/abhishek_resources/projects/company_projects/pushable_3_0/frontend/src/app/\\\\\\(dashboard\\\\\\)/channels/)",
+      "Bash(pnpm db:push)",
+      "Bash(source .env)",
+      "Bash(PGPASSWORD=abhishek0003 psql -h localhost -U postgres -d pushable_ai -c \"\nALTER TABLE agents ADD COLUMN IF NOT EXISTS system_level_access boolean DEFAULT false NOT NULL;\nALTER TABLE agents ADD COLUMN IF NOT EXISTS can_manage_kb boolean DEFAULT false NOT NULL;\nALTER TABLE agents ADD COLUMN IF NOT EXISTS can_manage_skills boolean DEFAULT false NOT NULL;\nALTER TABLE agents ADD COLUMN IF NOT EXISTS can_manage_tools boolean DEFAULT false NOT NULL;\nALTER TABLE agents ADD COLUMN IF NOT EXISTS can_manage_schedules boolean DEFAULT false NOT NULL;\nALTER TABLE agents ADD COLUMN IF NOT EXISTS can_manage_tasks boolean DEFAULT false NOT NULL;\nALTER TABLE agents ADD COLUMN IF NOT EXISTS can_manage_channels boolean DEFAULT false NOT NULL;\nALTER TABLE agents ADD COLUMN IF NOT EXISTS can_manage_agents boolean DEFAULT false NOT NULL;\n\")",
+      "Bash(cat:*)",
+      "Bash(find ./src -name *credit* -o -name *billing*)",
+      "Bash(PGPASSWORD=abhishek0003 psql -h localhost -U postgres -d pushable_ai -c \"\n-- Create enums\nDO \\\\$\\\\$ BEGIN\n  CREATE TYPE llm_provider AS ENUM \\('openai','anthropic','google','deepseek','meta'\\);\nEXCEPTION WHEN duplicate_object THEN NULL; END \\\\$\\\\$;\n\nDO \\\\$\\\\$ BEGIN\n  CREATE TYPE plan_tier AS ENUM \\('free','starter','pro','scale'\\);\nEXCEPTION WHEN duplicate_object THEN NULL; END \\\\$\\\\$;\n\nDO \\\\$\\\\$ BEGIN\n  CREATE TYPE ledger_type AS ENUM \\(\n    'subscription_grant','topup','chat_message','task_run','workflow_step',\n    'kb_upload','kb_query','browser_action','scheduled_run_fee',\n    'agent_delegation','overage','refund','manual_adjustment'\n  \\);\nEXCEPTION WHEN duplicate_object THEN NULL; END \\\\$\\\\$;\n\n-- Create llm_models table\nCREATE TABLE IF NOT EXISTS llm_models \\(\n  id uuid PRIMARY KEY DEFAULT gen_random_uuid\\(\\),\n  provider llm_provider NOT NULL,\n  model_id text NOT NULL UNIQUE,\n  display_name text NOT NULL,\n  description text,\n  multiplier numeric\\(4,2\\) NOT NULL DEFAULT 1.00,\n  context_window integer,\n  is_active boolean NOT NULL DEFAULT true,\n  minimum_plan plan_tier NOT NULL DEFAULT 'pro',\n  is_featured boolean NOT NULL DEFAULT false,\n  sort_order integer NOT NULL DEFAULT 0,\n  created_at timestamp NOT NULL DEFAULT now\\(\\),\n  updated_at timestamp NOT NULL DEFAULT now\\(\\)\n\\);\n\n-- Create credit_ledger table\nCREATE TABLE IF NOT EXISTS credit_ledger \\(\n  id uuid PRIMARY KEY DEFAULT gen_random_uuid\\(\\),\n  workspace_id uuid NOT NULL REFERENCES workspaces\\(id\\) ON DELETE CASCADE,\n  amount integer NOT NULL,\n  type ledger_type NOT NULL,\n  credits_after integer NOT NULL,\n  metadata jsonb NOT NULL DEFAULT '{}',\n  created_at timestamp NOT NULL DEFAULT now\\(\\)\n\\);\n\n-- Update credits table\nALTER TABLE credits ADD COLUMN IF NOT EXISTS plan_credits integer NOT NULL DEFAULT 1000;\nALTER TABLE credits ADD COLUMN IF NOT EXISTS topup_credits integer NOT NULL DEFAULT 0;\nALTER TABLE credits ADD COLUMN IF NOT EXISTS overage_enabled boolean NOT NULL DEFAULT false;\nALTER TABLE credits ADD COLUMN IF NOT EXISTS overage_limit integer NOT NULL DEFAULT 500;\nALTER TABLE credits ADD COLUMN IF NOT EXISTS total_credits_consumed integer NOT NULL DEFAULT 0;\n\n-- Backfill: sync plan_credits from existing balance\nUPDATE credits SET plan_credits = balance WHERE plan_credits = 1000 AND balance != 1000;\n\n-- Index for ledger queries\nCREATE INDEX IF NOT EXISTS idx_credit_ledger_workspace ON credit_ledger\\(workspace_id, created_at DESC\\);\n\")"
     ]
   }
 }

@@ -1,14 +1,25 @@
 import { HumanMessage } from "@langchain/core/messages";
 import { taskRepository } from "../repositories/task.repository.ts";
 import { createAgentGraph } from "../graphs/agent.graph.ts";
+import { scheduleService } from "../services/schedule.service.ts";
 import { logger } from "../lib/logger.ts";
 
 export async function processTask(data: {
     taskId: string;
     workspaceId: string;
+    scheduleId?: string;
 }) {
-    const { taskId, workspaceId } = data;
+    const { taskId, workspaceId, scheduleId } = data;
     logger.info({ taskId }, "Processing task");
+
+    // Handle humanization for scheduled tasks
+    if (scheduleId) {
+        const shouldRun = await scheduleService.executeWithHumanization(scheduleId);
+        if (!shouldRun) {
+            logger.info({ taskId, scheduleId }, "Task skipped — outside business hours");
+            return;
+        }
+    }
 
     try {
         const task = await taskRepository.findById(taskId, workspaceId);

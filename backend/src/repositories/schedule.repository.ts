@@ -10,6 +10,16 @@ export const scheduleRepository = {
         targetType: "task" | "workflow";
         targetId: string;
         enabled?: boolean;
+        naturalLanguage?: string;
+        humanizeDelay?: number;
+        timezone?: string;
+        businessHoursOnly?: boolean;
+        workStartHour?: number;
+        workEndHour?: number;
+        workDays?: number[];
+        scheduleType?: "natural" | "preset" | "custom";
+        presetKey?: string;
+        nextRunDescription?: string;
     }) {
         const result = await db.insert(schedules).values(data).returning();
         return result[0];
@@ -53,6 +63,7 @@ export const scheduleRepository = {
             enabled: boolean;
             targetType: "task" | "workflow";
             targetId: string;
+            nextRunDescription: string;
         }>
     ) {
         const result = await db

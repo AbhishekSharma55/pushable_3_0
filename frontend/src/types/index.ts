@@ -27,8 +27,27 @@ export interface Agent {
     systemPrompt: string | null;
     model: string;
     temperature: number;
+    systemLevelAccess: boolean;
+    canManageKB: boolean;
+    canManageSkills: boolean;
+    canManageTools: boolean;
+    canManageSchedules: boolean;
+    canManageTasks: boolean;
+    canManageChannels: boolean;
+    canManageAgents: boolean;
     createdAt: string;
     updatedAt: string;
+}
+
+export interface SystemPermissionsInput {
+    systemLevelAccess: boolean;
+    canManageKB: boolean;
+    canManageSkills: boolean;
+    canManageTools: boolean;
+    canManageSchedules: boolean;
+    canManageTasks: boolean;
+    canManageChannels: boolean;
+    canManageAgents: boolean;
 }
 
 export interface Session {
@@ -88,6 +107,16 @@ export interface KBDocument {
     createdAt: string;
 }
 
+export interface KBChunk {
+    id: string;
+    workspaceId: string;
+    kbId: string;
+    documentId: string;
+    content: string;
+    metadata: Record<string, unknown>;
+    createdAt: string;
+}
+
 export interface Skill {
     id: string;
     workspaceId: string;
@@ -135,6 +164,9 @@ export interface Integration {
     composioToolkitSlug: string;
     composioConnectionId: string;
     name: string;
+    connectionLabel: string;
+    connectionDescription: string | null;
+    connectionIcon: string | null;
     status: 'active' | 'inactive' | 'pending' | 'failed';
     metadata: Record<string, unknown>;
     createdAt: string;
@@ -160,6 +192,39 @@ export interface Schedule {
     lastRunAt: string | null;
     createdAt: string;
     updatedAt: string;
+    naturalLanguage: string | null;
+    humanizeDelay: number;
+    timezone: string;
+    businessHoursOnly: boolean;
+    workStartHour: number;
+    workEndHour: number;
+    workDays: number[];
+    scheduleType: 'natural' | 'preset' | 'custom';
+    presetKey: string | null;
+    nextRunDescription: string | null;
+}
+
+export interface SchedulePreset {
+    key: string;
+    label: string;
+    description: string;
+    cron: string | null;
+    humanizeDelay: number;
+    icon: string;
+}
+
+export interface ChannelConnection {
+    id: string;
+    workspaceId: string;
+    agentId: string;
+    channelType: 'telegram' | 'slack';
+    name: string;
+    status: 'active' | 'inactive' | 'error';
+    config: Record<string, unknown>;
+    errorMessage: string | null;
+    lastMessageAt: string | null;
+    createdAt: string;
+    updatedAt: string;
 }
 
 export interface BrowserProfile {
@@ -173,6 +238,39 @@ export interface BrowserProfile {
     metadata: Record<string, unknown>;
     createdAt: string;
     updatedAt: string;
+}
+
+export interface LLMModel {
+    id: string;
+    provider: string;
+    modelId: string;
+    displayName: string;
+    description: string | null;
+    multiplier: number;
+    contextWindow: number | null;
+    minimumPlan: 'free' | 'starter' | 'pro' | 'scale';
+    isFeatured: boolean;
+    available: boolean;
+    requiredPlan: string;
+    creditCostPerMessage: number;
+}
+
+export interface CreditBalance {
+    planCredits: number;
+    topupCredits: number;
+    availableCredits: number;
+    overageEnabled: boolean;
+    overageLimit: number;
+    totalConsumed: number;
+}
+
+export interface LedgerEntry {
+    id: string;
+    amount: number;
+    type: string;
+    creditsAfter: number;
+    metadata: Record<string, unknown>;
+    createdAt: string;
 }
 
 export interface BrowserSession {

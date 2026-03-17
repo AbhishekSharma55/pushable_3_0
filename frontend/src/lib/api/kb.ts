@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { KnowledgeBase, KBDocument } from '@/types';
+import type { KnowledgeBase, KBDocument, KBChunk } from '@/types';
 
 export interface CreateKBInput {
     name: string;
@@ -35,3 +35,18 @@ export const uploadDocument = (workspaceId: string, kbId: string, file: File): P
 
 export const deleteDocument = (workspaceId: string, kbId: string, id: string) =>
     apiClient.delete(`/api/kb/${kbId}/documents/${id}`, { headers: { 'x-workspace-id': workspaceId } });
+
+export const getChunksByDocument = (workspaceId: string, kbId: string, documentId: string): Promise<KBChunk[]> =>
+    apiClient.get(`/api/kb/${kbId}/documents/${documentId}/chunks`, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+export const getChunksByKB = (workspaceId: string, kbId: string): Promise<KBChunk[]> =>
+    apiClient.get(`/api/kb/${kbId}/chunks`, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+export const updateChunk = (workspaceId: string, chunkId: string, content: string): Promise<KBChunk> =>
+    apiClient.put(`/api/kb/chunks/${chunkId}`, { content }, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+export const deleteChunk = (workspaceId: string, chunkId: string) =>
+    apiClient.delete(`/api/kb/chunks/${chunkId}`, { headers: { 'x-workspace-id': workspaceId } });
+
+export const addManualChunk = (workspaceId: string, kbId: string, documentId: string, content: string): Promise<KBChunk> =>
+    apiClient.post(`/api/kb/${kbId}/documents/${documentId}/chunks`, { content }, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);

@@ -1,6 +1,6 @@
 import { integrationRepository } from "../repositories/integration.repository.ts";
 import { getComposioClient } from "../lib/composio.ts";
-import { NotFoundError } from "../lib/errors.ts";
+import { NotFoundError, AppError } from "../lib/errors.ts";
 import { logger } from "../lib/logger.ts";
 
 export const integrationService = {
@@ -52,9 +52,24 @@ export const integrationService = {
         workspaceId: string;
         toolkitSlug: string;
         name: string;
+        connectionLabel: string;
+        connectionDescription?: string;
         logo?: string;
         redirectUrl: string;
     }) {
+        // Validate label uniqueness within workspace
+        const existing = await integrationRepository.findByLabelInWorkspace(
+            data.connectionLabel,
+            data.workspaceId
+        );
+        if (existing) {
+            throw new AppError(
+                `A connection named '${data.connectionLabel}' already exists.`,
+                400,
+                "DUPLICATE_CONNECTION_LABEL"
+            );
+        }
+
         const composio = getComposioClient();
 
         // Create pending integration in DB with logo in metadata
@@ -63,6 +78,9 @@ export const integrationService = {
             composioToolkitSlug: data.toolkitSlug,
             composioConnectionId: "pending",
             name: data.name,
+            connectionLabel: data.connectionLabel,
+            connectionDescription: data.connectionDescription,
+            connectionIcon: data.logo,
             status: "pending",
             metadata: data.logo ? { logo: data.logo } : {},
         });
@@ -215,6 +233,35 @@ export const integrationService = {
         }
 
         await integrationRepository.delete(id, workspaceId);
+    },
+
+    async updateConnection(
+        id: string,
+        workspaceId: string,
+        data: {
+            connectionLabel?: string;
+            connectionDescription?: string;
+        }
+    ) {
+        const integration = await integrationRepository.findById(id, workspaceId);
+        if (!integration) throw new NotFoundError("Integration not found");
+
+        // If label is changing, check uniqueness
+        if (data.connectionLabel && data.connectionLabel !== integration.connectionLabel) {
+            const existing = await integrationRepository.findByLabelInWorkspace(
+                data.connectionLabel,
+                workspaceId
+            );
+            if (existing) {
+                throw new AppError(
+                    `A connection named '${data.connectionLabel}' already exists.`,
+                    400,
+                    "DUPLICATE_CONNECTION_LABEL"
+                );
+            }
+        }
+
+        return integrationRepository.updateConnection(id, workspaceId, data);
     },
 
     async assignToAgent(

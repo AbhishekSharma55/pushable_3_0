@@ -20,9 +20,15 @@ import { workflowRoutes } from "./routes/workflows.ts";
 import { scheduleRoutes } from "./routes/schedules.ts";
 import { integrationRoutes } from "./routes/integrations.ts";
 import { browserRoutes } from "./routes/browser.ts";
+import { channelRoutes } from "./routes/channels.ts";
+import { webhookRoutes } from "./routes/webhooks.ts";
 import { startWorkers, stopWorkers } from "./lib/workers.ts";
 import { initScheduler } from "./lib/scheduler.ts";
 import { taskQueue, workflowQueue } from "./lib/queue.ts";
+import { channelManager } from "./channels/channel-manager.ts";
+import { seedModels } from "./db/seeds/models.seed.ts";
+import { modelRoutes } from "./routes/models.ts";
+import { creditRoutes } from "./routes/credits.ts";
 
 const app = Fastify({ logger: false });
 
@@ -81,13 +87,21 @@ await app.register(workflowRoutes, { prefix: "/api" });
 await app.register(scheduleRoutes, { prefix: "/api" });
 await app.register(integrationRoutes, { prefix: "/api" });
 await app.register(browserRoutes, { prefix: "/api" });
+await app.register(channelRoutes, { prefix: "/api" });
+await app.register(modelRoutes, { prefix: "/api" });
+await app.register(creditRoutes, { prefix: "/api" });
+
+// Webhook routes — NO auth, external platforms call these
+await app.register(webhookRoutes);
 
 const port = Number(process.env.PORT) || 4000;
 await app.listen({ port, host: "0.0.0.0" });
 
-// Start workers and scheduler after app is ready
+// Seed models and start workers/scheduler after app is ready
+await seedModels();
 startWorkers();
 await initScheduler();
+await channelManager.initializeAllActive();
 
 logger.info(`Server running on port ${port}`);
 

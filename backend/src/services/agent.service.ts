@@ -50,4 +50,25 @@ export const agentService = {
         }
         await agentRepository.delete(id, workspaceId);
     },
+
+    async updateSystemPermissions(
+        id: string,
+        workspaceId: string,
+        data: {
+            systemLevelAccess: boolean;
+            canManageKB: boolean;
+            canManageSkills: boolean;
+            canManageTools: boolean;
+            canManageSchedules: boolean;
+            canManageTasks: boolean;
+            canManageChannels: boolean;
+            canManageAgents: boolean;
+        }
+    ) {
+        const agent = await agentRepository.findById(id, workspaceId);
+        if (!agent) {
+            throw new NotFoundError("Agent not found");
+        }
+        return agentRepository.updateSystemPermissions(id, workspaceId, data);
+    },
 };

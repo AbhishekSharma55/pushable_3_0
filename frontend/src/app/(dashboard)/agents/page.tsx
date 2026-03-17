@@ -21,6 +21,8 @@ import {
     Shield,
     Cpu,
     Thermometer,
+    Download,
+    Eye,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -50,6 +52,12 @@ import { getAgents, deleteAgent } from '@/lib/api/agents';
 import { getSessions, createSession, getMessages } from '@/lib/api/sessions';
 import { API_URL } from '@/lib/constants';
 import { getToken } from '@/lib/auth';
+import { parseArtifact } from '@/lib/artifact-parser';
+import type { Artifact } from '@/lib/artifact-parser';
+import { ArtifactPanel, FileIcon } from '@/components/artifact';
+import { downloadArtifact } from '@/lib/artifact-download';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { Agent, Session, Message } from '@/types';
 
 interface ToolCallEvent {
@@ -90,6 +98,7 @@ export default function AgentsPage() {
     const [loadingMessages, setLoadingMessages] = useState(false);
     const [sending, setSending] = useState(false);
     const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set());
+    const [activeArtifact, setActiveArtifact] = useState<Artifact | null>(null);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -468,25 +477,62 @@ export default function AgentsPage() {
                                                                         <div className="bg-primary text-primary-foreground rounded-2xl rounded-br-sm px-4 py-2.5 max-w-[80%]">
                                                                             <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.content}</p>
                                                                         </div>
-                                                                    ) : (
+                                                                    ) : (() => {
+                                                                        const { artifact, cleanMessage } = msg.isStreaming
+                                                                            ? { artifact: null, cleanMessage: msg.content }
+                                                                            : parseArtifact(msg.content);
+                                                                        return (
                                                                         <div className="flex gap-3">
                                                                             <div className="flex h-7 w-7 items-center justify-center rounded-full bg-muted flex-shrink-0 mt-0.5"><Bot className="h-3.5 w-3.5 text-muted-foreground" /></div>
                                                                             <div className="flex-1 min-w-0">
                                                                                 <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5">
-                                                                                    <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-                                                                                        {msg.content}
-                                                                                        {msg.isStreaming && !msg.content && (
-                                                                                            <span className="inline-flex gap-1">
-                                                                                                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '0ms' }} />
-                                                                                                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '150ms' }} />
-                                                                                                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '300ms' }} />
-                                                                                            </span>
-                                                                                        )}
-                                                                                    </p>
+                                                                                    {msg.isStreaming && !msg.content ? (
+                                                                                        <span className="inline-flex gap-1">
+                                                                                            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '0ms' }} />
+                                                                                            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '150ms' }} />
+                                                                                            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '300ms' }} />
+                                                                                        </span>
+                                                                                    ) : (
+                                                                                        <>
+                                                                                            {cleanMessage && (
+                                                                                                <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-code:text-xs prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-muted prose-pre:p-3 prose-pre:rounded-lg">
+                                                                                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                                                                        {cleanMessage}
+                                                                                                    </ReactMarkdown>
+                                                                                                </div>
+                                                                                            )}
+                                                                                            {artifact && (
+                                                                                                <div className={`flex items-center gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5 ${cleanMessage ? 'mt-3' : ''}`}>
+                                                                                                    <FileIcon type={artifact.type} className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                                                                                                    <div className="flex-1 min-w-0">
+                                                                                                        <p className="text-sm font-medium truncate">{artifact.filename}</p>
+                                                                                                        <p className="text-[11px] text-muted-foreground">{artifact.type.toUpperCase()}</p>
+                                                                                                    </div>
+                                                                                                    <Button
+                                                                                                        size="sm"
+                                                                                                        variant="outline"
+                                                                                                        className="gap-1.5 text-xs h-7 flex-shrink-0"
+                                                                                                        onClick={() => setActiveArtifact(artifact)}
+                                                                                                    >
+                                                                                                        <Eye className="h-3 w-3" />
+                                                                                                        View
+                                                                                                    </Button>
+                                                                                                    <button
+                                                                                                        className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
+                                                                                                        onClick={() => downloadArtifact(artifact)}
+                                                                                                        title="Download"
+                                                                                                    >
+                                                                                                        <Download className="h-3.5 w-3.5" />
+                                                                                                    </button>
+                                                                                                </div>
+                                                                                            )}
+                                                                                        </>
+                                                                                    )}
                                                                                 </div>
                                                                             </div>
                                                                         </div>
-                                                                    )}
+                                                                        );
+                                                                    })()}
                                                                 </div>
                                                             )}
                                                         </Fragment>
@@ -560,6 +606,13 @@ export default function AgentsPage() {
             </div>
 
             {workspace && <CreateAgentSheet open={sheetOpen} onOpenChange={setSheetOpen} workspaceId={workspace.id} agent={editAgent} onSuccess={() => { fetchAgents(); setSelectedAgent(null); }} />}
+
+            {activeArtifact && (
+                <ArtifactPanel
+                    artifact={activeArtifact}
+                    onClose={() => setActiveArtifact(null)}
+                />
+            )}
         </div>
     );
 }

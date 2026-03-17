@@ -13,6 +13,8 @@ import {
     Users,
     Cpu,
     Plug,
+    ShieldAlert,
+    AlertTriangle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -20,13 +22,57 @@ import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
-import { getAgents } from '@/lib/api/agents';
+import { getAgents, updateSystemPermissions } from '@/lib/api/agents';
 import { getTools } from '@/lib/api/tools';
 import { getKBs } from '@/lib/api/kb';
 import { getSkills } from '@/lib/api/skills';
 import { getAgentPermissions, setAgentPermissions } from '@/lib/api/permissions';
 import { getIntegrations, getAgentIntegrations, assignToAgent, removeFromAgent } from '@/lib/api/integrations';
-import type { Agent, Tool, KnowledgeBase, Skill, AgentPermission, Integration } from '@/types';
+import type { Agent, Tool, KnowledgeBase, Skill, AgentPermission, Integration, SystemPermissionsInput } from '@/types';
+
+const SYSTEM_PERMISSION_ITEMS: {
+    key: keyof Omit<SystemPermissionsInput, 'systemLevelAccess'>;
+    label: string;
+    description: string;
+    extraWarning?: string;
+}[] = [
+    {
+        key: 'canManageKB',
+        label: 'Manage Knowledge Bases',
+        description: 'Can create, edit, delete KBs and documents',
+    },
+    {
+        key: 'canManageSkills',
+        label: 'Manage Skills',
+        description: 'Can create, edit, delete skills',
+    },
+    {
+        key: 'canManageTools',
+        label: 'Manage Tools',
+        description: 'Can create, edit, delete function tools',
+    },
+    {
+        key: 'canManageSchedules',
+        label: 'Manage Schedules',
+        description: 'Can create, pause, delete schedules',
+    },
+    {
+        key: 'canManageTasks',
+        label: 'Manage Tasks',
+        description: 'Can create and cancel tasks',
+    },
+    {
+        key: 'canManageChannels',
+        label: 'Manage Channels',
+        description: 'Can view and disconnect channel connections',
+    },
+    {
+        key: 'canManageAgents',
+        label: 'Manage Agents',
+        description: 'Can create and update agents in this workspace',
+        extraWarning: 'This includes creating agents with system access',
+    },
+];
 
 export default function AgentPermissionsPage() {
     const params = useParams();
@@ -45,6 +91,20 @@ export default function AgentPermissionsPage() {
     const [loading, setLoading] = useState(true);
     const [savingIds, setSavingIds] = useState<Set<string>>(new Set());
 
+    // System permissions state
+    const [systemPerms, setSystemPerms] = useState<SystemPermissionsInput>({
+        systemLevelAccess: false,
+        canManageKB: false,
+        canManageSkills: false,
+        canManageTools: false,
+        canManageSchedules: false,
+        canManageTasks: false,
+        canManageChannels: false,
+        canManageAgents: false,
+    });
+    const [savingSystem, setSavingSystem] = useState(false);
+    const [showEnableConfirm, setShowEnableConfirm] = useState(false);
+
     const fetchData = useCallback(async () => {
         if (!workspace) return;
         try {
@@ -58,7 +118,8 @@ export default function AgentPermissionsPage() {
                 getIntegrations(workspace.id),
                 getAgentIntegrations(workspace.id, agentId),
             ]);
-            setAgent(agentsList.find((a: Agent) => a.id === agentId) || null);
+            const currentAgent = agentsList.find((a: Agent) => a.id === agentId) || null;
+            setAgent(currentAgent);
             setOtherAgents(agentsList.filter((a: Agent) => a.id !== agentId));
             setTools(toolsList);
             setKbs(kbsList);
@@ -66,6 +127,20 @@ export default function AgentPermissionsPage() {
             setPermissions(permsList);
             setAllIntegrations(integrationsData.filter((i: Integration) => i.status === 'active'));
             setAgentIntegrationIds(new Set(agentInts.map((i: Integration) => i.id)));
+
+            // Initialize system permissions from agent
+            if (currentAgent) {
+                setSystemPerms({
+                    systemLevelAccess: currentAgent.systemLevelAccess,
+                    canManageKB: currentAgent.canManageKB,
+                    canManageSkills: currentAgent.canManageSkills,
+                    canManageTools: currentAgent.canManageTools,
+                    canManageSchedules: currentAgent.canManageSchedules,
+                    canManageTasks: currentAgent.canManageTasks,
+                    canManageChannels: currentAgent.canManageChannels,
+                    canManageAgents: currentAgent.canManageAgents,
+                });
+            }
         } catch {
             toast.error('Failed to load data');
         } finally {
@@ -158,6 +233,46 @@ export default function AgentPermissionsPage() {
             toast.error('Failed to update integration');
         } finally {
             setSavingIds(p => { const n = new Set(p); n.delete(key); return n; });
+        }
+    };
+
+    const handleSystemAccessToggle = (enabled: boolean) => {
+        if (enabled) {
+            setShowEnableConfirm(true);
+        } else {
+            setSystemPerms(prev => ({
+                ...prev,
+                systemLevelAccess: false,
+                canManageKB: false,
+                canManageSkills: false,
+                canManageTools: false,
+                canManageSchedules: false,
+                canManageTasks: false,
+                canManageChannels: false,
+                canManageAgents: false,
+            }));
+        }
+    };
+
+    const confirmEnableSystemAccess = () => {
+        setSystemPerms(prev => ({ ...prev, systemLevelAccess: true }));
+        setShowEnableConfirm(false);
+    };
+
+    const handleSystemPermToggle = (key: keyof Omit<SystemPermissionsInput, 'systemLevelAccess'>, enabled: boolean) => {
+        setSystemPerms(prev => ({ ...prev, [key]: enabled }));
+    };
+
+    const saveSystemPermissions = async () => {
+        if (!workspace) return;
+        setSavingSystem(true);
+        try {
+            await updateSystemPermissions(workspace.id, agentId, systemPerms);
+            toast.success('System permissions saved');
+        } catch {
+            toast.error('Failed to save system permissions');
+        } finally {
+            setSavingSystem(false);
         }
     };
 
@@ -469,6 +584,7 @@ export default function AgentPermissionsPage() {
                             <div className="space-y-2">
                                 {allIntegrations.map((integ) => {
                                     const key = `integration-${integ.id}`;
+                                    const displayLabel = integ.connectionLabel || integ.name;
                                     return (
                                         <div key={integ.id} className="flex items-center justify-between rounded-lg border border-border/60 bg-card px-4 py-3">
                                             <div className="flex items-center gap-3">
@@ -476,10 +592,17 @@ export default function AgentPermissionsPage() {
                                                     <Plug className="h-4 w-4 text-cyan-600" />
                                                 </div>
                                                 <div>
-                                                    <p className="text-sm font-medium">{integ.name}</p>
-                                                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 mt-0.5 bg-cyan-500/10 text-cyan-600 border-cyan-500/20">
-                                                        {integ.composioToolkitSlug}
-                                                    </Badge>
+                                                    <p className="text-sm font-medium">
+                                                        {displayLabel}
+                                                        <span className="text-muted-foreground font-normal ml-1.5">
+                                                            ({integ.composioToolkitSlug})
+                                                        </span>
+                                                    </p>
+                                                    {integ.connectionDescription && (
+                                                        <p className="text-xs text-muted-foreground truncate max-w-[300px] mt-0.5">
+                                                            {integ.connectionDescription}
+                                                        </p>
+                                                    )}
                                                 </div>
                                             </div>
                                             <div className="flex items-center gap-2">
@@ -495,6 +618,111 @@ export default function AgentPermissionsPage() {
                                 })}
                             </div>
                         )}
+                    </div>
+
+                    {/* System Access Section */}
+                    <div className="rounded-xl border-2 border-red-500/30 bg-red-500/5 p-6 space-y-5">
+                        <div className="flex items-center gap-2 mb-1">
+                            <ShieldAlert className="h-5 w-5 text-red-500" />
+                            <h2 className="text-lg font-semibold text-red-600">System-Level Access</h2>
+                        </div>
+
+                        {/* Warning Banner */}
+                        <div className="flex gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
+                            <AlertTriangle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                            <div className="text-sm text-amber-800 dark:text-amber-300">
+                                <p className="font-medium mb-1">Warning</p>
+                                <p>
+                                    Enabling this allows the agent to create, edit, and delete
+                                    workspace resources including KBs, Skills, Tools, Schedules,
+                                    and other Agents. Only enable this for trusted, well-configured
+                                    agents. Unexpected behavior may result.
+                                </p>
+                            </div>
+                        </div>
+
+                        {/* Master Toggle */}
+                        <div className="flex items-center justify-between rounded-lg border border-border/60 bg-card px-4 py-3">
+                            <div>
+                                <p className="text-sm font-medium">Enable System Access</p>
+                                <p className="text-xs text-muted-foreground mt-0.5">
+                                    Master toggle for all system-level permissions
+                                </p>
+                            </div>
+                            <Switch
+                                checked={systemPerms.systemLevelAccess}
+                                onCheckedChange={handleSystemAccessToggle}
+                            />
+                        </div>
+
+                        {/* Confirmation Dialog */}
+                        {showEnableConfirm && (
+                            <div className="rounded-lg border border-red-500/30 bg-card p-4 space-y-3">
+                                <p className="text-sm font-medium text-red-600">
+                                    Are you sure? This agent will be able to modify your workspace.
+                                </p>
+                                <div className="flex gap-2">
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() => setShowEnableConfirm(false)}
+                                    >
+                                        Cancel
+                                    </Button>
+                                    <Button
+                                        variant="destructive"
+                                        size="sm"
+                                        onClick={confirmEnableSystemAccess}
+                                    >
+                                        Yes, Enable System Access
+                                    </Button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Individual Permission Toggles */}
+                        {systemPerms.systemLevelAccess && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                {SYSTEM_PERMISSION_ITEMS.map((item) => (
+                                    <div
+                                        key={item.key}
+                                        className="flex items-start justify-between rounded-lg border border-border/60 bg-card px-4 py-3"
+                                    >
+                                        <div className="pr-3">
+                                            <p className="text-sm font-medium">{item.label}</p>
+                                            <p className="text-xs text-muted-foreground mt-0.5">
+                                                {item.description}
+                                            </p>
+                                            {item.extraWarning && (
+                                                <p className="text-xs text-amber-600 mt-1 flex items-center gap-1">
+                                                    <AlertTriangle className="h-3 w-3" />
+                                                    {item.extraWarning}
+                                                </p>
+                                            )}
+                                        </div>
+                                        <Switch
+                                            checked={systemPerms[item.key]}
+                                            onCheckedChange={(checked) =>
+                                                handleSystemPermToggle(item.key, checked)
+                                            }
+                                        />
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Save Button */}
+                        <div className="flex justify-end pt-2">
+                            <Button
+                                onClick={saveSystemPermissions}
+                                disabled={savingSystem}
+                            >
+                                {savingSystem && (
+                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                )}
+                                Save System Permissions
+                            </Button>
+                        </div>
                     </div>
                 </TabsContent>
             </Tabs>

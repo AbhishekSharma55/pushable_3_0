@@ -11,6 +11,8 @@ import {
     Loader2,
     Sparkles,
     Hash,
+    Eye,
+    Layers,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -28,6 +30,7 @@ import {
     AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { CreateKBSheet } from '@/components/kb/create-kb-sheet';
+import { ChunkViewer } from '@/components/kb/chunk-viewer';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
 import {
     getKBs,
@@ -53,6 +56,8 @@ export default function KBPage() {
     const [uploadingDocs, setUploadingDocs] = useState<UploadingDoc[]>([]);
     const [sheetOpen, setSheetOpen] = useState(false);
     const [editKB, setEditKB] = useState<KnowledgeBase | null>(null);
+    const [chunkViewerMode, setChunkViewerMode] = useState<'document' | 'kb' | null>(null);
+    const [selectedDocForChunks, setSelectedDocForChunks] = useState<KBDocument | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const fetchKBs = useCallback(async () => {
@@ -154,6 +159,24 @@ export default function KBPage() {
     const handleSheetSuccess = () => {
         fetchKBs();
         setSelectedKB(null);
+    };
+
+    const handleViewDocChunks = (doc: KBDocument) => {
+        setSelectedDocForChunks(doc);
+        setChunkViewerMode('document');
+    };
+
+    const handleViewAllChunks = () => {
+        setSelectedDocForChunks(null);
+        setChunkViewerMode('kb');
+    };
+
+    const handleChunkCountChange = (documentId: string, delta: number) => {
+        setDocuments((prev) =>
+            prev.map((d) =>
+                d.id === documentId ? { ...d, chunkCount: d.chunkCount + delta } : d
+            )
+        );
     };
 
     const totalChunks = documents.reduce((sum, d) => sum + d.chunkCount, 0);
@@ -322,6 +345,13 @@ export default function KBPage() {
                                                         </span>
                                                     </div>
                                                 </div>
+                                                <button
+                                                    className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground"
+                                                    onClick={() => handleViewDocChunks(doc)}
+                                                    title="View Chunks"
+                                                >
+                                                    <Eye className="h-3.5 w-3.5" />
+                                                </button>
                                                 <AlertDialog>
                                                     <AlertDialogTrigger asChild>
                                                         <button
@@ -407,6 +437,16 @@ export default function KBPage() {
                                     })}
                                 </p>
                             </div>
+
+                            <Button
+                                variant="outline"
+                                className="w-full gap-2"
+                                onClick={handleViewAllChunks}
+                                disabled={totalChunks === 0}
+                            >
+                                <Layers className="h-4 w-4" />
+                                View All Chunks
+                            </Button>
                         </div>
                     ) : (
                         <div className="h-full flex flex-col items-center justify-center text-center px-6 gap-3">
@@ -427,6 +467,24 @@ export default function KBPage() {
                     workspaceId={workspace.id}
                     kb={editKB}
                     onSuccess={handleSheetSuccess}
+                />
+            )}
+
+            {/* Chunk Viewer */}
+            {workspace && selectedKB && chunkViewerMode && (
+                <ChunkViewer
+                    open={!!chunkViewerMode}
+                    mode={chunkViewerMode}
+                    kbId={selectedKB.id}
+                    documentId={selectedDocForChunks?.id}
+                    documentName={selectedDocForChunks?.filename}
+                    kbName={selectedKB.name}
+                    workspaceId={workspace.id}
+                    onClose={() => {
+                        setChunkViewerMode(null);
+                        setSelectedDocForChunks(null);
+                    }}
+                    onChunkCountChange={handleChunkCountChange}
                 />
             )}
         </div>

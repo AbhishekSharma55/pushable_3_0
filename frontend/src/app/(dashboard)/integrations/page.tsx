@@ -10,10 +10,12 @@ import {
     CheckCircle,
     Plus,
     Sparkles,
+    Pencil,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -41,6 +43,7 @@ import {
     getIntegrations,
     connectIntegration,
     deleteIntegration,
+    updateIntegration,
 } from '@/lib/api/integrations';
 import type { Integration, Toolkit } from '@/types';
 
@@ -65,7 +68,16 @@ export default function IntegrationsPage() {
     const [connectDialogOpen, setConnectDialogOpen] = useState(false);
     const [selectedToolkit, setSelectedToolkit] = useState<Toolkit | null>(null);
     const [integrationName, setIntegrationName] = useState('');
+    const [connectionLabel, setConnectionLabel] = useState('');
+    const [connectionDescription, setConnectionDescription] = useState('');
     const [connecting, setConnecting] = useState(false);
+
+    // Edit dialog state
+    const [editDialogOpen, setEditDialogOpen] = useState(false);
+    const [editingIntegration, setEditingIntegration] = useState<Integration | null>(null);
+    const [editLabel, setEditLabel] = useState('');
+    const [editDescription, setEditDescription] = useState('');
+    const [saving, setSaving] = useState(false);
 
     // Infinite scroll sentinel ref
     const sentinelRef = useRef<HTMLDivElement>(null);
@@ -173,23 +185,40 @@ export default function IntegrationsPage() {
     const handleSelectToolkit = (toolkit: Toolkit) => {
         setSelectedToolkit(toolkit);
         setIntegrationName(toolkit.name);
+        setConnectionLabel('');
+        setConnectionDescription('');
         setAddDialogOpen(false);
         setConnectDialogOpen(true);
     };
 
     const handleConnect = async () => {
         if (!workspace || !selectedToolkit) return;
+        if (connectionLabel.trim().length < 2) {
+            toast.error('Connection name must be at least 2 characters');
+            return;
+        }
         try {
             setConnecting(true);
-            const { connectionUrl } = await connectIntegration(
-                workspace.id,
-                selectedToolkit.slug,
-                integrationName,
-                selectedToolkit.logo || undefined,
-            );
+            const { connectionUrl } = await connectIntegration(workspace.id, {
+                toolkitSlug: selectedToolkit.slug,
+                name: integrationName,
+                connectionLabel: connectionLabel.trim(),
+                connectionDescription: connectionDescription.trim() || undefined,
+                logo: selectedToolkit.logo || undefined,
+            });
             window.location.href = connectionUrl;
-        } catch {
-            toast.error('Failed to start connection');
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : 'Failed to start connection';
+            // Check for duplicate label error from API
+            if (typeof (error as Record<string, unknown>)?.response === 'object') {
+                const resp = (error as { response?: { data?: { message?: string } } }).response;
+                if (resp?.data?.message) {
+                    toast.error(resp.data.message);
+                    setConnecting(false);
+                    return;
+                }
+            }
+            toast.error(msg);
             setConnecting(false);
         }
     };
@@ -205,6 +234,40 @@ export default function IntegrationsPage() {
         }
     };
 
+    const handleEdit = (integration: Integration) => {
+        setEditingIntegration(integration);
+        setEditLabel(integration.connectionLabel || integration.name);
+        setEditDescription(integration.connectionDescription || '');
+        setEditDialogOpen(true);
+    };
+
+    const handleSaveEdit = async () => {
+        if (!workspace || !editingIntegration) return;
+        if (editLabel.trim().length < 2) {
+            toast.error('Connection name must be at least 2 characters');
+            return;
+        }
+        try {
+            setSaving(true);
+            await updateIntegration(workspace.id, editingIntegration.id, {
+                connectionLabel: editLabel.trim(),
+                connectionDescription: editDescription.trim() || undefined,
+            });
+            toast.success('Connection updated');
+            setEditDialogOpen(false);
+            fetchIntegrations();
+        } catch (error) {
+            const resp = (error as { response?: { data?: { message?: string } } }).response;
+            if (resp?.data?.message) {
+                toast.error(resp.data.message);
+            } else {
+                toast.error('Failed to update connection');
+            }
+        } finally {
+            setSaving(false);
+        }
+    };
+
     const statusBadge = (status: Integration['status']) => {
         switch (status) {
             case 'active':
@@ -216,6 +279,12 @@ export default function IntegrationsPage() {
             default:
                 return 'bg-muted text-muted-foreground';
         }
+    };
+
+    const getIntegrationLogo = (integration: Integration) => {
+        return integration.connectionIcon
+            || (integration.metadata as Record<string, unknown>)?.logo as string
+            || logoMap[integration.composioToolkitSlug];
     };
 
     return (
@@ -275,68 +344,81 @@ export default function IntegrationsPage() {
                 </div>
             ) : (
                 <div className="space-y-2">
-                    {integrations.map((integration) => (
-                        <div
-                            key={integration.id}
-                            className="rounded-lg border border-border/60 bg-card px-4 py-4 flex items-center justify-between"
-                        >
-                            <div className="flex items-center gap-3">
-                                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted flex-shrink-0 overflow-hidden">
-                                    {(() => {
-                                        const logo = (integration.metadata as Record<string, unknown>)?.logo as string
-                                            || logoMap[integration.composioToolkitSlug];
-                                        return logo ? (
+                    {integrations.map((integration) => {
+                        const logo = getIntegrationLogo(integration);
+                        const displayLabel = integration.connectionLabel || integration.name;
+                        return (
+                            <div
+                                key={integration.id}
+                                className="rounded-lg border border-border/60 bg-card px-4 py-4 flex items-center justify-between"
+                            >
+                                <div className="flex items-center gap-3">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted flex-shrink-0 overflow-hidden">
+                                        {logo ? (
                                             <img
                                                 src={logo}
-                                                alt={integration.name}
+                                                alt={displayLabel}
                                                 className="h-10 w-10 rounded-lg object-contain"
                                             />
                                         ) : (
                                             <Plug className="h-5 w-5 text-violet-600" />
-                                        );
-                                    })()}
-                                </div>
-                                <div>
-                                    <p className="text-sm font-medium">{integration.name}</p>
-                                    <div className="flex items-center gap-2 mt-1">
-                                        <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-mono">
-                                            {integration.composioToolkitSlug}
-                                        </Badge>
-                                        <Badge
-                                            variant="outline"
-                                            className={`text-[10px] px-1.5 py-0 ${statusBadge(integration.status)}`}
-                                        >
-                                            {integration.status}
-                                        </Badge>
+                                        )}
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-semibold">{displayLabel}</p>
+                                        {integration.connectionDescription && (
+                                            <p className="text-xs text-muted-foreground mt-0.5 truncate max-w-[300px]">
+                                                {integration.connectionDescription}
+                                            </p>
+                                        )}
+                                        <div className="flex items-center gap-2 mt-1">
+                                            <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-mono">
+                                                {integration.composioToolkitSlug}
+                                            </Badge>
+                                            <Badge
+                                                variant="outline"
+                                                className={`text-[10px] px-1.5 py-0 ${statusBadge(integration.status)}`}
+                                            >
+                                                {integration.status}
+                                            </Badge>
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
-                            <AlertDialog>
-                                <AlertDialogTrigger asChild>
-                                    <button className="p-1.5 rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors">
-                                        <Trash2 className="h-4 w-4" />
+                                <div className="flex items-center gap-1">
+                                    <button
+                                        className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                        onClick={() => handleEdit(integration)}
+                                    >
+                                        <Pencil className="h-4 w-4" />
                                     </button>
-                                </AlertDialogTrigger>
-                                <AlertDialogContent>
-                                    <AlertDialogHeader>
-                                        <AlertDialogTitle>Delete Integration</AlertDialogTitle>
-                                        <AlertDialogDescription>
-                                            Are you sure you want to delete &quot;{integration.name}&quot;? This will disconnect the service and cannot be undone.
-                                        </AlertDialogDescription>
-                                    </AlertDialogHeader>
-                                    <AlertDialogFooter>
-                                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                        <AlertDialogAction
-                                            onClick={() => handleDelete(integration.id)}
-                                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                                        >
-                                            Delete
-                                        </AlertDialogAction>
-                                    </AlertDialogFooter>
-                                </AlertDialogContent>
-                            </AlertDialog>
-                        </div>
-                    ))}
+                                    <AlertDialog>
+                                        <AlertDialogTrigger asChild>
+                                            <button className="p-1.5 rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors">
+                                                <Trash2 className="h-4 w-4" />
+                                            </button>
+                                        </AlertDialogTrigger>
+                                        <AlertDialogContent>
+                                            <AlertDialogHeader>
+                                                <AlertDialogTitle>Delete Integration</AlertDialogTitle>
+                                                <AlertDialogDescription>
+                                                    Are you sure you want to delete &quot;{displayLabel}&quot;? This will disconnect the service and cannot be undone.
+                                                </AlertDialogDescription>
+                                            </AlertDialogHeader>
+                                            <AlertDialogFooter>
+                                                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                                <AlertDialogAction
+                                                    onClick={() => handleDelete(integration.id)}
+                                                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                                >
+                                                    Delete
+                                                </AlertDialogAction>
+                                            </AlertDialogFooter>
+                                        </AlertDialogContent>
+                                    </AlertDialog>
+                                </div>
+                            </div>
+                        );
+                    })}
                 </div>
             )}
 
@@ -445,15 +527,31 @@ export default function IntegrationsPage() {
                             You&apos;ll be redirected to {selectedToolkit?.name} to authorize access.
                         </DialogDescription>
                     </DialogHeader>
-                    <div className="py-4">
-                        <label className="text-sm font-medium mb-2 block">
-                            Integration Name
-                        </label>
-                        <Input
-                            value={integrationName}
-                            onChange={(e) => setIntegrationName(e.target.value)}
-                            placeholder="Enter a name for this integration"
-                        />
+                    <div className="space-y-4 py-4">
+                        <div>
+                            <label className="text-sm font-medium mb-1.5 block">
+                                Connection Name <span className="text-red-500">*</span>
+                            </label>
+                            <Input
+                                value={connectionLabel}
+                                onChange={(e) => setConnectionLabel(e.target.value)}
+                                placeholder={`e.g. "Work ${selectedToolkit?.name}", "Personal ${selectedToolkit?.name}"`}
+                            />
+                            <p className="text-xs text-muted-foreground mt-1.5">
+                                Give this connection a memorable name. Your agent will use this name to identify the connection.
+                            </p>
+                        </div>
+                        <div>
+                            <label className="text-sm font-medium mb-1.5 block">
+                                Description <span className="text-muted-foreground font-normal">(optional)</span>
+                            </label>
+                            <Textarea
+                                value={connectionDescription}
+                                onChange={(e) => setConnectionDescription(e.target.value)}
+                                placeholder="What is this connection for? e.g. &quot;Primary email for sending client reports&quot;"
+                                rows={2}
+                            />
+                        </div>
                     </div>
                     <DialogFooter>
                         <Button
@@ -468,7 +566,7 @@ export default function IntegrationsPage() {
                         </Button>
                         <Button
                             onClick={handleConnect}
-                            disabled={connecting || !integrationName.trim()}
+                            disabled={connecting || connectionLabel.trim().length < 2}
                             className="gap-1.5"
                         >
                             {connecting ? (
@@ -477,6 +575,50 @@ export default function IntegrationsPage() {
                                 <ExternalLink className="h-4 w-4" />
                             )}
                             Continue to {selectedToolkit?.name}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Edit Connection Dialog */}
+            <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Edit Connection</DialogTitle>
+                        <DialogDescription>
+                            Update the name and description of this connection.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4 py-4">
+                        <div>
+                            <label className="text-sm font-medium mb-1.5 block">
+                                Connection Name <span className="text-red-500">*</span>
+                            </label>
+                            <Input
+                                value={editLabel}
+                                onChange={(e) => setEditLabel(e.target.value)}
+                                placeholder="Connection name"
+                            />
+                        </div>
+                        <div>
+                            <label className="text-sm font-medium mb-1.5 block">
+                                Description <span className="text-muted-foreground font-normal">(optional)</span>
+                            </label>
+                            <Textarea
+                                value={editDescription}
+                                onChange={(e) => setEditDescription(e.target.value)}
+                                placeholder="What is this connection for?"
+                                rows={2}
+                            />
+                        </div>
+                    </div>
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => setEditDialogOpen(false)} disabled={saving}>
+                            Cancel
+                        </Button>
+                        <Button onClick={handleSaveEdit} disabled={saving || editLabel.trim().length < 2}>
+                            {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                            Save
                         </Button>
                     </DialogFooter>
                 </DialogContent>

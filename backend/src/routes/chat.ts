@@ -142,16 +142,26 @@ export async function chatRoutes(fastify: FastifyInstance) {
                 }
 
                 // Stream AI message content chunks
-                if (
-                    "content" in message &&
-                    typeof message.content === "string" &&
-                    message.content
-                ) {
-                    const chunk = message.content;
-                    fullContent += chunk;
-                    reply.raw.write(
-                        `data: ${JSON.stringify({ content: chunk })}\n\n`
-                    );
+                if ("content" in message && message.content) {
+                    let chunk = "";
+
+                    if (typeof message.content === "string") {
+                        // OpenAI / OpenRouter format
+                        chunk = message.content;
+                    } else if (Array.isArray(message.content)) {
+                        // Anthropic format: [{type: "text", text: "..."}]
+                        chunk = message.content
+                            .filter((b: { type: string }) => b.type === "text")
+                            .map((b: { text: string }) => b.text)
+                            .join("");
+                    }
+
+                    if (chunk) {
+                        fullContent += chunk;
+                        reply.raw.write(
+                            `data: ${JSON.stringify({ content: chunk })}\n\n`
+                        );
+                    }
                 }
             }
 

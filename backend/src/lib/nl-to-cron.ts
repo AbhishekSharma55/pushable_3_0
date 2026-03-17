@@ -1,5 +1,6 @@
 import { CronExpressionParser } from "cron-parser";
 import { logger } from "./logger.ts";
+import { isClaudeGateway, claudeChat } from "./gateway.ts";
 
 const SYSTEM_PROMPT = `You are a cron expression generator. Convert natural language scheduling descriptions into cron expressions (5-field format: minute hour day-of-month month day-of-week).
 
@@ -24,41 +25,56 @@ export async function convertNaturalLanguageToCron(
     input: string,
     _timezone: string
 ): Promise<NLToCronResult> {
-    const apiKey = process.env.OPENROUTER_KEY;
-    if (!apiKey) {
-        throw new Error("OPENROUTER_KEY is not set");
-    }
+    let content: string | undefined;
 
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
-            "HTTP-Referer": "https://pushable.ai",
-            "X-Title": "Pushable AI",
-        },
-        body: JSON.stringify({
-            model: "google/gemini-2.0-flash-001",
-            messages: [
+    if (isClaudeGateway()) {
+        // Route through Anthropic API directly
+        const raw = await claudeChat(
+            [
                 { role: "system", content: SYSTEM_PROMPT },
                 { role: "user", content: input },
             ],
-            temperature: 0,
-            max_tokens: 200,
-        }),
-    });
+            { model: "claude-haiku-4-5-20251001", temperature: 0, max_tokens: 200 }
+        );
+        content = raw?.trim();
+    } else {
+        // Route through OpenRouter (default)
+        const apiKey = process.env.OPENROUTER_KEY;
+        if (!apiKey) {
+            throw new Error("OPENROUTER_KEY is not set");
+        }
 
-    if (!response.ok) {
-        const errorText = await response.text();
-        logger.error({ status: response.status, error: errorText }, "NL-to-cron API error");
-        throw new Error("Could not understand schedule — try being more specific");
+        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${apiKey}`,
+                "HTTP-Referer": "https://pushable.ai",
+                "X-Title": "Pushable AI",
+            },
+            body: JSON.stringify({
+                model: "google/gemini-2.0-flash-001",
+                messages: [
+                    { role: "system", content: SYSTEM_PROMPT },
+                    { role: "user", content: input },
+                ],
+                temperature: 0,
+                max_tokens: 200,
+            }),
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            logger.error({ status: response.status, error: errorText }, "NL-to-cron API error");
+            throw new Error("Could not understand schedule — try being more specific");
+        }
+
+        const data = await response.json() as {
+            choices: { message: { content: string } }[];
+        };
+
+        content = data.choices?.[0]?.message?.content?.trim();
     }
-
-    const data = await response.json() as {
-        choices: { message: { content: string } }[];
-    };
-
-    const content = data.choices?.[0]?.message?.content?.trim();
     if (!content) {
         throw new Error("Could not understand schedule — try being more specific");
     }

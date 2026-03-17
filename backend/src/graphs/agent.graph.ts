@@ -1,6 +1,6 @@
 import { StateGraph, MessagesAnnotation } from "@langchain/langgraph";
 import { ToolNode } from "@langchain/langgraph/prebuilt";
-import { ChatOpenAI } from "@langchain/openai";
+import { createLLM, refreshClaudeToken } from "../lib/gateway.ts";
 import { SystemMessage, AIMessage } from "@langchain/core/messages";
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
@@ -51,10 +51,6 @@ async function getCheckpointer(): Promise<PostgresSaver> {
         await checkpointerInstance.setup();
     }
     return checkpointerInstance;
-}
-
-function isOpenRouterModel(modelId: string): boolean {
-    return modelId.includes("/");
 }
 
 function slugifyLabel(label: string): string {
@@ -140,30 +136,10 @@ export async function createAgentGraph(
     const modelId = resolvedModel.modelId;
     const modelMultiplier = resolvedModel.multiplier;
 
-    const useOpenRouter = isOpenRouterModel(modelId);
-
-    if (useOpenRouter && !process.env.OPENROUTER_KEY) {
-        throw new Error("OPENROUTER_KEY is not set in environment");
-    }
-
-    const llm = new ChatOpenAI({
-        model: modelId,
-        temperature: agent.temperature ?? 0.7,
-        streaming: true,
-        maxRetries: 3,
-        apiKey: useOpenRouter ? process.env.OPENROUTER_KEY : process.env.OPENAI_API_KEY,
-        configuration: useOpenRouter
-            ? {
-                baseURL: "https://openrouter.ai/api/v1",
-                apiKey: process.env.OPENROUTER_KEY,
-                defaultHeaders: {
-                    "HTTP-Referer": "https://pushable.ai",
-                    "X-Title": "Pushable AI",
-                },
-            }
-            : {
-                apiKey: process.env.OPENAI_API_KEY,
-            },
+    const agentTemperature = agent.temperature ?? 0.7;
+    const { llm, isClaudeDirect, recreate: recreateLLM } = createLLM({
+        modelId,
+        temperature: agentTemperature,
     });
 
     // --- Fetch all capability data in parallel ---
@@ -653,7 +629,28 @@ Rules:
 - Filename should be descriptive and lowercase with hyphens`);
 
         const systemMsg = new SystemMessage(systemPromptParts.join("\n\n"));
-        const response = await llmWithTools.invoke([systemMsg, ...state.messages]);
+        let response;
+        try {
+            response = await llmWithTools.invoke([systemMsg, ...state.messages]);
+        } catch (error: unknown) {
+            const status = (error as { status?: number })?.status;
+            const errType = (error as { error?: { type?: string } })?.error?.type;
+            if (
+                isClaudeDirect &&
+                (status === 401 || errType === "authentication_error")
+            ) {
+                logger.warn("Claude token expired during LLM call, refreshing and retrying…");
+                await refreshClaudeToken();
+                const freshLlm = recreateLLM();
+                const freshLlmWithTools =
+                    langchainTools.length > 0
+                        ? freshLlm.bindTools(langchainTools)
+                        : freshLlm;
+                response = await freshLlmWithTools.invoke([systemMsg, ...state.messages]);
+            } else {
+                throw error;
+            }
+        }
 
         // --- Deduct credits AFTER successful LLM response (fire-and-forget) ---
         deductCredits({

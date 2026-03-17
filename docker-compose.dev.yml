@@ -5,9 +5,9 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: abhishek0003
-      POSTGRES_DB: pushable_ai
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-abhishek0003}
+      POSTGRES_DB: ${POSTGRES_DB:-pushable_ai}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -30,17 +30,23 @@ services:
   backend:
     build: ./backend
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     ports:
       - "4000:4000"
     environment:
-      DATABASE_URL: postgresql://postgres:abhishek0003@postgres:5432/pushable_ai
-      JWT_SECRET: pushable-ai-super-secret-jwt-key-32chars
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:abhishek0003@postgres:5432/pushable_ai}
+      JWT_SECRET: ${JWT_SECRET:-pushable-ai-super-secret-jwt-key-32chars}
       PORT: "4000"
-      OPENROUTER_KEY: ${OPENROUTER_KEY:-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}
+      OPENROUTER_KEY: ${OPENROUTER_KEY}
       REDIS_URL: redis://redis:6379
-      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-ak_sYMIgmVF81jyVXtDGmWQ}
-      FRONTEND_URL: http://192.168.1.9:3000
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       BROWSER_SERVICE_URL: http://browser-service:8080
+      GATEWAY: ${GATEWAY:-}
+      CLAUDE_ACCESS_TOKEN: ${CLAUDE_ACCESS_TOKEN:-}
+      CLAUDE_REFRESH_TOKEN: ${CLAUDE_REFRESH_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -59,12 +65,12 @@ services:
     environment:
       PORT: "8080"
       PROFILES_DIR: /app/profiles
-      ALLOWED_ORIGINS: http://192.168.1.9:3000
+      ALLOWED_ORIGINS: ${FRONTEND_URL:-http://localhost:3000}
       SCREENSHOT_INTERVAL_MS: "200"
       SCREENSHOT_QUALITY: "60"
       SCREENSHOT_WIDTH: "1920"
       SCREENSHOT_HEIGHT: "1080"
-      CAPSOLVER_API_KEY: ${CAPSOLVER_API_KEY:-CAP-EE4E7B31B78FB28FB7488B481872E8EF41ED238F170D21EF8420588FFEC5D2F5}
+      CAPSOLVER_API_KEY: ${CAPSOLVER_API_KEY}
       CAPSOLVER_EXTENSION_ENABLED: "true"
     volumes:
       - ./browser-service/profiles:/app/profiles
@@ -77,8 +83,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://192.168.1.9:4000
-      NEXT_PUBLIC_BROWSER_WS_URL: ws://192.168.1.9:8080
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+      NEXT_PUBLIC_BROWSER_WS_URL: ${NEXT_PUBLIC_BROWSER_WS_URL:-ws://localhost:8080}
     depends_on:
       - backend
     volumes:

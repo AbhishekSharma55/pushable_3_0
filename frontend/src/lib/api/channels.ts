@@ -28,3 +28,15 @@ export const updateConnection = (workspaceId: string, id: string, data: Partial<
 
 export const deleteConnection = (workspaceId: string, id: string) =>
     apiClient.delete(`/api/channels/${id}`, { headers: { 'x-workspace-id': workspaceId } });
+
+export interface BotInfo {
+    username: string;
+    firstName: string;
+    deepLink: string;
+}
+
+export const getBotInfo = (workspaceId: string, id: string): Promise<BotInfo> =>
+    apiClient.get(`/api/channels/${id}/bot-info`, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+export const getConnectionConfig = (workspaceId: string, id: string): Promise<Record<string, unknown>> =>
+    apiClient.get(`/api/channels/${id}/config`, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);

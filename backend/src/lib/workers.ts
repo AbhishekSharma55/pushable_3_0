@@ -1,50 +1,32 @@
 import { Worker } from "bullmq";
 import { redisConnection } from "./queue.ts";
-import { processTask } from "../processors/task.processor.ts";
-import { processWorkflow } from "../processors/workflow.processor.ts";
+import { processSchedule } from "../processors/schedule.processor.ts";
 import { logger } from "./logger.ts";
 
-let taskWorker: Worker | null = null;
-let workflowWorker: Worker | null = null;
+let scheduleWorker: Worker | null = null;
 
 export function startWorkers() {
     const connection = { ...redisConnection };
 
-    taskWorker = new Worker(
-        "tasks",
+    scheduleWorker = new Worker(
+        "schedules",
         async (job) => {
-            await processTask(job.data);
+            await processSchedule(job.data);
         },
         { connection, concurrency: 1 }
     );
 
-    taskWorker.on("completed", (job) => {
-        logger.info({ jobId: job.id }, "Task job completed");
+    scheduleWorker.on("completed", (job) => {
+        logger.info({ jobId: job.id }, "Schedule job completed");
     });
-    taskWorker.on("failed", (job, err) => {
-        logger.error({ jobId: job?.id, err }, "Task job failed");
-    });
-
-    workflowWorker = new Worker(
-        "workflows",
-        async (job) => {
-            await processWorkflow(job.data);
-        },
-        { connection, concurrency: 1 }
-    );
-
-    workflowWorker.on("completed", (job) => {
-        logger.info({ jobId: job.id }, "Workflow job completed");
-    });
-    workflowWorker.on("failed", (job, err) => {
-        logger.error({ jobId: job?.id, err }, "Workflow job failed");
+    scheduleWorker.on("failed", (job, err) => {
+        logger.error({ jobId: job?.id, err }, "Schedule job failed");
     });
 
     logger.info("Workers started");
 }
 
 export async function stopWorkers() {
-    if (taskWorker) await taskWorker.close();
-    if (workflowWorker) await workflowWorker.close();
+    if (scheduleWorker) await scheduleWorker.close();
     logger.info("Workers stopped");
 }

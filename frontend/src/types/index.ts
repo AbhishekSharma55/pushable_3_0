@@ -32,9 +32,9 @@ export interface Agent {
     canManageSkills: boolean;
     canManageTools: boolean;
     canManageSchedules: boolean;
-    canManageTasks: boolean;
     canManageChannels: boolean;
     canManageAgents: boolean;
+    requireApprovalForAll: boolean;
     createdAt: string;
     updatedAt: string;
 }
@@ -45,7 +45,6 @@ export interface SystemPermissionsInput {
     canManageSkills: boolean;
     canManageTools: boolean;
     canManageSchedules: boolean;
-    canManageTasks: boolean;
     canManageChannels: boolean;
     canManageAgents: boolean;
 }
@@ -75,6 +74,7 @@ export interface Tool {
     type: 'mcp' | 'function';
     config: Record<string, unknown>;
     isGlobal: boolean;
+    requiresApproval: boolean;
     createdAt: string;
     updatedAt: string;
 }
@@ -128,36 +128,6 @@ export interface Skill {
     updatedAt: string;
 }
 
-export interface Task {
-    id: string;
-    workspaceId: string;
-    agentId: string;
-    title: string;
-    description: string | null;
-    status: 'pending' | 'running' | 'done' | 'failed';
-    result: string | null;
-    createdAt: string;
-    updatedAt: string;
-}
-
-export interface Workflow {
-    id: string;
-    workspaceId: string;
-    name: string;
-    createdAt: string;
-    updatedAt: string;
-    steps?: WorkflowStep[];
-}
-
-export interface WorkflowStep {
-    id: string;
-    workspaceId: string;
-    workflowId: string;
-    taskId: string;
-    order: number;
-    createdAt: string;
-}
-
 export interface Integration {
     id: string;
     workspaceId: string;
@@ -184,10 +154,10 @@ export interface Toolkit {
 export interface Schedule {
     id: string;
     workspaceId: string;
+    agentId: string;
     name: string;
+    prompt: string;
     cron: string;
-    targetType: 'task' | 'workflow';
-    targetId: string;
     enabled: boolean;
     lastRunAt: string | null;
     createdAt: string;
@@ -278,8 +248,23 @@ export interface BrowserSession {
     workspaceId: string;
     profileId: string;
     agentId: string | null;
-    taskId: string | null;
     status: 'starting' | 'active' | 'closed' | 'error';
     createdAt: string;
     closedAt: string | null;
+}
+
+export interface BrowserProxy {
+    id: string;
+    workspaceId: string;
+    label: string;
+    host: string;
+    port: number;
+    protocol: 'http' | 'https' | 'socks5';
+    country: string | null;
+    city: string | null;
+    isActive: boolean;
+    lastTestedAt: string | null;
+    lastTestStatus: 'success' | 'failed' | 'untested';
+    createdAt: string;
+    updatedAt: string;
 }

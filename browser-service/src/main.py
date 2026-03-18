@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .browser_manager import browser_manager
+from .session_store import session_store
 from .routes.sessions import router as sessions_router
 from .routes.actions import router as actions_router
 from .ws.stream import router as ws_router
@@ -35,6 +36,11 @@ async def lifespan(app: FastAPI):
     if CAPSOLVER_EXTENSION_ENABLED:
         logger.info("Capsolver extension enabled, downloading if needed...")
         await download_capsolver_extension()
+
+    # Clear any stale in-memory session data from previous run
+    session_store._sessions.clear()
+    session_store._streaming.clear()
+    logger.info("Session store cleared on startup")
 
     logger.info("Browser service started, profiles dir: %s", profiles_dir)
     yield

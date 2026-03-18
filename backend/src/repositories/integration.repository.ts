@@ -53,6 +53,24 @@ export const integrationRepository = {
         return result[0] ?? null;
     },
 
+    async updateMetadata(
+        id: string,
+        workspaceId: string,
+        metadata: Record<string, unknown>
+    ) {
+        const result = await db
+            .update(integrations)
+            .set({ metadata, updatedAt: new Date() })
+            .where(
+                and(
+                    eq(integrations.id, id),
+                    eq(integrations.workspaceId, workspaceId)
+                )
+            )
+            .returning();
+        return result[0] ?? null;
+    },
+
     async findById(id: string, workspaceId: string) {
         const result = await db
             .select()

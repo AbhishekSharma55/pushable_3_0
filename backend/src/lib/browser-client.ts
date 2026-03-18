@@ -7,12 +7,13 @@ export const browserClient = {
     async createSession(
         sessionId: string,
         workspaceId: string,
-        profileId: string
+        profileId: string,
+        proxyUrl?: string
     ): Promise<string> {
         const res = await fetch(`${BROWSER_SERVICE_URL}/api/browser/sessions`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionId, workspaceId, profileId }),
+            body: JSON.stringify({ sessionId, workspaceId, profileId, proxyUrl }),
             signal: AbortSignal.timeout(30_000),
         });
         if (!res.ok) {

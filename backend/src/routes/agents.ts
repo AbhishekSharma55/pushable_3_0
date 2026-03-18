@@ -23,7 +23,6 @@ const systemPermissionsSchema = z.object({
     canManageSkills: z.boolean(),
     canManageTools: z.boolean(),
     canManageSchedules: z.boolean(),
-    canManageTasks: z.boolean(),
     canManageChannels: z.boolean(),
     canManageAgents: z.boolean(),
 });

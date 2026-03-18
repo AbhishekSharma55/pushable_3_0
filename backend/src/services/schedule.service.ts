@@ -54,8 +54,8 @@ export const scheduleService = {
     async createSchedule(
         data: {
             name: string;
-            targetType: "task" | "workflow";
-            targetId: string;
+            agentId: string;
+            prompt: string;
             enabled?: boolean;
             scheduleType: "natural" | "preset" | "custom";
             naturalLanguage?: string;
@@ -104,10 +104,10 @@ export const scheduleService = {
 
         const schedule = await scheduleRepository.create({
             workspaceId,
+            agentId: data.agentId,
             name: data.name,
+            prompt: data.prompt,
             cron,
-            targetType: data.targetType,
-            targetId: data.targetId,
             enabled: data.enabled,
             naturalLanguage: data.naturalLanguage,
             humanizeDelay,
@@ -143,6 +143,7 @@ export const scheduleService = {
         workspaceId: string,
         data: Partial<{
             name: string;
+            prompt: string;
             cron: string;
             enabled: boolean;
         }>

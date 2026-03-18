@@ -11,16 +11,24 @@ import {
     Package,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+    Dialog,
+    DialogContent,
+    DialogHeader,
+    DialogTitle,
+    DialogDescription,
+    DialogFooter,
+} from '@/components/ui/dialog';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
-import { getCreditBalance, getCreditLedger } from '@/lib/api/credits';
+import { getCreditBalance, getCreditLedger, devTopup } from '@/lib/api/credits';
 import type { CreditBalance, LedgerEntry } from '@/types';
 
 const TYPE_LABELS: Record<string, string> = {
     subscription_grant: 'Subscription',
     topup: 'Top-up',
     chat_message: 'Chat Message',
-    task_run: 'Task Run',
-    workflow_step: 'Workflow Step',
+    scheduled_prompt: 'Scheduled Prompt',
     kb_upload: 'KB Upload',
     kb_query: 'KB Query',
     browser_action: 'Browser Action',
@@ -48,11 +56,18 @@ const TOPUP_PACKS = [
     { name: 'Enterprise Pack', credits: 500000, price: 9999 },
 ];
 
+const QUICK_AMOUNTS = [1000, 5000, 10000, 50000, 100000, 500000];
+
 export default function CreditsPage() {
     const workspace = useActiveWorkspace();
     const [balance, setBalance] = useState<CreditBalance | null>(null);
     const [ledger, setLedger] = useState<LedgerEntry[]>([]);
     const [loading, setLoading] = useState(true);
+
+    // Dev top-up popup state
+    const [showTopup, setShowTopup] = useState(false);
+    const [topupAmount, setTopupAmount] = useState('10000');
+    const [topupLoading, setTopupLoading] = useState(false);
 
     const fetchData = useCallback(async () => {
         if (!workspace) return;
@@ -75,6 +90,34 @@ export default function CreditsPage() {
         fetchData();
     }, [fetchData]);
 
+    // Ctrl/Cmd + ; to open dev top-up popup
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === ';') {
+                e.preventDefault();
+                setShowTopup((prev) => !prev);
+            }
+        };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+    }, []);
+
+    const handleTopup = async () => {
+        if (!workspace) return;
+        const amount = Number(topupAmount);
+        if (!amount || amount <= 0) return;
+        try {
+            setTopupLoading(true);
+            await devTopup(workspace.id, amount);
+            await fetchData();
+            setShowTopup(false);
+        } catch {
+            // silently fail
+        } finally {
+            setTopupLoading(false);
+        }
+    };
+
     if (loading) {
         return (
             <div className="flex h-[calc(100vh-120px)] items-center justify-center">
@@ -85,6 +128,72 @@ export default function CreditsPage() {
 
     return (
         <div className="space-y-8">
+            {/* Dev Top-up Popup (Ctrl/Cmd + ;) */}
+            <Dialog open={showTopup} onOpenChange={setShowTopup}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>Dev Top-up</DialogTitle>
+                        <DialogDescription>
+                            Quickly add credits for development. Press Ctrl/Cmd + ; to toggle.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4">
+                        <div>
+                            <label className="text-sm font-medium text-muted-foreground mb-2 block">
+                                Quick amounts
+                            </label>
+                            <div className="grid grid-cols-3 gap-2">
+                                {QUICK_AMOUNTS.map((amt) => (
+                                    <button
+                                        key={amt}
+                                        type="button"
+                                        onClick={() => setTopupAmount(String(amt))}
+                                        className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                                            topupAmount === String(amt)
+                                                ? 'border-primary bg-primary/10 text-primary'
+                                                : 'border-border/60 bg-card hover:bg-muted/50'
+                                        }`}
+                                    >
+                                        {amt.toLocaleString()}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                        <div>
+                            <label className="text-sm font-medium text-muted-foreground mb-1.5 block">
+                                Custom amount
+                            </label>
+                            <input
+                                type="number"
+                                value={topupAmount}
+                                onChange={(e) => setTopupAmount(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleTopup();
+                                }}
+                                min={1}
+                                max={10000000}
+                                className="w-full rounded-lg border border-border/60 bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/30"
+                                placeholder="Enter amount..."
+                                autoFocus
+                            />
+                        </div>
+                    </div>
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => setShowTopup(false)}>
+                            Cancel
+                        </Button>
+                        <Button onClick={handleTopup} disabled={topupLoading || !topupAmount}>
+                            {topupLoading ? (
+                                <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                            ) : (
+                                <Zap className="h-4 w-4 mr-2" />
+                            )}
+                            Add {Number(topupAmount).toLocaleString()} credits
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
             {/* Header */}
             <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-amber-500/20 to-orange-500/20">

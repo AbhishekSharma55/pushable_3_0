@@ -51,9 +51,14 @@ import {
     createConnection,
     testConnection,
     deleteConnection,
+    updateConnection,
+    getBotInfo,
+    getConnectionConfig,
 } from '@/lib/api/channels';
+import type { BotInfo } from '@/lib/api/channels';
 import { getAgents } from '@/lib/api/agents';
 import type { ChannelConnection, Agent } from '@/types';
+import { QRCodeSVG } from 'qrcode.react';
 
 function ChannelIcon({ type, className = 'h-4 w-4' }: { type: string; className?: string }) {
     if (type === 'telegram') return <Send className={className} />;
@@ -85,6 +90,15 @@ export default function ChannelsPage() {
     const [showTelegramGuide, setShowTelegramGuide] = useState(false);
     const [showSlackGuide, setShowSlackGuide] = useState(false);
 
+    // Access control state
+    const [allowedUserIds, setAllowedUserIds] = useState<string[]>([]);
+    const [knownUsers, setKnownUsers] = useState<Record<string, { username: string; firstName: string }>>({});
+    const [newUserId, setNewUserId] = useState('');
+    const [botInfo, setBotInfo] = useState<BotInfo | null>(null);
+    const [loadingConfig, setLoadingConfig] = useState(false);
+    const [savingConfig, setSavingConfig] = useState(false);
+    const [showQr, setShowQr] = useState(false);
+
     const fetchData = useCallback(async () => {
         if (!workspace) return;
         try {
@@ -103,6 +117,69 @@ export default function ChannelsPage() {
     }, [workspace]);
 
     useEffect(() => { fetchData(); }, [fetchData]);
+
+    // Load config + bot info when a Telegram connection is selected
+    useEffect(() => {
+        if (!workspace || !selected || selected.channelType !== 'telegram') {
+            setAllowedUserIds([]);
+            setKnownUsers({});
+            setBotInfo(null);
+            setShowQr(false);
+            return;
+        }
+        let cancelled = false;
+        const load = async () => {
+            setLoadingConfig(true);
+            try {
+                const [config, info] = await Promise.all([
+                    getConnectionConfig(workspace.id, selected.id),
+                    getBotInfo(workspace.id, selected.id).catch(() => null),
+                ]);
+                if (cancelled) return;
+                setAllowedUserIds((config.allowedUserIds as string[]) || []);
+                setKnownUsers((config.knownUsers as Record<string, { username: string; firstName: string }>) || {});
+                setBotInfo(info);
+            } catch {
+                if (!cancelled) toast.error('Failed to load access settings');
+            } finally {
+                if (!cancelled) setLoadingConfig(false);
+            }
+        };
+        load();
+        return () => { cancelled = true; };
+    }, [workspace, selected]);
+
+    const saveAllowedUsers = async (userIds: string[]) => {
+        if (!workspace || !selected) return;
+        setSavingConfig(true);
+        try {
+            await updateConnection(workspace.id, selected.id, {
+                config: { allowedUserIds: userIds },
+            });
+            setAllowedUserIds(userIds);
+            toast.success('Access settings saved');
+        } catch {
+            toast.error('Failed to save access settings');
+        } finally {
+            setSavingConfig(false);
+        }
+    };
+
+    const addUserId = () => {
+        const id = newUserId.trim();
+        if (!id) return;
+        if (allowedUserIds.includes(id)) {
+            toast.error('User ID already added');
+            return;
+        }
+        const updated = [...allowedUserIds, id];
+        setNewUserId('');
+        saveAllowedUsers(updated);
+    };
+
+    const removeUserId = (id: string) => {
+        saveAllowedUsers(allowedUserIds.filter((u) => u !== id));
+    };
 
     const resetForm = () => {
         setChannelType(null);
@@ -336,6 +413,145 @@ export default function ChannelsPage() {
                                             {Object.entries(testResult.details).map(([k, v]) => `${k}: ${v}`).join(', ')}
                                         </p>
                                     )}
+                                </div>
+                            )}
+
+                            {/* Access Control — Telegram only */}
+                            {selected.channelType === 'telegram' && (
+                                <div className="rounded-xl border border-border/60 overflow-hidden">
+                                    <div className="px-4 py-3 border-b border-border/40 bg-muted/30">
+                                        <h3 className="text-sm font-semibold">Access Control</h3>
+                                        <p className="text-xs text-muted-foreground mt-0.5">
+                                            Restrict which Telegram users can interact with this bot.
+                                            {allowedUserIds.length === 0 && ' Currently no one can access the bot.'}
+                                        </p>
+                                    </div>
+
+                                    <div className="p-4 space-y-4">
+                                        {loadingConfig ? (
+                                            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                Loading...
+                                            </div>
+                                        ) : (
+                                            <>
+                                                {/* Add user ID */}
+                                                <div className="space-y-2">
+                                                    <Label className="text-xs">Add Telegram User ID</Label>
+                                                    <div className="flex gap-2">
+                                                        <Input
+                                                            placeholder="e.g. 123456789"
+                                                            value={newUserId}
+                                                            onChange={(e) => setNewUserId(e.target.value)}
+                                                            onKeyDown={(e) => e.key === 'Enter' && addUserId()}
+                                                            className="flex-1"
+                                                        />
+                                                        <Button
+                                                            size="sm"
+                                                            onClick={addUserId}
+                                                            disabled={savingConfig || !newUserId.trim()}
+                                                            className="gap-1"
+                                                        >
+                                                            {savingConfig ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                                                            Add
+                                                        </Button>
+                                                    </div>
+                                                    <p className="text-[11px] text-muted-foreground">
+                                                        Users can find their ID by messaging <strong>@userinfobot</strong> on Telegram. Use <strong>*</strong> to allow everyone (not recommended).
+                                                    </p>
+                                                </div>
+
+                                                {/* Allowed users list */}
+                                                {allowedUserIds.length > 0 && (
+                                                    <div className="space-y-1.5">
+                                                        <Label className="text-xs">Allowed Users ({allowedUserIds.length})</Label>
+                                                        <div className="space-y-1">
+                                                            {allowedUserIds.map((uid) => {
+                                                                const userInfo = knownUsers[uid];
+                                                                const displayName = uid === '*' ? 'Everyone (wildcard)' : userInfo
+                                                                    ? `${userInfo.firstName}${userInfo.username ? ` (@${userInfo.username})` : ''}`
+                                                                    : null;
+                                                                return (
+                                                                    <div key={uid} className="flex items-center justify-between rounded-md bg-muted/50 px-3 py-1.5 text-sm">
+                                                                        <div className="flex flex-col">
+                                                                            {displayName && (
+                                                                                <span className="text-xs font-medium">{displayName}</span>
+                                                                            )}
+                                                                            {uid !== '*' && (
+                                                                                <span className="font-mono text-[11px] text-muted-foreground">{uid}</span>
+                                                                            )}
+                                                                        </div>
+                                                                        <button
+                                                                            onClick={() => removeUserId(uid)}
+                                                                            className="text-muted-foreground hover:text-destructive transition-colors"
+                                                                            disabled={savingConfig}
+                                                                        >
+                                                                            <Trash2 className="h-3.5 w-3.5" />
+                                                                        </button>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {allowedUserIds.length === 0 && (
+                                                    <div className="rounded-lg bg-red-500/5 border border-red-500/20 px-3 py-2 text-xs text-red-700 dark:text-red-400">
+                                                        No users allowed — the bot will reject all messages. Add user IDs above, use the QR code for self-registration, or add <strong>*</strong> to allow everyone.
+                                                    </div>
+                                                )}
+
+                                                {allowedUserIds.includes('*') && (
+                                                    <div className="rounded-lg bg-amber-500/5 border border-amber-500/20 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                                                        Wildcard <strong>*</strong> is set — anyone can message this bot. Remove it to restrict access.
+                                                    </div>
+                                                )}
+
+                                                {/* QR Code self-registration */}
+                                                {botInfo && (
+                                                    <div className="border-t border-border/40 pt-4 space-y-3">
+                                                        <div className="flex items-center justify-between">
+                                                            <div>
+                                                                <p className="text-xs font-semibold">QR Code Registration</p>
+                                                                <p className="text-[11px] text-muted-foreground mt-0.5">
+                                                                    Share this QR code with users. When they scan it, they&apos;ll be auto-registered.
+                                                                </p>
+                                                            </div>
+                                                            <Button
+                                                                variant="outline"
+                                                                size="sm"
+                                                                onClick={() => setShowQr(!showQr)}
+                                                                className="text-xs gap-1"
+                                                            >
+                                                                {showQr ? 'Hide' : 'Show'} QR
+                                                            </Button>
+                                                        </div>
+                                                        {showQr && (
+                                                            <div className="flex flex-col items-center gap-3 rounded-lg bg-white p-4 border">
+                                                                <QRCodeSVG
+                                                                    value={botInfo.deepLink}
+                                                                    size={200}
+                                                                    level="M"
+                                                                />
+                                                                <div className="text-center">
+                                                                    <p className="text-xs text-gray-600 font-medium">Scan to register with @{botInfo.username}</p>
+                                                                    <a
+                                                                        href={botInfo.deepLink}
+                                                                        target="_blank"
+                                                                        rel="noopener noreferrer"
+                                                                        className="text-[11px] text-blue-600 hover:underline flex items-center justify-center gap-1 mt-1"
+                                                                    >
+                                                                        {botInfo.deepLink}
+                                                                        <ExternalLink className="h-3 w-3" />
+                                                                    </a>
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </>
+                                        )}
+                                    </div>
                                 </div>
                             )}
                         </div>

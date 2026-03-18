@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useRef, Fragment } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
     Bot,
     Plus,
@@ -14,8 +14,6 @@ import {
     MessageSquare,
     Settings,
     ChevronDown,
-    ChevronRight,
-    CheckCircle2,
     Clock,
     ArrowUp,
     Shield,
@@ -23,6 +21,8 @@ import {
     Thermometer,
     Download,
     Eye,
+    Monitor,
+    Square,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -56,22 +56,42 @@ import { parseArtifact } from '@/lib/artifact-parser';
 import type { Artifact } from '@/lib/artifact-parser';
 import { ArtifactPanel, FileIcon } from '@/components/artifact';
 import { downloadArtifact } from '@/lib/artifact-download';
+import { getProfiles, startSession as startBrowserSession, endSession as endBrowserSession } from '@/lib/api/browser';
+import { BrowserPreview } from '@/components/browser/browser-preview';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { Agent, Session, Message } from '@/types';
+import type { Agent, Session, Message, BrowserProfile } from '@/types';
+import { ToolCallDisplay } from '@/components/chat/tool-call-display';
+import { ApprovalCard } from '@/components/chat/approval-card';
 
 interface ToolCallEvent {
     id: string;
     name: string;
     args?: string;
+    fullArgs?: Record<string, unknown>;
     type: 'tool' | 'agent';
-    status: 'running' | 'done';
+    status: 'running' | 'done' | 'pending_approval' | 'approved' | 'rejected';
     result?: string;
 }
+
+interface ApprovalRequest {
+    toolCalls: Array<{
+        id: string;
+        name: string;
+        args: Record<string, unknown>;
+    }>;
+}
+
+// Ordered sequence of content and tool call events for interleaved rendering
+type ChatSegment =
+    | { type: 'text'; content: string }
+    | { type: 'tools'; toolCalls: ToolCallEvent[] };
 
 interface ChatMessage extends Message {
     isStreaming?: boolean;
     toolCalls?: ToolCallEvent[];
+    segments?: ChatSegment[];
+    approvalRequest?: ApprovalRequest;
 }
 
 type ViewMode = 'chat' | 'settings';
@@ -79,6 +99,22 @@ type ViewMode = 'chat' | 'settings';
 export default function AgentsPage() {
     const workspace = useActiveWorkspace();
     const router = useRouter();
+    const searchParams = useSearchParams();
+    const agentIdParam = searchParams.get('agent');
+    const sessionIdParam = searchParams.get('session');
+
+    // Helper to update URL query params without full navigation
+    const updateParams = useCallback((updates: Record<string, string | null>) => {
+        const url = new URL(window.location.href);
+        for (const [key, value] of Object.entries(updates)) {
+            if (value) {
+                url.searchParams.set(key, value);
+            } else {
+                url.searchParams.delete(key);
+            }
+        }
+        router.replace(url.pathname + url.search, { scroll: false });
+    }, [router]);
 
     // Agent list state
     const [agents, setAgents] = useState<Agent[]>([]);
@@ -97,20 +133,18 @@ export default function AgentsPage() {
     const [loadingSessions, setLoadingSessions] = useState(false);
     const [loadingMessages, setLoadingMessages] = useState(false);
     const [sending, setSending] = useState(false);
-    const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set());
     const [activeArtifact, setActiveArtifact] = useState<Artifact | null>(null);
+    const [pendingApproval, setPendingApproval] = useState<{ msgId: string; request: ApprovalRequest } | null>(null);
+
+    // Browser preview state
+    const [browserProfile, setBrowserProfile] = useState<BrowserProfile | null>(null);
+    const [browserWsUrl, setBrowserWsUrl] = useState<string | null>(null);
+    const [browserSessionId, setBrowserSessionId] = useState<string | null>(null);
+    const [startingBrowser, setStartingBrowser] = useState(false);
+    const [showBrowserPreview, setShowBrowserPreview] = useState(false);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-    const toggleToolCall = (key: string) => {
-        setExpandedToolCalls((prev) => {
-            const next = new Set(prev);
-            if (next.has(key)) next.delete(key);
-            else next.add(key);
-            return next;
-        });
-    };
 
     const scrollToBottom = useCallback(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -123,16 +157,21 @@ export default function AgentsPage() {
             setLoading(true);
             const data = await getAgents(workspace.id);
             setAgents(data);
+            // Auto-select agent from URL param
+            if (agentIdParam) {
+                const found = data.find((a: Agent) => a.id === agentIdParam);
+                if (found) setSelectedAgent(found);
+            }
         } catch {
             toast.error('Failed to load agents');
         } finally {
             setLoading(false);
         }
-    }, [workspace]);
+    }, [workspace]); // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => { fetchAgents(); }, [fetchAgents]);
 
-    // Fetch sessions when agent changes
+    // Fetch sessions when agent changes — auto-open last session
     useEffect(() => {
         if (!workspace || !selectedAgent) {
             setSessions([]);
@@ -145,8 +184,23 @@ export default function AgentsPage() {
                 setLoadingSessions(true);
                 const data = await getSessions(workspace.id, selectedAgent.id);
                 setSessions(data);
-                setActiveSession(null);
-                setMessages([]);
+
+                if (data.length > 0) {
+                    // Try to restore session from URL param, otherwise pick the most recent
+                    const fromParam = sessionIdParam ? data.find((s: Session) => s.id === sessionIdParam) : null;
+                    if (fromParam) {
+                        setActiveSession(fromParam);
+                    } else {
+                        const sorted = [...data].sort((a: Session, b: Session) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+                        const lastSession = sorted[0];
+                        setActiveSession(lastSession);
+                        updateParams({ session: lastSession.id });
+                    }
+                } else {
+                    setActiveSession(null);
+                    setMessages([]);
+                    updateParams({ session: null });
+                }
             } catch {
                 toast.error('Failed to load sessions');
             } finally {
@@ -154,7 +208,7 @@ export default function AgentsPage() {
             }
         };
         fetch();
-    }, [workspace, selectedAgent]);
+    }, [workspace, selectedAgent]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Load messages when session changes
     useEffect(() => {
@@ -166,7 +220,19 @@ export default function AgentsPage() {
             try {
                 setLoadingMessages(true);
                 const data = await getMessages(workspace.id, activeSession.id);
-                setMessages(data);
+                // Hydrate tool calls and segments from metadata
+                const hydrated: ChatMessage[] = data.map((msg: ChatMessage & { metadata?: Record<string, unknown> }) => {
+                    const meta = msg.metadata as Record<string, unknown> | undefined;
+                    if (meta && msg.role === 'assistant') {
+                        return {
+                            ...msg,
+                            toolCalls: (meta.toolCalls as ToolCallEvent[] | undefined) || undefined,
+                            segments: (meta.segments as ChatSegment[] | undefined) || undefined,
+                        };
+                    }
+                    return msg;
+                });
+                setMessages(hydrated);
             } catch {
                 toast.error('Failed to load messages');
             } finally {
@@ -191,7 +257,7 @@ export default function AgentsPage() {
         try {
             await deleteAgent(workspace.id, id);
             toast.success('Agent deleted');
-            if (selectedAgent?.id === id) setSelectedAgent(null);
+            if (selectedAgent?.id === id) { setSelectedAgent(null); updateParams({ agent: null, session: null }); }
             fetchAgents();
         } catch {
             toast.error('Failed to delete agent');
@@ -201,6 +267,7 @@ export default function AgentsPage() {
     const handleSelectAgent = (agent: Agent) => {
         setSelectedAgent(agent);
         setViewMode('chat');
+        updateParams({ agent: agent.id, session: null });
     };
 
     const handleNewSession = async () => {
@@ -209,9 +276,64 @@ export default function AgentsPage() {
             const session = await createSession(workspace.id, selectedAgent.id, `Chat ${sessions.length + 1}`);
             setSessions((prev) => [...prev, session]);
             setActiveSession(session);
+            updateParams({ session: session.id });
         } catch {
             toast.error('Failed to create session');
         }
+    };
+
+    // Fetch browser profile for selected agent
+    useEffect(() => {
+        if (!workspace || !selectedAgent) {
+            setBrowserProfile(null);
+            return;
+        }
+        getProfiles(workspace.id)
+            .then((profiles) => {
+                const assigned = profiles.find(
+                    (p) => p.assignedAgentId === selectedAgent.id && p.status === 'active'
+                );
+                setBrowserProfile(assigned || null);
+            })
+            .catch(() => {});
+    }, [workspace, selectedAgent]);
+
+    // Reset browser state when agent changes
+    useEffect(() => {
+        setBrowserWsUrl(null);
+        setBrowserSessionId(null);
+        setShowBrowserPreview(false);
+    }, [selectedAgent]);
+
+    const handleStartBrowser = async () => {
+        if (!workspace || !browserProfile || !selectedAgent) return;
+        setStartingBrowser(true);
+        try {
+            const { sessionId, wsUrl } = await startBrowserSession(
+                workspace.id,
+                browserProfile.id,
+                selectedAgent.id
+            );
+            setBrowserSessionId(sessionId);
+            setBrowserWsUrl(wsUrl);
+            setShowBrowserPreview(true);
+        } catch {
+            toast.error('Failed to start browser session');
+        } finally {
+            setStartingBrowser(false);
+        }
+    };
+
+    const handleStopBrowser = async () => {
+        if (!workspace || !browserSessionId) return;
+        try {
+            await endBrowserSession(workspace.id, browserSessionId);
+        } catch {
+            // ignore
+        }
+        setBrowserWsUrl(null);
+        setBrowserSessionId(null);
+        setShowBrowserPreview(false);
     };
 
     const sendMessage = async () => {
@@ -241,6 +363,9 @@ export default function AgentsPage() {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let fullContent = '';
+            // Track segments for interleaved rendering
+            const segments: ChatSegment[] = [];
+            let lastSegmentType: 'text' | 'tools' | null = null;
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -249,22 +374,64 @@ export default function AgentsPage() {
                     if (!line.startsWith('data: ')) continue;
                     const data = line.slice(6);
                     if (data === '[DONE]') {
-                        setMessages((prev) => prev.map((m) => m.id === assistantMsg.id ? { ...m, content: fullContent, isStreaming: false } : m));
+                        setMessages((prev) => prev.map((m) => m.id === assistantMsg.id ? { ...m, content: fullContent, isStreaming: false, segments: [...segments] } : m));
                         continue;
                     }
                     try {
                         const parsed = JSON.parse(data);
                         if (parsed.content) {
                             fullContent += parsed.content;
-                            setMessages((prev) => prev.map((m) => m.id === assistantMsg.id ? { ...m, content: fullContent } : m));
+                            // Add to or create text segment
+                            if (lastSegmentType === 'text' && segments.length > 0) {
+                                const last = segments[segments.length - 1] as { type: 'text'; content: string };
+                                last.content += parsed.content;
+                            } else {
+                                segments.push({ type: 'text', content: parsed.content });
+                                lastSegmentType = 'text';
+                            }
+                            setMessages((prev) => prev.map((m) => m.id === assistantMsg.id ? { ...m, content: fullContent, segments: [...segments] } : m));
                         }
                         if (parsed.toolCall) {
                             const tc = parsed.toolCall as ToolCallEvent;
+                            // Track in tool calls array
                             setMessages((prev) => prev.map((m) => {
                                 if (m.id !== assistantMsg.id) return m;
                                 const existing = m.toolCalls || [];
-                                if (tc.status === 'running') return { ...m, toolCalls: [...existing, tc] };
-                                return { ...m, toolCalls: existing.map((et) => et.id === tc.id ? { ...et, status: tc.status, result: tc.result, name: tc.name } : et) };
+                                if (tc.status === 'running') {
+                                    // Add to or create tools segment
+                                    if (lastSegmentType === 'tools' && segments.length > 0) {
+                                        const last = segments[segments.length - 1] as { type: 'tools'; toolCalls: ToolCallEvent[] };
+                                        last.toolCalls.push(tc);
+                                    } else {
+                                        segments.push({ type: 'tools', toolCalls: [tc] });
+                                        lastSegmentType = 'tools';
+                                    }
+                                    return { ...m, toolCalls: [...existing, tc], segments: [...segments] };
+                                }
+                                // Update existing tool call
+                                const updatedToolCalls = existing.map((et) => et.id === tc.id ? { ...et, ...tc, fullArgs: et.fullArgs || tc.fullArgs } : et);
+                                // Also update in segments
+                                for (const seg of segments) {
+                                    if (seg.type === 'tools') {
+                                        seg.toolCalls = seg.toolCalls.map((et) => et.id === tc.id ? { ...et, ...tc, fullArgs: et.fullArgs || tc.fullArgs } : et);
+                                    }
+                                }
+                                return { ...m, toolCalls: updatedToolCalls, segments: [...segments] };
+                            }));
+                            continue;
+                        }
+                        if (parsed.approvalRequest) {
+                            const request = parsed.approvalRequest as ApprovalRequest;
+                            setPendingApproval({ msgId: assistantMsg.id, request });
+                            setMessages((prev) => prev.map((m) => {
+                                if (m.id !== assistantMsg.id) return m;
+                                return {
+                                    ...m, isStreaming: false, approvalRequest: request,
+                                    toolCalls: (m.toolCalls || []).map((tc) => {
+                                        const needs = request.toolCalls.some((a) => a.name === tc.name || a.id === tc.id);
+                                        return needs ? { ...tc, status: 'pending_approval' as const } : tc;
+                                    }),
+                                };
                             }));
                         }
                         if (parsed.error) toast.error(parsed.error);
@@ -277,6 +444,59 @@ export default function AgentsPage() {
         } finally {
             setSending(false);
         }
+    };
+
+    const handleApproval = async (decisions: Array<{ type: 'approve' | 'reject'; message?: string }>) => {
+        if (!workspace || !activeSession || !pendingApproval) return;
+        const msgId = pendingApproval.msgId;
+        const statusLabel = decisions[0]?.type === 'approve' ? 'approved' : 'rejected';
+        setMessages((prev) => prev.map((m) => {
+            if (m.id !== msgId) return m;
+            return { ...m, isStreaming: true, approvalRequest: undefined,
+                toolCalls: (m.toolCalls || []).map((tc) => tc.status === 'pending_approval' ? { ...tc, status: statusLabel as ToolCallEvent['status'] } : tc),
+            };
+        }));
+        setPendingApproval(null);
+        setSending(true);
+        try {
+            const token = getToken();
+            const response = await fetch(`${API_URL}/api/sessions/${activeSession.id}/approve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
+                body: JSON.stringify({ decisions }),
+            });
+            if (!response.ok || !response.body) throw new Error('Failed');
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                for (const line of decoder.decode(value, { stream: true }).split('\n')) {
+                    if (!line.startsWith('data: ')) continue;
+                    const data = line.slice(6);
+                    if (data === '[DONE]') { setMessages((prev) => prev.map((m) => m.id === msgId ? { ...m, isStreaming: false } : m)); continue; }
+                    try {
+                        const parsed = JSON.parse(data);
+                        if (parsed.content) setMessages((prev) => prev.map((m) => m.id === msgId ? { ...m, content: m.content + parsed.content } : m));
+                        if (parsed.toolCall) {
+                            const tc = parsed.toolCall as ToolCallEvent;
+                            setMessages((prev) => prev.map((m) => {
+                                if (m.id !== msgId) return m;
+                                const existing = m.toolCalls || [];
+                                const found = existing.find((et) => et.id === tc.id);
+                                if (found) return { ...m, toolCalls: existing.map((et) => et.id === tc.id ? { ...et, ...tc, fullArgs: et.fullArgs || tc.fullArgs } : et) };
+                                return { ...m, toolCalls: [...existing, tc] };
+                            }));
+                        }
+                        if (parsed.approvalRequest) {
+                            const request = parsed.approvalRequest as ApprovalRequest;
+                            setPendingApproval({ msgId, request });
+                            setMessages((prev) => prev.map((m) => m.id !== msgId ? m : { ...m, isStreaming: false, approvalRequest: request }));
+                        }
+                    } catch { /* ignore */ }
+                }
+            }
+        } catch { toast.error('Failed to process approval'); } finally { setSending(false); }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -417,7 +637,7 @@ export default function AgentsPage() {
                                                     {loadingSessions ? <div className="p-2"><Skeleton className="h-4 w-32" /></div> :
                                                     sessions.length === 0 ? <div className="p-3 text-center text-xs text-muted-foreground">No sessions yet</div> :
                                                     sessions.map((s) => (
-                                                        <DropdownMenuItem key={s.id} className={`text-xs ${activeSession?.id === s.id ? 'bg-accent' : ''}`} onClick={() => setActiveSession(s)}>
+                                                        <DropdownMenuItem key={s.id} className={`text-xs ${activeSession?.id === s.id ? 'bg-accent' : ''}`} onClick={() => { setActiveSession(s); updateParams({ session: s.id }); }}>
                                                             <span className="flex-1 truncate">{s.title}</span>
                                                             <span className="text-muted-foreground ml-2">{new Date(s.createdAt).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}</span>
                                                         </DropdownMenuItem>
@@ -425,6 +645,47 @@ export default function AgentsPage() {
                                                 </DropdownMenuContent>
                                             </DropdownMenu>
                                             <Button size="sm" variant="outline" className="gap-1.5 text-xs h-8" onClick={handleNewSession}><Plus className="h-3.5 w-3.5" />New Chat</Button>
+                                            {browserProfile && (
+                                                <>
+                                                    {browserWsUrl ? (
+                                                        <>
+                                                            <Button
+                                                                size="sm"
+                                                                variant="outline"
+                                                                className="gap-1.5 text-xs h-8"
+                                                                onClick={() => setShowBrowserPreview(!showBrowserPreview)}
+                                                            >
+                                                                <Monitor className="h-3.5 w-3.5" />
+                                                                {showBrowserPreview ? 'Hide' : 'Show'} Browser
+                                                            </Button>
+                                                            <Button
+                                                                size="sm"
+                                                                variant="outline"
+                                                                className="gap-1.5 text-xs h-8 text-red-600 hover:text-red-700"
+                                                                onClick={handleStopBrowser}
+                                                            >
+                                                                <Square className="h-3.5 w-3.5" />
+                                                                Stop
+                                                            </Button>
+                                                        </>
+                                                    ) : (
+                                                        <Button
+                                                            size="sm"
+                                                            variant="outline"
+                                                            className="gap-1.5 text-xs h-8"
+                                                            onClick={handleStartBrowser}
+                                                            disabled={startingBrowser}
+                                                        >
+                                                            {startingBrowser ? (
+                                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                            ) : (
+                                                                <Monitor className="h-3.5 w-3.5" />
+                                                            )}
+                                                            Start Browser
+                                                        </Button>
+                                                    )}
+                                                </>
+                                            )}
                                         </>
                                     )}
                                     {viewMode === 'settings' && (
@@ -439,7 +700,8 @@ export default function AgentsPage() {
                             {/* Chat view */}
                             {viewMode === 'chat' && (
                                 activeSession ? (
-                                    <>
+                                    <div className="flex-1 flex min-h-0">
+                                        <div className={`flex flex-col ${showBrowserPreview && browserWsUrl ? 'w-1/2' : 'flex-1'}`}>
                                         <div className="flex-1 overflow-y-auto">
                                             <div className="max-w-5xl mx-auto px-4 py-6 space-y-6">
                                                 {loadingMessages ? (
@@ -450,106 +712,130 @@ export default function AgentsPage() {
                                                         <p className="text-sm text-muted-foreground">Send a message to start chatting with {selectedAgent.name}.</p>
                                                     </div>
                                                 ) : (
-                                                    messages.map((msg) => (
-                                                        <Fragment key={msg.id}>
-                                                            {msg.toolCalls && msg.toolCalls.length > 0 && (
-                                                                <div className="space-y-1.5">
-                                                                    {msg.toolCalls.map((tc) => {
-                                                                        const key = `${msg.id}-${tc.id}`;
-                                                                        const isExpanded = expandedToolCalls.has(key);
-                                                                        const isDone = tc.status === 'done';
-                                                                        return (
-                                                                            <div key={tc.id}>
-                                                                                <button className="w-full flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs hover:bg-accent/50 transition-colors" onClick={() => isDone && toggleToolCall(key)}>
-                                                                                    {isDone ? <CheckCircle2 className="h-3.5 w-3.5 text-primary flex-shrink-0" /> : <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin flex-shrink-0" />}
-                                                                                    <span className="flex-1 text-left truncate text-muted-foreground">{tc.name}{tc.args && !isDone ? `: ${tc.args}` : ''}</span>
-                                                                                    {isDone && (isExpanded ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />)}
-                                                                                </button>
-                                                                                {isDone && tc.result && isExpanded && <div className="mt-1 rounded-lg border border-border bg-muted/50 px-3 py-2 text-[11px] text-muted-foreground font-mono max-h-[160px] overflow-y-auto whitespace-pre-wrap">{tc.result}</div>}
-                                                                            </div>
-                                                                        );
-                                                                    })}
-                                                                </div>
-                                                            )}
-                                                            {(msg.content || msg.isStreaming || msg.role === 'user') && (
-                                                                <div className={msg.role === 'user' ? 'flex justify-end' : ''}>
-                                                                    {msg.role === 'user' ? (
-                                                                        <div className="bg-primary text-primary-foreground rounded-2xl rounded-br-sm px-4 py-2.5 max-w-[80%]">
-                                                                            <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.content}</p>
-                                                                        </div>
-                                                                    ) : (() => {
-                                                                        const { artifact, cleanMessage } = msg.isStreaming
-                                                                            ? { artifact: null, cleanMessage: msg.content }
-                                                                            : parseArtifact(msg.content);
-                                                                        return (
-                                                                        <div className="flex gap-3">
-                                                                            <div className="flex h-7 w-7 items-center justify-center rounded-full bg-muted flex-shrink-0 mt-0.5"><Bot className="h-3.5 w-3.5 text-muted-foreground" /></div>
-                                                                            <div className="flex-1 min-w-0">
-                                                                                <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5">
-                                                                                    {msg.isStreaming && !msg.content ? (
-                                                                                        <span className="inline-flex gap-1">
-                                                                                            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '0ms' }} />
-                                                                                            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '150ms' }} />
-                                                                                            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '300ms' }} />
-                                                                                        </span>
-                                                                                    ) : (
-                                                                                        <>
-                                                                                            {cleanMessage && (
-                                                                                                <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-code:text-xs prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-muted prose-pre:p-3 prose-pre:rounded-lg">
-                                                                                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                                                                                        {cleanMessage}
-                                                                                                    </ReactMarkdown>
-                                                                                                </div>
-                                                                                            )}
-                                                                                            {artifact && (
-                                                                                                <div className={`flex items-center gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5 ${cleanMessage ? 'mt-3' : ''}`}>
-                                                                                                    <FileIcon type={artifact.type} className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                                                                                                    <div className="flex-1 min-w-0">
-                                                                                                        <p className="text-sm font-medium truncate">{artifact.filename}</p>
-                                                                                                        <p className="text-[11px] text-muted-foreground">{artifact.type.toUpperCase()}</p>
-                                                                                                    </div>
-                                                                                                    <Button
-                                                                                                        size="sm"
-                                                                                                        variant="outline"
-                                                                                                        className="gap-1.5 text-xs h-7 flex-shrink-0"
-                                                                                                        onClick={() => setActiveArtifact(artifact)}
-                                                                                                    >
-                                                                                                        <Eye className="h-3 w-3" />
-                                                                                                        View
-                                                                                                    </Button>
-                                                                                                    <button
-                                                                                                        className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
-                                                                                                        onClick={() => downloadArtifact(artifact)}
-                                                                                                        title="Download"
-                                                                                                    >
-                                                                                                        <Download className="h-3.5 w-3.5" />
-                                                                                                    </button>
-                                                                                                </div>
-                                                                                            )}
-                                                                                        </>
+                                                    messages.map((msg) => {
+                                                        // Helper to render assistant text content
+                                                        const renderAssistantText = (text: string, isStreaming?: boolean) => {
+                                                            const { artifact, cleanMessage } = isStreaming
+                                                                ? { artifact: null, cleanMessage: text }
+                                                                : parseArtifact(text);
+                                                            if (!cleanMessage && !artifact && !isStreaming) return null;
+                                                            return (
+                                                                <div className="flex gap-3">
+                                                                    <div className="flex h-7 w-7 items-center justify-center rounded-full bg-muted flex-shrink-0 mt-0.5"><Bot className="h-3.5 w-3.5 text-muted-foreground" /></div>
+                                                                    <div className="flex-1 min-w-0">
+                                                                        <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5">
+                                                                            {isStreaming && !text ? (
+                                                                                <span className="inline-flex gap-1">
+                                                                                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '0ms' }} />
+                                                                                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '150ms' }} />
+                                                                                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '300ms' }} />
+                                                                                </span>
+                                                                            ) : (
+                                                                                <>
+                                                                                    {cleanMessage && (
+                                                                                        <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-code:text-xs prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-muted prose-pre:p-3 prose-pre:rounded-lg">
+                                                                                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                                                                {cleanMessage}
+                                                                                            </ReactMarkdown>
+                                                                                        </div>
                                                                                     )}
-                                                                                </div>
-                                                                            </div>
+                                                                                    {artifact && (
+                                                                                        <div className={`flex items-center gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5 ${cleanMessage ? 'mt-3' : ''}`}>
+                                                                                            <FileIcon type={artifact.type} className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                                                                                            <div className="flex-1 min-w-0">
+                                                                                                <p className="text-sm font-medium truncate">{artifact.filename}</p>
+                                                                                                <p className="text-[11px] text-muted-foreground">{artifact.type.toUpperCase()}</p>
+                                                                                            </div>
+                                                                                            <Button size="sm" variant="outline" className="gap-1.5 text-xs h-7 flex-shrink-0" onClick={() => setActiveArtifact(artifact)}>
+                                                                                                <Eye className="h-3 w-3" />View
+                                                                                            </Button>
+                                                                                            <button className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors flex-shrink-0" onClick={() => downloadArtifact(artifact)} title="Download">
+                                                                                                <Download className="h-3.5 w-3.5" />
+                                                                                            </button>
+                                                                                        </div>
+                                                                                    )}
+                                                                                </>
+                                                                            )}
                                                                         </div>
-                                                                        );
-                                                                    })()}
+                                                                    </div>
                                                                 </div>
+                                                            );
+                                                        };
+
+                                                        return (
+                                                        <Fragment key={msg.id}>
+                                                            {msg.role === 'user' ? (
+                                                                <div className="flex justify-end">
+                                                                    <div className="bg-primary text-primary-foreground rounded-2xl rounded-br-sm px-4 py-2.5 max-w-[80%]">
+                                                                        <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.content}</p>
+                                                                    </div>
+                                                                </div>
+                                                            ) : msg.segments && msg.segments.length > 0 ? (
+                                                                /* Interleaved rendering: text and tool calls in order */
+                                                                <>
+                                                                    {msg.segments.map((seg, si) => (
+                                                                        <Fragment key={`${msg.id}-seg-${si}`}>
+                                                                            {seg.type === 'text' && seg.content.trim() && renderAssistantText(seg.content, msg.isStreaming && si === msg.segments!.length - 1)}
+                                                                            {seg.type === 'tools' && (
+                                                                                <ToolCallDisplay toolCalls={seg.toolCalls} messageId={`${msg.id}-${si}`} />
+                                                                            )}
+                                                                        </Fragment>
+                                                                    ))}
+                                                                    {msg.isStreaming && !msg.content && renderAssistantText('', true)}
+                                                                    {msg.approvalRequest && pendingApproval?.msgId === msg.id && (
+                                                                        <ApprovalCard
+                                                                            request={msg.approvalRequest}
+                                                                            onApprove={() => handleApproval(msg.approvalRequest!.toolCalls.map(() => ({ type: 'approve' as const })))}
+                                                                            onReject={() => handleApproval(msg.approvalRequest!.toolCalls.map(() => ({ type: 'reject' as const })))}
+                                                                            disabled={sending}
+                                                                        />
+                                                                    )}
+                                                                </>
+                                                            ) : (
+                                                                /* Fallback for loaded messages without segments */
+                                                                <>
+                                                                    {msg.toolCalls && msg.toolCalls.length > 0 && (
+                                                                        <ToolCallDisplay toolCalls={msg.toolCalls} messageId={msg.id} />
+                                                                    )}
+                                                                    {msg.approvalRequest && pendingApproval?.msgId === msg.id && (
+                                                                        <ApprovalCard
+                                                                            request={msg.approvalRequest}
+                                                                            onApprove={() => handleApproval(msg.approvalRequest!.toolCalls.map(() => ({ type: 'approve' as const })))}
+                                                                            onReject={() => handleApproval(msg.approvalRequest!.toolCalls.map(() => ({ type: 'reject' as const })))}
+                                                                            disabled={sending}
+                                                                        />
+                                                                    )}
+                                                                    {(msg.content || msg.isStreaming) && renderAssistantText(msg.content, msg.isStreaming)}
+                                                                </>
                                                             )}
                                                         </Fragment>
-                                                    ))
+                                                        );
+                                                    })
                                                 )}
                                                 <div ref={messagesEndRef} />
                                             </div>
                                         </div>
                                         <div className="border-t border-border p-4">
                                             <div className="max-w-5xl mx-auto relative">
-                                                <textarea ref={textareaRef} value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Ask your agent..." className="w-full resize-none rounded-xl border border-border bg-card px-4 py-3 pr-12 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring min-h-[48px] max-h-[160px] transition-colors" rows={1} disabled={sending} />
+                                                <textarea ref={textareaRef} value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={handleKeyDown} placeholder={pendingApproval ? "Waiting for your approval..." : "Ask your agent..."} className="w-full resize-none rounded-xl border border-border bg-card px-4 py-3 pr-12 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring min-h-[48px] max-h-[160px] transition-colors" rows={1} disabled={sending || !!pendingApproval} />
                                                 <Button onClick={sendMessage} disabled={!chatInput.trim() || sending} size="icon" variant="ghost" className="absolute right-2 bottom-2 h-8 w-8 rounded-lg">
                                                     {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
                                                 </Button>
                                             </div>
                                         </div>
-                                    </>
+                                        </div>
+
+                                        {/* Browser preview column */}
+                                        {showBrowserPreview && browserWsUrl && browserSessionId && (
+                                            <div className="w-1/2 border-l border-border p-3 overflow-y-auto">
+                                                <BrowserPreview
+                                                    wsUrl={browserWsUrl}
+                                                    sessionId={browserSessionId}
+                                                    onClose={() => setShowBrowserPreview(false)}
+                                                />
+                                            </div>
+                                        )}
+                                    </div>
                                 ) : (
                                     <div className="flex-1 flex flex-col items-center justify-center text-center gap-4">
                                         <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center"><Sparkles className="h-6 w-6 text-muted-foreground/40" /></div>

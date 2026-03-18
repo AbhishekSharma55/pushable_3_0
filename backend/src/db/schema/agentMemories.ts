@@ -1,15 +1,8 @@
-import { pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { workspaces } from "./workspaces.ts";
 import { agents } from "./agents.ts";
 
-export const taskStatusEnum = pgEnum("task_status", [
-    "pending",
-    "running",
-    "done",
-    "failed",
-]);
-
-export const tasks = pgTable("tasks", {
+export const agentMemories = pgTable("agent_memories", {
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id")
         .notNull()
@@ -17,10 +10,10 @@ export const tasks = pgTable("tasks", {
     agentId: uuid("agent_id")
         .notNull()
         .references(() => agents.id, { onDelete: "cascade" }),
-    title: text("title").notNull(),
-    description: text("description"),
-    status: taskStatusEnum("status").default("pending").notNull(),
-    result: text("result"),
+    // text (not UUID FK) so it works for both JWT users and channel external users
+    userId: text("user_id").notNull(),
+    content: text("content").notNull(),
+    category: text("category").default("general").notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

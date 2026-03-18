@@ -6,8 +6,8 @@ import { AppError, UnauthorizedError } from "../lib/errors.ts";
 
 const createScheduleSchema = z.object({
     name: z.string().min(1, "Name is required"),
-    targetType: z.enum(["task", "workflow"]),
-    targetId: z.string().uuid(),
+    agentId: z.string().uuid(),
+    prompt: z.string().min(1, "Prompt is required"),
     enabled: z.boolean().default(true),
     scheduleType: z.enum(["natural", "preset", "custom"]),
     naturalLanguage: z.string().optional(),
@@ -23,6 +23,7 @@ const createScheduleSchema = z.object({
 
 const updateScheduleSchema = z.object({
     name: z.string().min(1).optional(),
+    prompt: z.string().min(1).optional(),
     cron: z.string().min(1).optional(),
     enabled: z.boolean().optional(),
 });

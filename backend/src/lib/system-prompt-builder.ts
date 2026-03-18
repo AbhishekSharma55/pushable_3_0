@@ -41,12 +41,26 @@ export interface ComposioIntegration {
     actions: string[];
 }
 
+export interface ChannelUserInfo {
+    userId: string;
+    username: string;
+    firstName: string;
+    chatId?: string;
+}
+
+export interface ChannelInfo {
+    connectionId: string;
+    channelType: "telegram" | "slack";
+    name: string;
+    status: string;
+    knownUsers: ChannelUserInfo[];
+}
+
 export interface SystemPermissions {
     canManageKB: boolean;
     canManageSkills: boolean;
     canManageTools: boolean;
     canManageSchedules: boolean;
-    canManageTasks: boolean;
     canManageChannels: boolean;
     canManageAgents: boolean;
 }
@@ -60,6 +74,7 @@ export interface AgentCapabilities {
     browserProfileName?: string;
     connectedAgents: ConnectedAgent[];
     composioIntegrations: ComposioIntegration[];
+    channels: ChannelInfo[];
     systemLevelAccess: boolean;
     systemPermissions: SystemPermissions;
 }
@@ -108,7 +123,13 @@ Operating principles:
 - Be concise in replies. Show work only when it adds value.
 - If a task requires multiple steps, execute them all before responding.
 - Never say "I can't do that" if you have a tool that could help. Try the tool first.
-- If you make a mistake, correct it immediately without waiting to be asked.`);
+- If you make a mistake, correct it immediately without waiting to be asked.
+
+**Planning for complex tasks:**
+- For tasks with 3+ steps, use \`write_todos\` to create a plan BEFORE executing.
+- Update each todo with \`update_todo\` as you start and complete it.
+- This helps you stay on track and shows the user your progress.
+- For simple tasks (1-2 steps), just do them directly — no plan needed.`);
 
     // --- BLOCK 3: Capability Map ---
     const capabilityCount = countCapabilities(capabilities);
@@ -220,7 +241,7 @@ HOW TO USE:
         const integLines = capabilities.composioIntegrations
             .map(
                 (i) =>
-                    `\n**"${i.connectionLabel}"** → ${i.appDisplayName}${i.connectionDescription ? `\n  Purpose: ${i.connectionDescription}` : ""}\n  Available actions: ${i.actions.join(", ")}`
+                    `\n**"${i.connectionLabel}"** → ${i.appDisplayName}${i.connectionDescription ? `\n  Purpose: ${i.connectionDescription}` : ""}`
             )
             .join("\n");
 
@@ -230,6 +251,15 @@ You are connected to ${capabilities.composioIntegrations.length} external app(s)
 When the user refers to a connection by name, match it to the correct entry below.
 ${integLines}
 
+HOW TO USE INTEGRATIONS (IMPORTANT — follow this exact flow):
+1. Call **COMPOSIO_SEARCH_TOOLS** with a query describing what you need (e.g. "list gmail emails", "send email via gmail", "read google sheets rows")
+   → This returns the matching tool names, their schemas, and connection status
+2. If the tool needs parameters, review the schema returned by COMPOSIO_SEARCH_TOOLS (or call COMPOSIO_GET_TOOL_SCHEMAS for full details)
+3. Call **COMPOSIO_MULTI_EXECUTE_TOOL** with the tool name and parameters to execute the action
+   → Example: execute GMAIL_LIST_EMAILS, GMAIL_SEND_EMAIL, GOOGLESHEETS_GET_SPREADSHEET_DATA, etc.
+
+ALWAYS use COMPOSIO_SEARCH_TOOLS first to discover the correct tool name — do NOT guess tool names.
+
 HOW TO MATCH USER REFERENCES:
 - If user says "my work email" or "work Gmail" → match to the connection whose label contains "work" and app is "gmail"
 - If user says "the client repo" → match to connection whose label/description mentions "client" and app is "github"
@@ -237,20 +267,39 @@ HOW TO MATCH USER REFERENCES:
 - If user says "send a Slack message" and there are TWO Slack connections → ask: "Which Slack connection should I use — '{label1}' or '{label2}'?"
 - Never assume which connection to use when multiple connections of the same app exist — always ask
 
-WHEN MULTIPLE SAME-APP CONNECTIONS EXIST:
-- List them clearly and ask the user to clarify before acting
-- Never silently pick one over another
-- After user clarifies once in a conversation, remember their choice for the rest of the session
-
 WHEN TO USE:
 - When the task involves a connected app (e.g. "send an email", "create a GitHub issue", "add a row to Google Sheets")
 - When the user explicitly asks to interact with one of these apps
 - For reading data from connected apps
 
-HOW TO USE:
-- Use the exact action names listed above
+RULES:
 - Always confirm before destructive actions (delete, overwrite, send to external party)
 - If an action requires information you don't have, ask for it before calling — don't guess`);
+    }
+
+    if (capabilities.channels.length > 0) {
+        const channelLines = capabilities.channels.map((ch) => {
+            const userLines = ch.knownUsers.length > 0
+                ? ch.knownUsers.map((u) => {
+                    const nameDisplay = u.firstName || u.username || u.userId;
+                    const usernameDisplay = u.username ? `@${u.username}` : "";
+                    return `    - **${nameDisplay}** ${usernameDisplay} (ID: ${u.userId})`;
+                }).join("\n")
+                : "    - No users have messaged yet";
+            return `- **${ch.name}** (${ch.channelType}, ${ch.status})\n  Connection ID: ${ch.connectionId}\n  Users:\n${userLines}`;
+        }).join("\n\n");
+
+        blocks.push(`## Messaging Channels (Your Direct Line to Users)
+
+You are connected to ${capabilities.channels.length} messaging channel(s):
+${channelLines}
+
+IMPORTANT:
+- You can send messages to any known user using the send_channel_message tool
+- When someone asks you to message a user, match by name, username, or ID — you don't need the raw user ID
+- The user list updates automatically as people interact with you
+- You ARE the bot on these channels — messages from Telegram/Slack users come through these connections
+- If you are currently responding to a channel message, you're talking to one of these users right now`);
     }
 
     if (capabilities.hasBrowser) {
@@ -389,19 +438,11 @@ Use when: User asks you to set up or modify automation tools.`);
         if (perms.canManageSchedules) {
             systemParts.push(`
 **Schedule Management**
-- system_create_schedule: Set up a new recurring agent task
-- system_update_schedule: Modify timing or prompt of a schedule
+- system_create_schedule: Set up a new recurring schedule with a prompt for any agent
+- system_update_schedule: Modify timing, prompt, or enable/disable a schedule
 - system_pause_schedule: Temporarily disable a schedule
 - system_delete_schedule: Remove a schedule permanently
-Use when: User asks you to automate recurring tasks.`);
-        }
-
-        if (perms.canManageTasks) {
-            systemParts.push(`
-**Task Management**
-- system_create_task: Create a one-time task for an agent
-- system_cancel_task: Cancel a pending task
-Use when: User asks you to queue work for agents.`);
+Use when: User asks you to automate recurring tasks. Each schedule fires a prompt to an agent on a cron pattern.`);
         }
 
         if (perms.canManageChannels) {
@@ -455,5 +496,6 @@ function countCapabilities(capabilities: AgentCapabilities): number {
     if (capabilities.hasBrowser) count++;
     if (capabilities.connectedAgents.length > 0) count++;
     if (capabilities.composioIntegrations.length > 0) count++;
+    if (capabilities.channels.length > 0) count++;
     return count;
 }

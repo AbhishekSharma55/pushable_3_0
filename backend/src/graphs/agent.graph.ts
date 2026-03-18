@@ -1,11 +1,11 @@
-import { StateGraph, MessagesAnnotation } from "@langchain/langgraph";
-import { ToolNode } from "@langchain/langgraph/prebuilt";
+import { StateGraph, Annotation, MessagesAnnotation, interrupt } from "@langchain/langgraph";
 import { createLLM, refreshClaudeToken } from "../lib/gateway.ts";
-import { SystemMessage, AIMessage } from "@langchain/core/messages";
+import { SystemMessage, AIMessage, HumanMessage, RemoveMessage, ToolMessage } from "@langchain/core/messages";
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { z } from "zod";
+import { randomUUID } from "crypto";
 import { eq, asc } from "drizzle-orm";
 import { db } from "../db/client.ts";
 import { llmModels } from "../db/schema/index.ts";
@@ -19,9 +19,11 @@ import { buildAgentCallerTool } from "../lib/agent-tool.ts";
 import { integrationRepository } from "../repositories/integration.repository.ts";
 import { getComposioClient } from "../lib/composio.ts";
 import { logger } from "../lib/logger.ts";
-import { HumanMessage } from "@langchain/core/messages";
 import { buildBrowserTools } from "../tools/browser.tools.ts";
 import { buildSystemTools } from "../tools/system.tools.ts";
+import { buildMemoryTools } from "../tools/memory.tools.ts";
+import { buildPlanningTools, type Todo } from "../tools/planning.tools.ts";
+import { memoryRepository } from "../repositories/memory.repository.ts";
 import { buildSystemPrompt } from "../lib/system-prompt-builder.ts";
 import { browserRepository } from "../repositories/browser.repository.ts";
 import {
@@ -30,6 +32,8 @@ import {
     calculateCreditCost,
     isPlanSufficient,
 } from "../lib/credit-engine.ts";
+import { channelRepository } from "../repositories/channel.repository.ts";
+import { channelManager } from "../channels/channel-manager.ts";
 import type {
     AgentCapabilities,
     KBCapability,
@@ -38,8 +42,25 @@ import type {
     MCPServerCapability,
     ConnectedAgent,
     ComposioIntegration,
+    ChannelInfo,
+    ChannelUserInfo,
     SystemPermissions,
 } from "../lib/system-prompt-builder.ts";
+
+const SUMMARIZE_THRESHOLD = 20; // Trigger summarization when messages exceed this count
+const KEEP_MESSAGES = 4; // Keep the last N messages after summarization
+
+const AgentState = Annotation.Root({
+    ...MessagesAnnotation.spec,
+    summary: Annotation<string>({
+        reducer: (_curr: string, update: string) => update,
+        default: () => "",
+    }),
+    todos: Annotation<Todo[]>({
+        reducer: (_curr: Todo[], update: Todo[]) => update,
+        default: () => [],
+    }),
+});
 
 let checkpointerInstance: PostgresSaver | null = null;
 
@@ -51,13 +72,6 @@ async function getCheckpointer(): Promise<PostgresSaver> {
         await checkpointerInstance.setup();
     }
     return checkpointerInstance;
-}
-
-function slugifyLabel(label: string): string {
-    return label
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "_")
-        .replace(/^_|_$/g, "");
 }
 
 // For now, workspace plan is always "pro". Replace when subscription system is built.
@@ -126,7 +140,8 @@ async function resolveModel(
 
 export async function createAgentGraph(
     agentId: string,
-    workspaceId: string
+    workspaceId: string,
+    userId?: string
 ) {
     const agent = await agentRepository.findById(agentId, workspaceId);
     if (!agent) throw new Error("Agent not found");
@@ -161,6 +176,7 @@ export async function createAgentGraph(
 
     const langchainTools: DynamicStructuredTool[] = [];
     const mcpClients: MultiServerMCPClient[] = [];
+    const approvalRequired = new Set<string>();
 
     const toolCapabilities: ToolCapability[] = [];
     const mcpServerCapabilities: MCPServerCapability[] = [];
@@ -243,6 +259,9 @@ export async function createAgentGraph(
                 });
 
                 langchainTools.push(functionTool);
+                if (tool.requiresApproval) {
+                    approvalRequired.add(functionTool.name);
+                }
                 toolCapabilities.push({
                     name: tool.name,
                     description: tool.description,
@@ -323,6 +342,10 @@ export async function createAgentGraph(
     }
 
     // --- 3. Composio integration tools ---
+    // Composio uses meta tools (COMPOSIO_SEARCH_TOOLS, COMPOSIO_MULTI_EXECUTE_TOOL, etc.)
+    // that discover and execute app-specific actions at runtime. We pass meta tools once
+    // and build the composioIntegrations list so the system prompt tells the agent which
+    // connections are available.
     let composioToolCount = 0;
     const activeIntegrations = agentIntegrations.filter(
         (i) => i.status === "active"
@@ -332,65 +355,58 @@ export async function createAgentGraph(
         try {
             const composio = getComposioClient();
 
-            const slugToIntegrations = new Map<string, typeof activeIntegrations>();
-            for (const integ of activeIntegrations) {
-                const list = slugToIntegrations.get(integ.composioToolkitSlug) || [];
-                list.push(integ);
-                slugToIntegrations.set(integ.composioToolkitSlug, list);
-            }
-
             const toolkitSlugs = [...new Set(activeIntegrations.map((i) => i.composioToolkitSlug))];
 
-            const session = await composio.create(workspaceId, {
+            // Build per-toolkit tool permissions from integration metadata
+            const toolsConfig: Record<string, { enable: string[] } | { disable: string[] }> = {};
+            for (const integ of activeIntegrations) {
+                const slug = integ.composioToolkitSlug;
+                const perms = (integ.metadata as Record<string, unknown>)?.toolPermissions as {
+                    mode?: string;
+                    tools?: string[];
+                } | undefined;
+
+                if (perms?.tools && perms.tools.length > 0) {
+                    if (perms.mode === "allowlist") {
+                        toolsConfig[slug] = { enable: perms.tools };
+                    } else {
+                        toolsConfig[slug] = { disable: perms.tools };
+                    }
+                }
+            }
+
+            const sessionConfig: Record<string, unknown> = {
                 toolkits: toolkitSlugs,
-            });
+            };
+            if (Object.keys(toolsConfig).length > 0) {
+                sessionConfig.tools = toolsConfig;
+            }
+
+            const session = await composio.create(workspaceId, sessionConfig);
             const composioTools = await session.tools();
 
+            // Add all meta tools (COMPOSIO_SEARCH_TOOLS, COMPOSIO_MULTI_EXECUTE_TOOL, etc.)
             if (Array.isArray(composioTools)) {
-                for (const integ of activeIntegrations) {
-                    const slug = integ.composioToolkitSlug;
-                    const label = integ.connectionLabel || integ.name;
-                    const labelSlug = slugifyLabel(label);
-                    const integrationsForSlug = slugToIntegrations.get(slug) || [];
-                    const hasMultiple = integrationsForSlug.length > 1;
-
-                    const slugTools = composioTools.filter(
-                        (t: { name?: string }) =>
-                            typeof t.name === "string" && t.name.toLowerCase().startsWith(slug.toLowerCase())
-                    );
-
-                    const actionNames: string[] = [];
-                    for (const tool of slugTools) {
-                        const castTool = tool as unknown as DynamicStructuredTool;
-                        const originalName = castTool.name;
-
-                        if (hasMultiple) {
-                            const renamedTool = new DynamicStructuredTool({
-                                name: `${originalName}__${labelSlug}`,
-                                description: `${castTool.description} — Connection: '${label}'${integ.connectionDescription ? ` (${integ.connectionDescription})` : ""}`,
-                                schema: castTool.schema,
-                                func: castTool.func,
-                            });
-                            langchainTools.push(renamedTool);
-                            actionNames.push(`${originalName}__${labelSlug}`);
-                        } else {
-                            langchainTools.push(castTool);
-                            actionNames.push(originalName);
-                        }
-                    }
-
-                    composioToolCount += slugTools.length;
-
-                    const appDisplayName = slug.charAt(0).toUpperCase() + slug.slice(1);
-
-                    composioIntegrations.push({
-                        connectionLabel: label,
-                        connectionDescription: integ.connectionDescription ?? undefined,
-                        app: slug,
-                        appDisplayName,
-                        actions: actionNames,
-                    });
+                for (const tool of composioTools) {
+                    const castTool = tool as unknown as DynamicStructuredTool;
+                    langchainTools.push(castTool);
+                    composioToolCount++;
                 }
+            }
+
+            // Build integration metadata for system prompt so the agent knows which connections exist
+            for (const integ of activeIntegrations) {
+                const slug = integ.composioToolkitSlug;
+                const label = integ.connectionLabel || integ.name;
+                const appDisplayName = slug.charAt(0).toUpperCase() + slug.slice(1);
+
+                composioIntegrations.push({
+                    connectionLabel: label,
+                    connectionDescription: integ.connectionDescription ?? undefined,
+                    app: slug,
+                    appDisplayName,
+                    actions: [`Use COMPOSIO_SEARCH_TOOLS to find ${slug} actions, then COMPOSIO_MULTI_EXECUTE_TOOL to execute them`],
+                });
             }
         } catch (error) {
             logger.warn(
@@ -470,7 +486,6 @@ export async function createAgentGraph(
         canManageSkills: agent.canManageSkills,
         canManageTools: agent.canManageTools,
         canManageSchedules: agent.canManageSchedules,
-        canManageTasks: agent.canManageTasks,
         canManageChannels: agent.canManageChannels,
         canManageAgents: agent.canManageAgents,
     };
@@ -482,6 +497,198 @@ export async function createAgentGraph(
             permissions: systemPermissions,
         });
         langchainTools.push(...systemTools);
+        // All system tools that mutate state require approval
+        for (const st of systemTools) {
+            if (/^system_(delete|create|update|cancel)/.test(st.name)) {
+                approvalRequired.add(st.name);
+            }
+        }
+    }
+
+    // --- 8. Memory tools (when user context is available) ---
+    if (userId) {
+        const memoryTools = buildMemoryTools({ workspaceId, agentId, userId });
+        langchainTools.push(...memoryTools);
+    }
+
+    // --- 8b. Planning tools (write_todos, update_todo, get_todos) ---
+    // Use a mutable ref that gets synced with graph state in the agent node
+    let currentTodos: Todo[] = [];
+    const planningTools = buildPlanningTools(
+        () => currentTodos,
+        (todos) => { currentTodos = todos; }
+    );
+    langchainTools.push(...planningTools);
+
+    // --- 9. Channel awareness + send message tool ---
+    const channelInfos: ChannelInfo[] = [];
+    try {
+        const allConnections = await channelRepository.findByWorkspace(workspaceId);
+        const agentConnections = allConnections.filter(
+            (c) => c.agentId === agentId && c.status === "active"
+        );
+
+        for (const conn of agentConnections) {
+            const config = (conn.config || {}) as Record<string, unknown>;
+            const knownUsersMap = (config.knownUsers as Record<
+                string,
+                { username: string; firstName: string; chatId?: string }
+            >) || {};
+
+            const users: ChannelUserInfo[] = Object.entries(knownUsersMap).map(
+                ([uid, info]) => ({
+                    userId: uid,
+                    username: info.username || "",
+                    firstName: info.firstName || "",
+                    chatId: info.chatId,
+                })
+            );
+
+            channelInfos.push({
+                connectionId: conn.id,
+                channelType: conn.channelType as "telegram" | "slack",
+                name: conn.name,
+                status: conn.status,
+                knownUsers: users,
+            });
+        }
+
+        // Build the send_channel_message tool if there are active channels
+        if (agentConnections.length > 0) {
+            const sendChannelMessageTool = new DynamicStructuredTool({
+                name: "send_channel_message",
+                description:
+                    "Send a message to a specific user on a connected messaging channel (Telegram/Slack). " +
+                    "You can identify the user by their name, username, or user ID. " +
+                    "The system will resolve the correct user from known users.",
+                schema: z.object({
+                    user: z
+                        .string()
+                        .describe(
+                            "The user to send to — can be a name (e.g. 'John'), username (e.g. 'john_doe'), or user ID"
+                        ),
+                    message: z.string().describe("The message text to send"),
+                    channel_name: z
+                        .string()
+                        .optional()
+                        .describe(
+                            "Optional: specific channel connection name if the agent has multiple channels"
+                        ),
+                }),
+                func: async (params) => {
+                    const { user, message, channel_name } = params;
+
+                    // Find matching connection(s)
+                    let targetConnections = agentConnections;
+                    if (channel_name) {
+                        targetConnections = agentConnections.filter(
+                            (c) =>
+                                c.name
+                                    .toLowerCase()
+                                    .includes(channel_name.toLowerCase())
+                        );
+                        if (targetConnections.length === 0) {
+                            return `No channel found matching "${channel_name}". Available: ${agentConnections.map((c) => c.name).join(", ")}`;
+                        }
+                    }
+
+                    // Search for the user across connections
+                    const userLower = user.toLowerCase().replace(/^@/, "");
+                    for (const conn of targetConnections) {
+                        const config = (conn.config || {}) as Record<
+                            string,
+                            unknown
+                        >;
+                        const knownUsersMap = (config.knownUsers as Record<
+                            string,
+                            {
+                                username: string;
+                                firstName: string;
+                                chatId?: string;
+                            }
+                        >) || {};
+
+                        // Find user by name, username, or ID
+                        const matchedEntry = Object.entries(
+                            knownUsersMap
+                        ).find(([uid, info]) => {
+                            return (
+                                uid === user ||
+                                (info.username &&
+                                    info.username.toLowerCase() ===
+                                        userLower) ||
+                                (info.firstName &&
+                                    info.firstName.toLowerCase() ===
+                                        userLower)
+                            );
+                        });
+
+                        if (matchedEntry) {
+                            const [userId, userInfo] = matchedEntry;
+                            const chatId = userInfo.chatId || userId;
+
+                            if (conn.channelType === "telegram") {
+                                const telegramAdapter =
+                                    channelManager.getTelegramAdapter();
+                                const sent =
+                                    await telegramAdapter.sendDirectMessage(
+                                        conn.id,
+                                        chatId,
+                                        message
+                                    );
+                                if (sent) {
+                                    const displayName =
+                                        userInfo.firstName ||
+                                        userInfo.username ||
+                                        userId;
+                                    return `Message sent to ${displayName} on ${conn.name} (Telegram).`;
+                                }
+                                return `Failed to send message to user. They may need to start a conversation with the bot first.`;
+                            }
+
+                            // TODO: Slack support
+                            return `Sending messages on ${conn.channelType} is not yet supported.`;
+                        }
+                    }
+
+                    // No match found — list known users
+                    const allUsers: string[] = [];
+                    for (const conn of targetConnections) {
+                        const config = (conn.config || {}) as Record<
+                            string,
+                            unknown
+                        >;
+                        const knownUsersMap = (config.knownUsers as Record<
+                            string,
+                            {
+                                username: string;
+                                firstName: string;
+                            }
+                        >) || {};
+                        for (const [uid, info] of Object.entries(
+                            knownUsersMap
+                        )) {
+                            const name =
+                                info.firstName || info.username || uid;
+                            allUsers.push(name);
+                        }
+                    }
+
+                    if (allUsers.length > 0) {
+                        return `No user found matching "${user}". Known users: ${allUsers.join(", ")}`;
+                    }
+                    return `No user found matching "${user}". No users have interacted with the bot yet.`;
+                },
+            });
+
+            langchainTools.push(sendChannelMessageTool);
+            approvalRequired.add("send_channel_message");
+        }
+    } catch (error) {
+        logger.warn(
+            { error, agentId },
+            "Failed to load channel info for agent"
+        );
     }
 
     // --- Build capability-aware system prompt ---
@@ -494,6 +701,7 @@ export async function createAgentGraph(
         browserProfileName: browserProfile?.name,
         connectedAgents,
         composioIntegrations,
+        channels: channelInfos,
         systemLevelAccess: agent.systemLevelAccess,
         systemPermissions,
     };
@@ -536,7 +744,10 @@ export async function createAgentGraph(
         skillsSection = `\n\nSkills you must apply:\n${skillLines}`;
     }
 
-    const agentNode = async (state: typeof MessagesAnnotation.State) => {
+    const agentNode = async (state: typeof AgentState.State) => {
+        // Sync planning state from graph state
+        currentTodos = state.todos || [];
+
         // --- Credit check BEFORE LLM call ---
         const estimatedCost = calculateCreditCost({
             action: "chat_message",
@@ -545,11 +756,36 @@ export async function createAgentGraph(
         const creditCheck = await checkCredits(workspaceId, estimatedCost);
         if (!creditCheck.allowed) {
             const errorMsg = `Insufficient credits. Available: ${creditCheck.available}. Required: ~${estimatedCost}. Top up at Settings > Billing.`;
-            return { messages: [new AIMessage(errorMsg)] };
+            return { messages: [new AIMessage(errorMsg)], todos: currentTodos };
         }
 
         // Build dynamic system prompt
         const systemPromptParts: string[] = [];
+
+        // 0. Inject conversation summary if exists
+        if (state.summary) {
+            systemPromptParts.push(
+                `## Conversation Summary (earlier messages)\n${state.summary}`
+            );
+        }
+
+        // 0b. Inject long-term memories for this user
+        if (userId) {
+            try {
+                const memories = await memoryRepository.findByUser(workspaceId, agentId, userId);
+                if (memories.length > 0) {
+                    const memoryLines = memories
+                        .map((m) => `- [${m.category}] ${m.content}`)
+                        .join("\n");
+                    systemPromptParts.push(
+                        `## Long-term Memories About This User\n` +
+                        `These are facts and preferences you previously saved about this user:\n${memoryLines}`
+                    );
+                }
+            } catch (error) {
+                logger.warn({ error }, "Failed to load long-term memories");
+            }
+        }
 
         // 1. KB context (RAG) — with credit deduction
         if (allowedKbIds.length > 0) {
@@ -628,6 +864,29 @@ Rules:
 - For pdf: output styled HTML inside the artifact, set type="pdf"
 - Filename should be descriptive and lowercase with hyphens`);
 
+        // 5. Inject current plan state if there is one
+        if (currentTodos.length > 0) {
+            const completed = currentTodos.filter((t) => t.status === "completed").length;
+            const todoLines = currentTodos.map((t, i) => {
+                const icon = t.status === "completed" ? "done" : t.status === "in_progress" ? "..." : " ";
+                return `${i + 1}. [${icon}] ${t.title}${t.result ? ` → ${t.result}` : ""}`;
+            }).join("\n");
+            systemPromptParts.push(
+                `## Current Plan (${completed}/${currentTodos.length} completed)\n${todoLines}\n\n` +
+                `Continue executing the next pending step. Update each todo as you work on it.`
+            );
+        }
+
+        // 6. Memory capability instructions
+        if (userId) {
+            systemPromptParts.push(`## Memory
+You can remember important information about users across conversations using the \`save_memory\` tool.
+- Save proactively when a user shares: their name, preferences, project details, important decisions, timezone, etc.
+- Write memories as clear, standalone statements (e.g. "User's name is Alice", "User prefers concise responses").
+- Don't save trivial or temporary information.
+- Your previously saved memories (if any) are included in this prompt — use them to personalize responses.`);
+        }
+
         const systemMsg = new SystemMessage(systemPromptParts.join("\n\n"));
         let response;
         try {
@@ -668,11 +927,53 @@ Rules:
             logger.warn({ err }, "Chat message credit deduction failed")
         );
 
-        return { messages: [response] };
+        return { messages: [response], todos: currentTodos };
     };
 
-    // Route function
-    const shouldContinue = (state: typeof MessagesAnnotation.State) => {
+    // Summarization node — compresses older messages into a summary
+    const summarizeConversation = async (state: typeof AgentState.State) => {
+        const { summary, messages } = state;
+
+        let summaryPrompt: string;
+        if (summary) {
+            summaryPrompt =
+                `This is a summary of the conversation to date: ${summary}\n\n` +
+                `Extend the summary by taking into account the new messages above. ` +
+                `Preserve all important facts, user preferences, decisions, and context:`;
+        } else {
+            summaryPrompt =
+                `Create a concise summary of the conversation above. ` +
+                `Preserve all important facts, user preferences, decisions, and context:`;
+        }
+
+        const allMessages = [
+            ...messages,
+            new HumanMessage({ id: randomUUID(), content: summaryPrompt }),
+        ];
+
+        const response = await llm.invoke(allMessages);
+
+        // Keep only the last N messages, remove the rest
+        const deleteMessages = messages
+            .slice(0, -KEEP_MESSAGES)
+            .filter((m) => m.id)
+            .map((m) => new RemoveMessage({ id: m.id! }));
+
+        const summaryContent =
+            typeof response.content === "string"
+                ? response.content
+                : Array.isArray(response.content)
+                    ? response.content
+                        .filter((b: { type: string }) => b.type === "text")
+                        .map((b: { text: string }) => b.text)
+                        .join("")
+                    : "";
+
+        return { summary: summaryContent, messages: deleteMessages };
+    };
+
+    // Route function — decides: tools, summarize, or end
+    const shouldContinue = (state: typeof AgentState.State) => {
         const lastMessage = state.messages[state.messages.length - 1];
         if (
             lastMessage &&
@@ -682,23 +983,125 @@ Rules:
         ) {
             return "tools";
         }
+        // Check if conversation is long enough to warrant summarization
+        if (state.messages.length > SUMMARIZE_THRESHOLD) {
+            return "summarize_conversation";
+        }
         return "__end__";
     };
 
-    const graph = new StateGraph(MessagesAnnotation)
-        .addNode("agent", agentNode);
+    // --- Custom HITL tool node (replaces ToolNode) ---
+    const toolsByName = new Map<string, DynamicStructuredTool>();
+    for (const tool of langchainTools) {
+        toolsByName.set(tool.name, tool);
+    }
+
+    // If agent has requireApprovalForAll, every tool needs approval
+    // (except save_memory and internal planning tools)
+    const internalTools = new Set(["save_memory", "write_todos", "update_todo", "get_todos"]);
+    const effectiveApproval = new Set(approvalRequired);
+    if (agent.requireApprovalForAll) {
+        for (const tool of langchainTools) {
+            if (!internalTools.has(tool.name)) {
+                effectiveApproval.add(tool.name);
+            }
+        }
+    }
+
+    const humanReviewToolNode = async (state: typeof AgentState.State) => {
+        // Sync planning state so tools can read/write it
+        currentTodos = state.todos || [];
+        const lastMessage = state.messages[state.messages.length - 1] as AIMessage;
+        const toolCalls = lastMessage.tool_calls ?? [];
+
+        // Determine which tool calls need approval
+        const needsApproval = toolCalls.filter(
+            (tc) => effectiveApproval.has(tc.name)
+        );
+
+        // If any need approval, interrupt with all pending approvals bundled
+        let decisions: Record<string, { type: string; args?: Record<string, unknown>; message?: string }> = {};
+
+        if (needsApproval.length > 0) {
+            const response = interrupt({
+                toolCalls: needsApproval.map((tc) => ({
+                    id: tc.id,
+                    name: tc.name,
+                    args: tc.args,
+                })),
+            }) as { decisions: Array<{ type: string; args?: Record<string, unknown>; message?: string }> };
+
+            // Map decisions by tool call id
+            needsApproval.forEach((tc, i) => {
+                decisions[tc.id!] = response.decisions[i] || { type: "approve" };
+            });
+        }
+
+        // Execute all tool calls
+        const results: ToolMessage[] = [];
+        for (const tc of toolCalls) {
+            const decision = decisions[tc.id!];
+
+            // Handle rejection
+            if (decision && decision.type === "reject") {
+                results.push(new ToolMessage({
+                    content: `Action rejected by user${decision.message ? `: ${decision.message}` : ""}`,
+                    tool_call_id: tc.id!,
+                    name: tc.name,
+                }));
+                continue;
+            }
+
+            // Use edited args if provided
+            const args = decision?.type === "edit" && decision.args
+                ? decision.args
+                : tc.args;
+
+            const tool = toolsByName.get(tc.name);
+            if (!tool) {
+                results.push(new ToolMessage({
+                    content: `Tool "${tc.name}" not found`,
+                    tool_call_id: tc.id!,
+                    name: tc.name,
+                }));
+                continue;
+            }
+
+            try {
+                const result = await tool.invoke(args);
+                results.push(new ToolMessage({
+                    content: typeof result === "string" ? result : JSON.stringify(result),
+                    tool_call_id: tc.id!,
+                    name: tc.name,
+                }));
+            } catch (error) {
+                results.push(new ToolMessage({
+                    content: `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+                    tool_call_id: tc.id!,
+                    name: tc.name,
+                }));
+            }
+        }
+
+        return { messages: results, todos: currentTodos };
+    };
+
+    const graph = new StateGraph(AgentState)
+        .addNode("agent", agentNode)
+        .addNode("summarize_conversation", summarizeConversation);
 
     if (langchainTools.length > 0) {
-        const toolNode = new ToolNode(langchainTools);
         graph
-            .addNode("tools", toolNode)
+            .addNode("tools", humanReviewToolNode)
             .addEdge("__start__", "agent")
             .addConditionalEdges("agent", shouldContinue)
-            .addEdge("tools", "agent");
+            .addEdge("tools", "agent")
+            .addEdge("summarize_conversation", "__end__");
     } else {
         graph
             .addEdge("__start__", "agent")
-            .addEdge("agent", "__end__");
+            .addConditionalEdges("agent", shouldContinue)
+            .addEdge("summarize_conversation", "__end__");
     }
 
     const checkpointer = await getCheckpointer();

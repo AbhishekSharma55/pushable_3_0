@@ -30,6 +30,7 @@ class BrowserManager:
         workspace_id: str,
         profile_id: str,
         headless: bool = True,
+        proxy_url: Optional[str] = None,
     ) -> dict:
         if session_id in self.active_sessions:
             raise ValueError(f"Session {session_id} already exists")
@@ -58,6 +59,17 @@ class BrowserManager:
                 launch_kwargs["addons"] = [ext_path]
                 logger.info("Loading Capsolver extension from %s", ext_path)
 
+        # Parse proxy URL if provided
+        if proxy_url:
+            from urllib.parse import urlparse
+            parsed = urlparse(proxy_url)
+            launch_kwargs["proxy"] = {
+                "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}",
+                "username": parsed.username,
+                "password": parsed.password,
+            }
+            logger.info("Session %s using proxy %s:%s", session_id, parsed.hostname, parsed.port)
+
         # Launch playwright and Camoufox
         pw: Playwright = await async_playwright().start()
 
@@ -75,8 +87,8 @@ class BrowserManager:
             width = int(os.getenv("SCREENSHOT_WIDTH", "1920"))
             height = int(os.getenv("SCREENSHOT_HEIGHT", "1080"))
             await page.set_viewport_size({"width": width, "height": height})
-            # Navigate to a blank page to ensure the browser is fully ready
-            await page.goto("about:blank")
+            # Navigate to Google so the browser is ready with a useful default
+            await page.goto("https://www.google.com")
             await asyncio.sleep(0.3)
 
             # Inject Capsolver API key into extension config via localStorage

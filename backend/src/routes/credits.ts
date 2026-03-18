@@ -3,7 +3,7 @@ import { eq, desc } from "drizzle-orm";
 import { db } from "../db/client.ts";
 import { creditLedger } from "../db/schema/index.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
-import { getBalance } from "../lib/credit-engine.ts";
+import { getBalance, addCredits } from "../lib/credit-engine.ts";
 
 export async function creditRoutes(fastify: FastifyInstance) {
     fastify.addHook("onRequest", async (request) => {
@@ -74,5 +74,24 @@ export async function creditRoutes(fastify: FastifyInstance) {
             })),
             nextCursor,
         };
+    });
+
+    // POST /credits/dev-topup — dev-only quick top-up
+    fastify.post("/credits/dev-topup", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { amount } = request.body as { amount: number };
+
+        if (!amount || amount <= 0 || amount > 10_000_000) {
+            throw new AppError("amount must be between 1 and 10,000,000", 400, "INVALID_AMOUNT");
+        }
+
+        const result = await addCredits({
+            workspaceId,
+            amount,
+            type: "topup",
+            metadata: { source: "dev-topup", note: "Manual dev top-up" },
+        });
+
+        return { data: { creditsAfter: result.creditsAfter, added: amount } };
     });
 }

@@ -1,5 +1,6 @@
 import {
     integer,
+    jsonb,
     pgEnum,
     pgTable,
     text,
@@ -26,5 +27,6 @@ export const messages = pgTable("messages", {
     role: messageRoleEnum("role").notNull(),
     content: text("content").notNull(),
     tokenCount: integer("token_count").default(0).notNull(),
+    metadata: jsonb("metadata").default("{}").notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
 });

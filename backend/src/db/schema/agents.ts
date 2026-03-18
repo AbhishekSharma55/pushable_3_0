@@ -16,9 +16,9 @@ export const agents = pgTable("agents", {
     canManageSkills: boolean("can_manage_skills").default(false).notNull(),
     canManageTools: boolean("can_manage_tools").default(false).notNull(),
     canManageSchedules: boolean("can_manage_schedules").default(false).notNull(),
-    canManageTasks: boolean("can_manage_tasks").default(false).notNull(),
     canManageChannels: boolean("can_manage_channels").default(false).notNull(),
     canManageAgents: boolean("can_manage_agents").default(false).notNull(),
+    requireApprovalForAll: boolean("require_approval_for_all").default(false).notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

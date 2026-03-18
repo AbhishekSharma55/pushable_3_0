@@ -60,3 +60,29 @@ export const removeFromAgent = (workspaceId: string, agentId: string, integratio
 
 export const getAgentIntegrations = (workspaceId: string, agentId: string): Promise<Integration[]> =>
     apiClient.get(`/api/agents/${agentId}/integrations`, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+export interface ToolkitAction {
+    slug: string;
+    name: string;
+    description: string;
+    tags: string[];
+}
+
+export interface ToolPermissions {
+    mode: 'allowlist' | 'blocklist';
+    tools: string[];
+}
+
+export const getToolkitActions = (slug: string): Promise<ToolkitAction[]> =>
+    apiClient.get(`/api/integrations/toolkits/${slug}/actions`).then(r => r.data.data);
+
+export const updateToolPermissions = (
+    workspaceId: string,
+    integrationId: string,
+    permissions: ToolPermissions
+): Promise<Integration> =>
+    apiClient.put(
+        `/api/integrations/${integrationId}/permissions`,
+        permissions,
+        { headers: { 'x-workspace-id': workspaceId } }
+    ).then(r => r.data.data);

@@ -36,15 +36,17 @@ export async function refreshClaudeToken(): Promise<string> {
 
     logger.info("Refreshing Claude access token…");
 
+    const params = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+    });
+
     const res = await fetch(
         "https://console.anthropic.com/v1/oauth/token",
         {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                grant_type: "refresh_token",
-                refresh_token: refreshToken,
-            }),
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: params.toString(),
         }
     );
 

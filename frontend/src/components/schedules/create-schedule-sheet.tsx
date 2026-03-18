@@ -47,9 +47,8 @@ import {
     getPresets,
     previewSchedule,
 } from '@/lib/api/schedules';
-import { getTasks } from '@/lib/api/tasks';
-import { getWorkflows } from '@/lib/api/workflows';
-import type { Schedule, SchedulePreset, Task, Workflow } from '@/types';
+import { getAgents } from '@/lib/api/agents';
+import type { Schedule, SchedulePreset, Agent } from '@/types';
 import type { PreviewResult } from '@/lib/api/schedules';
 
 const ICON_MAP: Record<string, React.ElementType> = {
@@ -95,13 +94,12 @@ export function CreateScheduleSheet({
 
     // Step 2 state
     const [name, setName] = useState('');
-    const [targetType, setTargetType] = useState<'task' | 'workflow'>('task');
-    const [targetId, setTargetId] = useState('');
+    const [agentId, setAgentId] = useState('');
+    const [prompt, setPrompt] = useState('');
     const [timezone, setTimezone] = useState(
         typeof window !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC'
     );
-    const [tasks, setTasks] = useState<Task[]>([]);
-    const [workflows, setWorkflows] = useState<Workflow[]>([]);
+    const [agents, setAgents] = useState<Agent[]>([]);
 
     // Step 3 state
     const [showAdvanced, setShowAdvanced] = useState(false);
@@ -115,13 +113,11 @@ export function CreateScheduleSheet({
     const [submitting, setSubmitting] = useState(false);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    // Load presets and targets
+    // Load presets and agents
     useEffect(() => {
         if (!open) return;
         getPresets(workspaceId).then(setPresets).catch(() => {});
-        Promise.all([getTasks(workspaceId), getWorkflows(workspaceId)])
-            .then(([t, w]) => { setTasks(t); setWorkflows(w); })
-            .catch(() => {});
+        getAgents(workspaceId).then(setAgents).catch(() => {});
     }, [open, workspaceId]);
 
     // Reset form on open
@@ -133,8 +129,8 @@ export function CreateScheduleSheet({
             setNaturalInput(schedule.naturalLanguage || '');
             setCronInput(schedule.cron);
             setName(schedule.name);
-            setTargetType(schedule.targetType);
-            setTargetId(schedule.targetId);
+            setAgentId(schedule.agentId);
+            setPrompt(schedule.prompt);
             setTimezone(schedule.timezone);
             setHumanizeDelay(schedule.humanizeDelay);
             setHumanizeEnabled(schedule.humanizeDelay > 0);
@@ -149,8 +145,8 @@ export function CreateScheduleSheet({
             setNaturalInput('');
             setCronInput('');
             setName('');
-            setTargetType('task');
-            setTargetId('');
+            setAgentId('');
+            setPrompt('');
             setTimezone(typeof window !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC');
             setHumanizeDelay(0);
             setHumanizeEnabled(false);
@@ -207,21 +203,21 @@ export function CreateScheduleSheet({
     };
 
     const handleSubmit = async () => {
-        if (!name.trim() || !targetId) {
-            toast.error('Name and target are required');
+        if (!name.trim() || !agentId || !prompt.trim()) {
+            toast.error('Name, agent, and prompt are required');
             return;
         }
 
         setSubmitting(true);
         try {
             if (isEdit && schedule) {
-                await updateSchedule(workspaceId, schedule.id, { name, cron: cronInput || schedule.cron });
+                await updateSchedule(workspaceId, schedule.id, { name, prompt, cron: cronInput || schedule.cron });
                 toast.success('Schedule updated');
             } else {
                 const payload: Parameters<typeof createSchedule>[1] = {
                     name: name.trim(),
-                    targetType,
-                    targetId,
+                    agentId,
+                    prompt: prompt.trim(),
                     enabled: true,
                     scheduleType: scheduleType === 'preset' ? 'preset' : scheduleType === 'natural' ? 'natural' : 'custom',
                     timezone,
@@ -253,7 +249,6 @@ export function CreateScheduleSheet({
         }
     };
 
-    const targetOptions = targetType === 'task' ? tasks : workflows;
     const selectedPreset = presets.find((p) => p.key === selectedPresetKey);
 
     // Build summary
@@ -265,10 +260,10 @@ export function CreateScheduleSheet({
     } else if (scheduleType === 'custom' && cronInput) {
         summary = cronInput;
     }
-    if (humanizeEnabled && humanizeDelay > 0) summary += ` (±${humanizeDelay}min)`;
+    if (humanizeEnabled && humanizeDelay > 0) summary += ` (+/-${humanizeDelay}min)`;
     if (timezone !== 'UTC') summary += ` · ${timezone.split('/').pop()?.replace('_', ' ')}`;
 
-    const canSubmit = name.trim() && targetId && (
+    const canSubmit = name.trim() && agentId && prompt.trim() && (
         (scheduleType === 'preset' && selectedPresetKey) ||
         (scheduleType === 'natural' && preview) ||
         (scheduleType === 'custom' && cronInput.trim())
@@ -282,7 +277,7 @@ export function CreateScheduleSheet({
                         {isEdit ? 'Edit Schedule' : 'Create Schedule'}
                     </SheetTitle>
                     <SheetDescription>
-                        {isEdit ? 'Update your schedule.' : 'Schedule a recurring task for your agent.'}
+                        {isEdit ? 'Update your schedule.' : 'Schedule a recurring prompt for your agent.'}
                     </SheetDescription>
                 </SheetHeader>
 
@@ -419,32 +414,36 @@ export function CreateScheduleSheet({
                             </div>
 
                             {!isEdit && (
+                                <div className="space-y-2">
+                                    <Label>Agent</Label>
+                                    <Select value={agentId} onValueChange={setAgentId}>
+                                        <SelectTrigger><SelectValue placeholder="Select agent" /></SelectTrigger>
+                                        <SelectContent>
+                                            {agents.map((agent) => (
+                                                <SelectItem key={agent.id} value={agent.id}>
+                                                    {agent.name}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                            )}
+
+                            <div className="space-y-2">
+                                <Label>Prompt</Label>
+                                <Textarea
+                                    placeholder="e.g. Check my inbox for urgent emails and summarize them"
+                                    value={prompt}
+                                    onChange={(e) => setPrompt(e.target.value)}
+                                    rows={3}
+                                />
+                                <p className="text-[11px] text-muted-foreground">
+                                    This prompt will be sent to the agent each time the schedule fires.
+                                </p>
+                            </div>
+
+                            {!isEdit && (
                                 <>
-                                    <div className="space-y-2">
-                                        <Label>Target Type</Label>
-                                        <Select value={targetType} onValueChange={(v: 'task' | 'workflow') => { setTargetType(v); setTargetId(''); }}>
-                                            <SelectTrigger><SelectValue /></SelectTrigger>
-                                            <SelectContent>
-                                                <SelectItem value="task">Task</SelectItem>
-                                                <SelectItem value="workflow">Workflow</SelectItem>
-                                            </SelectContent>
-                                        </Select>
-                                    </div>
-
-                                    <div className="space-y-2">
-                                        <Label>Target</Label>
-                                        <Select value={targetId} onValueChange={setTargetId}>
-                                            <SelectTrigger><SelectValue placeholder="Select target" /></SelectTrigger>
-                                            <SelectContent>
-                                                {targetOptions.map((item) => (
-                                                    <SelectItem key={item.id} value={item.id}>
-                                                        {targetType === 'task' ? (item as Task).title : (item as Workflow).name}
-                                                    </SelectItem>
-                                                ))}
-                                            </SelectContent>
-                                        </Select>
-                                    </div>
-
                                     <div className="space-y-2">
                                         <Label>Timezone</Label>
                                         <Input
@@ -456,104 +455,102 @@ export function CreateScheduleSheet({
                                             IANA timezone. Detected: {typeof window !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC'}
                                         </p>
                                     </div>
+
+                                    {/* Step 3 — Advanced options */}
+                                    <div className="rounded-lg border border-border/60">
+                                        <button
+                                            type="button"
+                                            className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium hover:bg-muted/50 transition-colors"
+                                            onClick={() => setShowAdvanced(!showAdvanced)}
+                                        >
+                                            <span>Smart Options</span>
+                                            {showAdvanced ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                                        </button>
+
+                                        {showAdvanced && (
+                                            <div className="px-4 pb-4 space-y-5 border-t border-border/40 pt-4">
+                                                {/* Humanize delay */}
+                                                <div className="space-y-3">
+                                                    <div className="flex items-center justify-between">
+                                                        <div>
+                                                            <Label className="text-sm">Humanize timing</Label>
+                                                            <p className="text-[11px] text-muted-foreground mt-0.5">
+                                                                Add random delay to feel less robotic
+                                                            </p>
+                                                        </div>
+                                                        <Switch checked={humanizeEnabled} onCheckedChange={(v) => { setHumanizeEnabled(v); if (!v) setHumanizeDelay(0); else setHumanizeDelay(10); }} />
+                                                    </div>
+                                                    {humanizeEnabled && (
+                                                        <div className="space-y-2">
+                                                            <Slider
+                                                                value={[humanizeDelay]}
+                                                                onValueChange={([v]) => setHumanizeDelay(v)}
+                                                                min={1}
+                                                                max={30}
+                                                                step={1}
+                                                            />
+                                                            <p className="text-xs text-muted-foreground text-center">
+                                                                Up to {humanizeDelay} minutes of random delay
+                                                            </p>
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {/* Business hours */}
+                                                <div className="space-y-3">
+                                                    <div className="flex items-center justify-between">
+                                                        <div>
+                                                            <Label className="text-sm">Business hours only</Label>
+                                                            <p className="text-[11px] text-muted-foreground mt-0.5">
+                                                                Skip runs outside work hours
+                                                            </p>
+                                                        </div>
+                                                        <Switch checked={businessHoursOnly} onCheckedChange={setBusinessHoursOnly} />
+                                                    </div>
+                                                    {businessHoursOnly && (
+                                                        <div className="space-y-3">
+                                                            <div className="flex gap-1">
+                                                                {DAY_LABELS.map((label, i) => (
+                                                                    <button
+                                                                        key={i}
+                                                                        type="button"
+                                                                        className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
+                                                                            workDays.includes(i)
+                                                                                ? 'bg-primary text-primary-foreground'
+                                                                                : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                                                                        }`}
+                                                                        onClick={() => toggleWorkDay(i)}
+                                                                    >
+                                                                        {label}
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                            <div className="flex items-center gap-2">
+                                                                <Select value={String(workStartHour)} onValueChange={(v) => setWorkStartHour(Number(v))}>
+                                                                    <SelectTrigger className="w-24 h-8 text-xs"><SelectValue /></SelectTrigger>
+                                                                    <SelectContent>
+                                                                        {Array.from({ length: 24 }, (_, i) => (
+                                                                            <SelectItem key={i} value={String(i)}>{i.toString().padStart(2, '0')}:00</SelectItem>
+                                                                        ))}
+                                                                    </SelectContent>
+                                                                </Select>
+                                                                <span className="text-xs text-muted-foreground">to</span>
+                                                                <Select value={String(workEndHour)} onValueChange={(v) => setWorkEndHour(Number(v))}>
+                                                                    <SelectTrigger className="w-24 h-8 text-xs"><SelectValue /></SelectTrigger>
+                                                                    <SelectContent>
+                                                                        {Array.from({ length: 24 }, (_, i) => (
+                                                                            <SelectItem key={i} value={String(i)}>{i.toString().padStart(2, '0')}:00</SelectItem>
+                                                                        ))}
+                                                                    </SelectContent>
+                                                                </Select>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
                                 </>
-                            )}
-
-                            {/* Step 3 — Advanced options */}
-                            {!isEdit && (
-                                <div className="rounded-lg border border-border/60">
-                                    <button
-                                        type="button"
-                                        className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium hover:bg-muted/50 transition-colors"
-                                        onClick={() => setShowAdvanced(!showAdvanced)}
-                                    >
-                                        <span>Smart Options</span>
-                                        {showAdvanced ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                                    </button>
-
-                                    {showAdvanced && (
-                                        <div className="px-4 pb-4 space-y-5 border-t border-border/40 pt-4">
-                                            {/* Humanize delay */}
-                                            <div className="space-y-3">
-                                                <div className="flex items-center justify-between">
-                                                    <div>
-                                                        <Label className="text-sm">Humanize timing</Label>
-                                                        <p className="text-[11px] text-muted-foreground mt-0.5">
-                                                            Add random delay to feel less robotic
-                                                        </p>
-                                                    </div>
-                                                    <Switch checked={humanizeEnabled} onCheckedChange={(v) => { setHumanizeEnabled(v); if (!v) setHumanizeDelay(0); else setHumanizeDelay(10); }} />
-                                                </div>
-                                                {humanizeEnabled && (
-                                                    <div className="space-y-2">
-                                                        <Slider
-                                                            value={[humanizeDelay]}
-                                                            onValueChange={([v]) => setHumanizeDelay(v)}
-                                                            min={1}
-                                                            max={30}
-                                                            step={1}
-                                                        />
-                                                        <p className="text-xs text-muted-foreground text-center">
-                                                            Up to {humanizeDelay} minutes of random delay
-                                                        </p>
-                                                    </div>
-                                                )}
-                                            </div>
-
-                                            {/* Business hours */}
-                                            <div className="space-y-3">
-                                                <div className="flex items-center justify-between">
-                                                    <div>
-                                                        <Label className="text-sm">Business hours only</Label>
-                                                        <p className="text-[11px] text-muted-foreground mt-0.5">
-                                                            Skip runs outside work hours
-                                                        </p>
-                                                    </div>
-                                                    <Switch checked={businessHoursOnly} onCheckedChange={setBusinessHoursOnly} />
-                                                </div>
-                                                {businessHoursOnly && (
-                                                    <div className="space-y-3">
-                                                        <div className="flex gap-1">
-                                                            {DAY_LABELS.map((label, i) => (
-                                                                <button
-                                                                    key={i}
-                                                                    type="button"
-                                                                    className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
-                                                                        workDays.includes(i)
-                                                                            ? 'bg-primary text-primary-foreground'
-                                                                            : 'bg-muted text-muted-foreground hover:bg-muted/80'
-                                                                    }`}
-                                                                    onClick={() => toggleWorkDay(i)}
-                                                                >
-                                                                    {label}
-                                                                </button>
-                                                            ))}
-                                                        </div>
-                                                        <div className="flex items-center gap-2">
-                                                            <Select value={String(workStartHour)} onValueChange={(v) => setWorkStartHour(Number(v))}>
-                                                                <SelectTrigger className="w-24 h-8 text-xs"><SelectValue /></SelectTrigger>
-                                                                <SelectContent>
-                                                                    {Array.from({ length: 24 }, (_, i) => (
-                                                                        <SelectItem key={i} value={String(i)}>{i.toString().padStart(2, '0')}:00</SelectItem>
-                                                                    ))}
-                                                                </SelectContent>
-                                                            </Select>
-                                                            <span className="text-xs text-muted-foreground">to</span>
-                                                            <Select value={String(workEndHour)} onValueChange={(v) => setWorkEndHour(Number(v))}>
-                                                                <SelectTrigger className="w-24 h-8 text-xs"><SelectValue /></SelectTrigger>
-                                                                <SelectContent>
-                                                                    {Array.from({ length: 24 }, (_, i) => (
-                                                                        <SelectItem key={i} value={String(i)}>{i.toString().padStart(2, '0')}:00</SelectItem>
-                                                                    ))}
-                                                                </SelectContent>
-                                                            </Select>
-                                                        </div>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
                             )}
 
                             {/* Summary + Submit */}

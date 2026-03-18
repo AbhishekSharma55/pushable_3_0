@@ -11,6 +11,7 @@ import {
     Plus,
     Sparkles,
     Pencil,
+    Shield,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -18,6 +19,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
 import {
     Dialog,
     DialogContent,
@@ -44,7 +46,10 @@ import {
     connectIntegration,
     deleteIntegration,
     updateIntegration,
+    getToolkitActions,
+    updateToolPermissions,
 } from '@/lib/api/integrations';
+import type { ToolkitAction, ToolPermissions } from '@/lib/api/integrations';
 import type { Integration, Toolkit } from '@/types';
 
 const TOOLKIT_PAGE_SIZE = 20;
@@ -78,6 +83,16 @@ export default function IntegrationsPage() {
     const [editLabel, setEditLabel] = useState('');
     const [editDescription, setEditDescription] = useState('');
     const [saving, setSaving] = useState(false);
+
+    // Permissions dialog state
+    const [permDialogOpen, setPermDialogOpen] = useState(false);
+    const [permIntegration, setPermIntegration] = useState<Integration | null>(null);
+    const [actions, setActions] = useState<ToolkitAction[]>([]);
+    const [loadingActions, setLoadingActions] = useState(false);
+    const [permMode, setPermMode] = useState<'allowlist' | 'blocklist'>('blocklist');
+    const [selectedTools, setSelectedTools] = useState<Set<string>>(new Set());
+    const [savingPerms, setSavingPerms] = useState(false);
+    const [actionSearch, setActionSearch] = useState('');
 
     // Infinite scroll sentinel ref
     const sentinelRef = useRef<HTMLDivElement>(null);
@@ -268,6 +283,79 @@ export default function IntegrationsPage() {
         }
     };
 
+    const handleOpenPermissions = async (integration: Integration) => {
+        setPermIntegration(integration);
+        setActionSearch('');
+
+        // Load existing permissions from metadata
+        const existing = (integration.metadata as Record<string, unknown>)?.toolPermissions as ToolPermissions | undefined;
+        if (existing) {
+            setPermMode(existing.mode);
+            setSelectedTools(new Set(existing.tools));
+        } else {
+            setPermMode('blocklist');
+            setSelectedTools(new Set());
+        }
+
+        setPermDialogOpen(true);
+        setLoadingActions(true);
+
+        try {
+            const result = await getToolkitActions(integration.composioToolkitSlug);
+            setActions(result);
+        } catch {
+            toast.error('Failed to load available actions');
+        } finally {
+            setLoadingActions(false);
+        }
+    };
+
+    const handleSelectAllTools = () => {
+        const filtered = actions.filter(a =>
+            !actionSearch || a.slug.toLowerCase().includes(actionSearch.toLowerCase()) || a.name.toLowerCase().includes(actionSearch.toLowerCase())
+        );
+        const allSelected = filtered.every(a => selectedTools.has(a.slug));
+        setSelectedTools(prev => {
+            const next = new Set(prev);
+            if (allSelected) {
+                for (const a of filtered) next.delete(a.slug);
+            } else {
+                for (const a of filtered) next.add(a.slug);
+            }
+            return next;
+        });
+    };
+
+    const handleToggleTool = (slug: string) => {
+        setSelectedTools(prev => {
+            const next = new Set(prev);
+            if (next.has(slug)) {
+                next.delete(slug);
+            } else {
+                next.add(slug);
+            }
+            return next;
+        });
+    };
+
+    const handleSavePermissions = async () => {
+        if (!workspace || !permIntegration) return;
+        try {
+            setSavingPerms(true);
+            await updateToolPermissions(workspace.id, permIntegration.id, {
+                mode: permMode,
+                tools: Array.from(selectedTools),
+            });
+            toast.success('Tool permissions updated');
+            setPermDialogOpen(false);
+            fetchIntegrations();
+        } catch {
+            toast.error('Failed to update permissions');
+        } finally {
+            setSavingPerms(false);
+        }
+    };
+
     const statusBadge = (status: Integration['status']) => {
         switch (status) {
             case 'active':
@@ -385,6 +473,13 @@ export default function IntegrationsPage() {
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-1">
+                                    <button
+                                        className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                        onClick={() => handleOpenPermissions(integration)}
+                                        title="Tool Permissions"
+                                    >
+                                        <Shield className="h-4 w-4" />
+                                    </button>
                                     <button
                                         className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                                         onClick={() => handleEdit(integration)}
@@ -620,6 +715,137 @@ export default function IntegrationsPage() {
                             {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
                             Save
                         </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Tool Permissions Dialog */}
+            <Dialog open={permDialogOpen} onOpenChange={setPermDialogOpen}>
+                <DialogContent className="sm:max-w-xl max-h-[80vh] flex flex-col">
+                    <DialogHeader>
+                        <DialogTitle>
+                            Tool Permissions — {permIntegration?.connectionLabel || permIntegration?.name}
+                        </DialogTitle>
+                        <DialogDescription>
+                            Control which actions this integration can perform.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    {/* Mode toggle */}
+                    <div className="flex gap-2">
+                        <Button
+                            variant={permMode === 'blocklist' ? 'default' : 'outline'}
+                            size="sm"
+                            onClick={() => { setPermMode('blocklist'); setSelectedTools(new Set()); }}
+                        >
+                            Block Selected
+                        </Button>
+                        <Button
+                            variant={permMode === 'allowlist' ? 'default' : 'outline'}
+                            size="sm"
+                            onClick={() => { setPermMode('allowlist'); setSelectedTools(new Set()); }}
+                        >
+                            Allow Only Selected
+                        </Button>
+                    </div>
+
+                    <p className="text-xs text-muted-foreground">
+                        {permMode === 'blocklist'
+                            ? 'All actions are allowed except the ones you toggle on below.'
+                            : 'Only the actions you toggle on below will be allowed.'}
+                    </p>
+
+                    {/* Search */}
+                    <div className="relative">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                        <Input
+                            placeholder="Search actions..."
+                            value={actionSearch}
+                            onChange={(e) => setActionSearch(e.target.value)}
+                            className="pl-9"
+                        />
+                    </div>
+
+                    {/* Select all / Deselect all */}
+                    {!loadingActions && actions.length > 0 && (
+                        <div className="flex items-center justify-between">
+                            <button
+                                className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2"
+                                onClick={handleSelectAllTools}
+                            >
+                                {actions
+                                    .filter(a => !actionSearch || a.slug.toLowerCase().includes(actionSearch.toLowerCase()) || a.name.toLowerCase().includes(actionSearch.toLowerCase()))
+                                    .every(a => selectedTools.has(a.slug))
+                                    ? 'Deselect All'
+                                    : 'Select All'}
+                            </button>
+                            <span className="text-xs text-muted-foreground">
+                                {actions.filter(a => !actionSearch || a.slug.toLowerCase().includes(actionSearch.toLowerCase()) || a.name.toLowerCase().includes(actionSearch.toLowerCase())).length} actions
+                            </span>
+                        </div>
+                    )}
+
+                    {/* Actions list */}
+                    <div className="flex-1 overflow-y-auto min-h-0 space-y-1">
+                        {loadingActions ? (
+                            <div className="flex items-center justify-center py-12">
+                                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                            </div>
+                        ) : actions.length === 0 ? (
+                            <div className="flex items-center justify-center py-12">
+                                <p className="text-sm text-muted-foreground">No actions found for this toolkit.</p>
+                            </div>
+                        ) : (
+                            actions
+                                .filter(a => !actionSearch || a.slug.toLowerCase().includes(actionSearch.toLowerCase()) || a.name.toLowerCase().includes(actionSearch.toLowerCase()))
+                                .map((action) => (
+                                    <div
+                                        key={action.slug}
+                                        className="flex items-center justify-between rounded-md border border-border/60 px-3 py-2"
+                                    >
+                                        <div className="flex-1 min-w-0 mr-3">
+                                            <p className="text-xs font-mono font-medium truncate">{action.slug}</p>
+                                            {action.description && (
+                                                <p className="text-xs text-muted-foreground line-clamp-1 mt-0.5">{action.description}</p>
+                                            )}
+                                            {action.tags?.length > 0 && (
+                                                <div className="flex gap-1 mt-1">
+                                                    {action.tags.map((tag: string) => (
+                                                        <Badge
+                                                            key={tag}
+                                                            variant="outline"
+                                                            className={`text-[9px] px-1 py-0 ${tag === 'destructiveHint' ? 'border-red-300 text-red-600' : ''}`}
+                                                        >
+                                                            {tag}
+                                                        </Badge>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <Switch
+                                            checked={selectedTools.has(action.slug)}
+                                            onCheckedChange={() => handleToggleTool(action.slug)}
+                                        />
+                                    </div>
+                                ))
+                        )}
+                    </div>
+
+                    <DialogFooter>
+                        <div className="flex items-center justify-between w-full">
+                            <p className="text-xs text-muted-foreground">
+                                {selectedTools.size} action{selectedTools.size !== 1 ? 's' : ''} {permMode === 'blocklist' ? 'blocked' : 'allowed'}
+                            </p>
+                            <div className="flex gap-2">
+                                <Button variant="outline" onClick={() => setPermDialogOpen(false)} disabled={savingPerms}>
+                                    Cancel
+                                </Button>
+                                <Button onClick={handleSavePermissions} disabled={savingPerms}>
+                                    {savingPerms && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                                    Save Permissions
+                                </Button>
+                            </div>
+                        </div>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>

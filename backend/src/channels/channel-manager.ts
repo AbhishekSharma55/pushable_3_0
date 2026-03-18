@@ -1,7 +1,7 @@
 import { channelRepository } from "../repositories/channel.repository.ts";
-import { TelegramAdapter, setTelegramMessageHandler } from "./telegram.channel.ts";
+import { TelegramAdapter, setTelegramMessageHandler, setTelegramApprovalHandler } from "./telegram.channel.ts";
 import { SlackAdapter, setSlackMessageHandler } from "./slack.channel.ts";
-import { routeMessage, setResponseSender } from "./message-router.ts";
+import { routeMessage, setResponseSender, setApprovalSender, resolveChannelApproval } from "./message-router.ts";
 import { logger } from "../lib/logger.ts";
 import type {
     ChannelAdapter,
@@ -25,6 +25,11 @@ class ChannelManager {
         setResponseSender((connectionId, response) =>
             this.sendMessage(connectionId, response)
         );
+        // Wire HITL approval flow for Telegram
+        setApprovalSender((connectionId, chatId, text, sessionId) =>
+            this.telegramAdapter.sendApprovalMessage(connectionId, chatId, text, sessionId)
+        );
+        setTelegramApprovalHandler(resolveChannelApproval);
         this.initialized = true;
     }
 

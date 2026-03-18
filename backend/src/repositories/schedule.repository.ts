@@ -5,10 +5,10 @@ import { schedules } from "../db/schema/index.ts";
 export const scheduleRepository = {
     async create(data: {
         workspaceId: string;
+        agentId: string;
         name: string;
+        prompt: string;
         cron: string;
-        targetType: "task" | "workflow";
-        targetId: string;
         enabled?: boolean;
         naturalLanguage?: string;
         humanizeDelay?: number;
@@ -59,10 +59,9 @@ export const scheduleRepository = {
         workspaceId: string,
         data: Partial<{
             name: string;
+            prompt: string;
             cron: string;
             enabled: boolean;
-            targetType: "task" | "workflow";
-            targetId: string;
             nextRunDescription: string;
         }>
     ) {

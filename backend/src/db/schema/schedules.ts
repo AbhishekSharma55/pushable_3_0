@@ -8,11 +8,7 @@ import {
     uuid,
 } from "drizzle-orm/pg-core";
 import { workspaces } from "./workspaces.ts";
-
-export const scheduleTargetTypeEnum = pgEnum("schedule_target_type", [
-    "task",
-    "workflow",
-]);
+import { agents } from "./agents.ts";
 
 export const scheduleTypeEnum = pgEnum("schedule_type", [
     "natural",
@@ -25,10 +21,12 @@ export const schedules = pgTable("schedules", {
     workspaceId: uuid("workspace_id")
         .notNull()
         .references(() => workspaces.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+        .notNull()
+        .references(() => agents.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
+    prompt: text("prompt").notNull(),
     cron: text("cron").notNull(),
-    targetType: scheduleTargetTypeEnum("target_type").notNull(),
-    targetId: uuid("target_id").notNull(),
     enabled: boolean("enabled").default(true).notNull(),
     lastRunAt: timestamp("last_run_at"),
     createdAt: timestamp("created_at").defaultNow().notNull(),

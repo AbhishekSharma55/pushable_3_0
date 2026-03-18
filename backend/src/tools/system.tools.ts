@@ -4,7 +4,6 @@ import { kbService } from "../services/kb.service.ts";
 import { skillService } from "../services/skill.service.ts";
 import { toolService } from "../services/tool.service.ts";
 import { scheduleService } from "../services/schedule.service.ts";
-import { taskService } from "../services/task.service.ts";
 import { channelService } from "../services/channel.service.ts";
 import { agentService } from "../services/agent.service.ts";
 import { logger } from "../lib/logger.ts";
@@ -17,7 +16,7 @@ interface SystemToolsConfig {
 }
 
 export function buildSystemTools(config: SystemToolsConfig): DynamicStructuredTool[] {
-    const { workspaceId, permissions } = config;
+    const { agentId, workspaceId, permissions } = config;
     const tools: DynamicStructuredTool[] = [];
 
     // --- KB Management ---
@@ -283,13 +282,17 @@ export function buildSystemTools(config: SystemToolsConfig): DynamicStructuredTo
             new DynamicStructuredTool({
                 name: "system_create_schedule",
                 description:
-                    "Set up a new recurring schedule for a task.",
+                    "Set up a new recurring schedule. The agent will receive the prompt on the specified schedule.",
                 schema: z.object({
-                    agentId: z
+                    targetAgentId: z
                         .string()
-                        .describe("ID of the agent (also used as targetId for the task)"),
+                        .optional()
+                        .describe("ID of the agent to run the prompt on. Defaults to yourself."),
                     name: z.string().describe("Schedule name"),
                     prompt: z
+                        .string()
+                        .describe("The prompt the agent will receive each time the schedule fires"),
+                    scheduleDescription: z
                         .string()
                         .describe(
                             "Natural language schedule description (e.g. 'every weekday at 9am')"
@@ -297,26 +300,17 @@ export function buildSystemTools(config: SystemToolsConfig): DynamicStructuredTo
                     timezone: z
                         .string()
                         .default("UTC")
-                        .describe("Timezone (e.g. 'America/New_York')"),
+                        .describe("Timezone (e.g. 'Asia/Kolkata')"),
                 }),
-                func: async ({ agentId, name, prompt, timezone }) => {
+                func: async ({ targetAgentId, name, prompt, scheduleDescription, timezone }) => {
                     try {
-                        // First create a task for the agent
-                        const task = await taskService.createTask(
-                            {
-                                agentId,
-                                title: name,
-                                description: prompt,
-                            },
-                            workspaceId
-                        );
                         const schedule = await scheduleService.createSchedule(
                             {
                                 name,
-                                targetType: "task",
-                                targetId: task.id,
+                                agentId: targetAgentId || agentId,
+                                prompt,
                                 scheduleType: "natural",
-                                naturalLanguage: prompt,
+                                naturalLanguage: scheduleDescription,
                                 timezone,
                             },
                             workspaceId
@@ -328,6 +322,38 @@ export function buildSystemTools(config: SystemToolsConfig): DynamicStructuredTo
                             "system_create_schedule failed"
                         );
                         return `Failed to create schedule: ${error instanceof Error ? error.message : "Unknown error"}`;
+                    }
+                },
+            }),
+            new DynamicStructuredTool({
+                name: "system_update_schedule",
+                description: "Update a schedule's prompt, name, or timing.",
+                schema: z.object({
+                    scheduleId: z.string().describe("ID of the schedule to update"),
+                    name: z.string().optional().describe("New name"),
+                    prompt: z.string().optional().describe("New prompt"),
+                    cron: z.string().optional().describe("New cron expression"),
+                    enabled: z.boolean().optional().describe("Enable or disable"),
+                }),
+                func: async ({ scheduleId, name, prompt, cron, enabled }) => {
+                    try {
+                        const data: Record<string, unknown> = {};
+                        if (name) data.name = name;
+                        if (prompt) data.prompt = prompt;
+                        if (cron) data.cron = cron;
+                        if (enabled !== undefined) data.enabled = enabled;
+                        await scheduleService.updateSchedule(
+                            scheduleId,
+                            workspaceId,
+                            data as Parameters<typeof scheduleService.updateSchedule>[2]
+                        );
+                        return `Updated schedule (ID: ${scheduleId})`;
+                    } catch (error) {
+                        logger.error(
+                            { error },
+                            "system_update_schedule failed"
+                        );
+                        return `Failed to update schedule: ${error instanceof Error ? error.message : "Unknown error"}`;
                     }
                 },
             }),
@@ -377,55 +403,6 @@ export function buildSystemTools(config: SystemToolsConfig): DynamicStructuredTo
                             "system_delete_schedule failed"
                         );
                         return `Failed to delete schedule: ${error instanceof Error ? error.message : "Unknown error"}`;
-                    }
-                },
-            })
-        );
-    }
-
-    // --- Task Management ---
-    if (permissions.canManageTasks) {
-        tools.push(
-            new DynamicStructuredTool({
-                name: "system_create_task",
-                description: "Create a one-time task for an agent.",
-                schema: z.object({
-                    agentId: z
-                        .string()
-                        .describe("ID of the agent to assign the task to"),
-                    name: z.string().describe("Task title"),
-                    prompt: z.string().describe("Task description/instructions"),
-                }),
-                func: async ({ agentId, name, prompt }) => {
-                    try {
-                        const task = await taskService.createTask(
-                            {
-                                agentId,
-                                title: name,
-                                description: prompt,
-                            },
-                            workspaceId
-                        );
-                        return `Created task "${task.title}" (ID: ${task.id})`;
-                    } catch (error) {
-                        logger.error({ error }, "system_create_task failed");
-                        return `Failed to create task: ${error instanceof Error ? error.message : "Unknown error"}`;
-                    }
-                },
-            }),
-            new DynamicStructuredTool({
-                name: "system_cancel_task",
-                description: "Cancel a pending task.",
-                schema: z.object({
-                    taskId: z.string().describe("ID of the task to cancel"),
-                }),
-                func: async ({ taskId }) => {
-                    try {
-                        await taskService.deleteTask(taskId, workspaceId);
-                        return `Cancelled task (ID: ${taskId})`;
-                    } catch (error) {
-                        logger.error({ error }, "system_cancel_task failed");
-                        return `Failed to cancel task: ${error instanceof Error ? error.message : "Unknown error"}`;
                     }
                 },
             })
@@ -552,7 +529,7 @@ export function buildSystemTools(config: SystemToolsConfig): DynamicStructuredTo
                         .optional()
                         .describe("New description"),
                 }),
-                func: async ({ agentId, name, role, description }) => {
+                func: async ({ agentId: targetAgentId, name, role, description }) => {
                     try {
                         const data: Record<string, string> = {};
                         if (name) data.name = name;
@@ -560,11 +537,11 @@ export function buildSystemTools(config: SystemToolsConfig): DynamicStructuredTo
                             data.systemPrompt = `Role: ${role || ""}\n\n${description || ""}`;
                         }
                         const agent = await agentService.updateAgent(
-                            agentId,
+                            targetAgentId,
                             workspaceId,
                             data
                         );
-                        return `Updated agent "${agent.name}" (ID: ${agentId})`;
+                        return `Updated agent "${agent.name}" (ID: ${targetAgentId})`;
                     } catch (error) {
                         logger.error({ error }, "system_update_agent failed");
                         return `Failed to update agent: ${error instanceof Error ? error.message : "Unknown error"}`;

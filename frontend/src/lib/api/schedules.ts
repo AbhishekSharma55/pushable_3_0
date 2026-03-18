@@ -3,8 +3,8 @@ import type { Schedule, SchedulePreset } from '@/types';
 
 export interface CreateScheduleInput {
     name: string;
-    targetType: 'task' | 'workflow';
-    targetId: string;
+    agentId: string;
+    prompt: string;
     enabled?: boolean;
     scheduleType: 'natural' | 'preset' | 'custom';
     naturalLanguage?: string;
@@ -30,7 +30,7 @@ export const getSchedules = (workspaceId: string): Promise<Schedule[]> =>
 export const createSchedule = (workspaceId: string, data: CreateScheduleInput): Promise<Schedule> =>
     apiClient.post('/api/schedules', data, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
 
-export const updateSchedule = (workspaceId: string, id: string, data: Partial<{ name: string; cron: string; enabled: boolean }>): Promise<Schedule> =>
+export const updateSchedule = (workspaceId: string, id: string, data: Partial<{ name: string; prompt: string; cron: string; enabled: boolean }>): Promise<Schedule> =>
     apiClient.put(`/api/schedules/${id}`, data, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
 
 export const deleteSchedule = (workspaceId: string, id: string) =>

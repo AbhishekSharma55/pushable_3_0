@@ -23,7 +23,6 @@ export const agentRepository = {
             canManageSkills: boolean;
             canManageTools: boolean;
             canManageSchedules: boolean;
-            canManageTasks: boolean;
             canManageChannels: boolean;
             canManageAgents: boolean;
         }
@@ -37,7 +36,6 @@ export const agentRepository = {
                   canManageSkills: false,
                   canManageTools: false,
                   canManageSchedules: false,
-                  canManageTasks: false,
                   canManageChannels: false,
                   canManageAgents: false,
               };

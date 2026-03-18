@@ -291,4 +291,46 @@ export const integrationService = {
     async getAgentIntegrations(agentId: string, workspaceId: string) {
         return integrationRepository.findByAgent(agentId, workspaceId);
     },
+
+    async listToolkitActions(toolkitSlug: string) {
+        const composio = getComposioClient();
+        try {
+            const result = await composio.tools.getRawComposioTools({
+                toolkits: [toolkitSlug],
+                limit: 200,
+            });
+
+            // SDK returns a direct array of tool objects
+            const items = Array.isArray(result)
+                ? result
+                : ((result as Record<string, unknown>).items as Record<string, unknown>[]) || [];
+
+            return items.map((t: Record<string, unknown>) => ({
+                slug: t.slug as string,
+                name: (t.name as string) || (t.slug as string),
+                description: (t.description as string) || "",
+                tags: (t.tags as string[]) || [],
+            }));
+        } catch (error) {
+            logger.error({ error, toolkitSlug }, "Failed to fetch toolkit actions");
+            return [];
+        }
+    },
+
+    async updateToolPermissions(
+        id: string,
+        workspaceId: string,
+        permissions: { mode: "allowlist" | "blocklist"; tools: string[] }
+    ) {
+        const integration = await integrationRepository.findById(id, workspaceId);
+        if (!integration) throw new NotFoundError("Integration not found");
+
+        const existingMetadata = (integration.metadata as Record<string, unknown>) || {};
+        const updatedMetadata = {
+            ...existingMetadata,
+            toolPermissions: permissions,
+        };
+
+        return integrationRepository.updateMetadata(id, workspaceId, updatedMetadata);
+    },
 };

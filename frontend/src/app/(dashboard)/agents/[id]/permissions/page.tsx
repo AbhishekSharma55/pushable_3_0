@@ -57,11 +57,6 @@ const SYSTEM_PERMISSION_ITEMS: {
         description: 'Can create, pause, delete schedules',
     },
     {
-        key: 'canManageTasks',
-        label: 'Manage Tasks',
-        description: 'Can create and cancel tasks',
-    },
-    {
         key: 'canManageChannels',
         label: 'Manage Channels',
         description: 'Can view and disconnect channel connections',
@@ -98,7 +93,6 @@ export default function AgentPermissionsPage() {
         canManageSkills: false,
         canManageTools: false,
         canManageSchedules: false,
-        canManageTasks: false,
         canManageChannels: false,
         canManageAgents: false,
     });
@@ -136,7 +130,6 @@ export default function AgentPermissionsPage() {
                     canManageSkills: currentAgent.canManageSkills,
                     canManageTools: currentAgent.canManageTools,
                     canManageSchedules: currentAgent.canManageSchedules,
-                    canManageTasks: currentAgent.canManageTasks,
                     canManageChannels: currentAgent.canManageChannels,
                     canManageAgents: currentAgent.canManageAgents,
                 });
@@ -247,7 +240,6 @@ export default function AgentPermissionsPage() {
                 canManageSkills: false,
                 canManageTools: false,
                 canManageSchedules: false,
-                canManageTasks: false,
                 canManageChannels: false,
                 canManageAgents: false,
             }));
@@ -320,7 +312,7 @@ export default function AgentPermissionsPage() {
                 <TabsList>
                     <TabsTrigger
                         value="chat"
-                        onClick={() => router.push(`/agents/${agentId}/chat`)}
+                        onClick={() => router.push(`/agents?agent=${agentId}`)}
                     >
                         Chat
                     </TabsTrigger>

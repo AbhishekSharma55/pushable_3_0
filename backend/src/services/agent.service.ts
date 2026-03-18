@@ -60,7 +60,6 @@ export const agentService = {
             canManageSkills: boolean;
             canManageTools: boolean;
             canManageSchedules: boolean;
-            canManageTasks: boolean;
             canManageChannels: boolean;
             canManageAgents: boolean;
         }

@@ -15,15 +15,8 @@ function parseRedisUrl(url: string) {
 
 const connection = parseRedisUrl(redisUrl);
 
-export const taskQueue = new Queue("tasks", { connection });
-export const workflowQueue = new Queue("workflows", { connection });
-
-export function getQueue(name: string): Queue {
-    if (name === "tasks") return taskQueue;
-    if (name === "workflows") return workflowQueue;
-    throw new Error(`Unknown queue: ${name}`);
-}
+export const scheduleQueue = new Queue("schedules", { connection });
 
 export { connection as redisConnection };
 
-logger.info({ host: connection.host, port: connection.port }, "Redis queues initialized");
+logger.info({ host: connection.host, port: connection.port }, "Redis queue initialized");

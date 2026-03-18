@@ -83,6 +83,7 @@ export const channelService = {
             name: string;
             agentId: string;
             credentials: Record<string, unknown>;
+            config: Record<string, unknown>;
         }>
     ) {
         const existing = await channelRepository.findById(id, workspaceId);
@@ -103,8 +104,38 @@ export const channelService = {
             }
         }
 
+        // Sync config to live adapter (e.g. allowedUserIds)
+        if (data.config && existing.channelType === "telegram") {
+            const telegramAdapter = channelManager.getTelegramAdapter();
+            telegramAdapter.updateConfig(id, data.config);
+        }
+
         const { credentials: _, ...safe } = updated;
         return safe;
+    },
+
+    async getBotInfo(id: string, workspaceId: string) {
+        const connection = await channelRepository.findById(id, workspaceId);
+        if (!connection) throw new NotFoundError("Connection not found");
+
+        if (connection.channelType === "telegram") {
+            const telegramAdapter = channelManager.getTelegramAdapter();
+            const info = await telegramAdapter.getBotInfo(id);
+            if (!info) throw new AppError("Bot not running", 400, "BOT_NOT_RUNNING");
+            return {
+                username: info.username,
+                firstName: info.firstName,
+                deepLink: `https://t.me/${info.username}?start=register_${id}`,
+            };
+        }
+
+        throw new AppError("Bot info only available for Telegram", 400, "UNSUPPORTED");
+    },
+
+    async getConnectionConfig(id: string, workspaceId: string) {
+        const connection = await channelRepository.findById(id, workspaceId);
+        if (!connection) throw new NotFoundError("Connection not found");
+        return connection.config as Record<string, unknown>;
     },
 
     async deleteConnection(id: string, workspaceId: string) {

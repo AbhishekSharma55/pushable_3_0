@@ -15,6 +15,7 @@ const updateChannelSchema = z.object({
     name: z.string().min(1).optional(),
     agentId: z.string().uuid().optional(),
     credentials: z.record(z.string(), z.unknown()).optional(),
+    config: z.record(z.string(), z.unknown()).optional(),
 });
 
 export async function channelRoutes(fastify: FastifyInstance) {
@@ -61,6 +62,20 @@ export async function channelRoutes(fastify: FastifyInstance) {
         const { id } = request.params as { id: string };
         const body = updateChannelSchema.parse(request.body);
         return { data: await channelService.updateConnection(id, workspaceId, body) };
+    });
+
+    // GET /channels/:id/bot-info (Telegram only — returns username + deep link for QR)
+    fastify.get("/channels/:id/bot-info", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { id } = request.params as { id: string };
+        return { data: await channelService.getBotInfo(id, workspaceId) };
+    });
+
+    // GET /channels/:id/config
+    fastify.get("/channels/:id/config", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { id } = request.params as { id: string };
+        return { data: await channelService.getConnectionConfig(id, workspaceId) };
     });
 
     // DELETE /channels/:id

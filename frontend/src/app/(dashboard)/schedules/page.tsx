@@ -10,6 +10,7 @@ import {
     Briefcase,
     Timer,
     Globe,
+    Bot,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -36,14 +37,12 @@ import {
 import { CreateScheduleSheet } from '@/components/schedules/create-schedule-sheet';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
 import { getSchedules, updateSchedule, deleteSchedule } from '@/lib/api/schedules';
-import { getTasks } from '@/lib/api/tasks';
-import { getWorkflows } from '@/lib/api/workflows';
-import type { Schedule } from '@/types';
+import { getAgents } from '@/lib/api/agents';
+import type { Schedule, Agent } from '@/types';
 
 function getScheduleDescription(schedule: Schedule): string {
     if (schedule.naturalLanguage) return schedule.naturalLanguage;
     if (schedule.presetKey) {
-        // Capitalize and format preset key
         return schedule.presetKey.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
     }
     return schedule.cron;
@@ -66,7 +65,7 @@ export default function SchedulesPage() {
     const [sheetOpen, setSheetOpen] = useState(false);
     const [editSchedule, setEditSchedule] = useState<Schedule | null>(null);
     const [togglingIds, setTogglingIds] = useState<Set<string>>(new Set());
-    const [targetNameMap, setTargetNameMap] = useState<Record<string, string>>({});
+    const [agentNameMap, setAgentNameMap] = useState<Record<string, string>>({});
 
     const fetchSchedules = useCallback(async () => {
         if (!workspace) return;
@@ -81,24 +80,20 @@ export default function SchedulesPage() {
         }
     }, [workspace]);
 
-    const fetchTargetNames = useCallback(async () => {
+    const fetchAgentNames = useCallback(async () => {
         if (!workspace) return;
         try {
-            const [tasks, workflows] = await Promise.all([
-                getTasks(workspace.id),
-                getWorkflows(workspace.id),
-            ]);
+            const agents = await getAgents(workspace.id);
             const map: Record<string, string> = {};
-            for (const t of tasks) map[t.id] = t.title;
-            for (const w of workflows) map[w.id] = w.name;
-            setTargetNameMap(map);
+            for (const a of agents) map[a.id] = a.name;
+            setAgentNameMap(map);
         } catch {}
     }, [workspace]);
 
     useEffect(() => {
         fetchSchedules();
-        fetchTargetNames();
-    }, [fetchSchedules, fetchTargetNames]);
+        fetchAgentNames();
+    }, [fetchSchedules, fetchAgentNames]);
 
     const handleDelete = async (id: string) => {
         if (!workspace) return;
@@ -152,7 +147,7 @@ export default function SchedulesPage() {
                         <div>
                             <h1 className="text-2xl font-bold tracking-tight">Schedules</h1>
                             <p className="text-sm text-muted-foreground">
-                                Automate tasks like a real employee
+                                Automate prompts on a recurring schedule
                             </p>
                         </div>
                     </div>
@@ -182,7 +177,7 @@ export default function SchedulesPage() {
                             <div>
                                 <p className="text-sm font-medium">No schedules yet</p>
                                 <p className="text-xs text-muted-foreground mt-1">
-                                    Create your first schedule to automate recurring tasks.
+                                    Create your first schedule to automate recurring prompts.
                                 </p>
                             </div>
                         </div>
@@ -203,15 +198,16 @@ export default function SchedulesPage() {
                                                 )}
                                                 <Badge
                                                     variant="outline"
-                                                    className={`text-[10px] px-1.5 py-0 ${
-                                                        schedule.targetType === 'task'
-                                                            ? 'bg-blue-500/10 text-blue-600 border-blue-500/20'
-                                                            : 'bg-purple-500/10 text-purple-600 border-purple-500/20'
-                                                    }`}
+                                                    className="text-[10px] px-1.5 py-0 bg-violet-500/10 text-violet-600 border-violet-500/20"
                                                 >
-                                                    {targetNameMap[schedule.targetId] || schedule.targetType}
+                                                    <Bot className="h-2.5 w-2.5 mr-0.5" />
+                                                    {agentNameMap[schedule.agentId] || 'Agent'}
                                                 </Badge>
                                             </div>
+
+                                            <p className="text-xs text-muted-foreground line-clamp-1">
+                                                {schedule.prompt}
+                                            </p>
 
                                             <div className="flex items-center gap-3 flex-wrap">
                                                 <p className="text-sm text-muted-foreground">
@@ -230,7 +226,7 @@ export default function SchedulesPage() {
                                                         <TooltipTrigger>
                                                             <Badge variant="outline" className="text-[10px] px-1.5 py-0 gap-1 bg-violet-500/10 text-violet-600 border-violet-500/20">
                                                                 <Timer className="h-2.5 w-2.5" />
-                                                                ±{schedule.humanizeDelay}min
+                                                                +/-{schedule.humanizeDelay}min
                                                             </Badge>
                                                         </TooltipTrigger>
                                                         <TooltipContent>
@@ -248,7 +244,7 @@ export default function SchedulesPage() {
                                                             </Badge>
                                                         </TooltipTrigger>
                                                         <TooltipContent>
-                                                            Only runs {schedule.workStartHour}:00–{schedule.workEndHour}:00 on work days
+                                                            Only runs {schedule.workStartHour}:00-{schedule.workEndHour}:00 on work days
                                                         </TooltipContent>
                                                     </Tooltip>
                                                 )}
@@ -315,7 +311,7 @@ export default function SchedulesPage() {
                         onOpenChange={setSheetOpen}
                         workspaceId={workspace.id}
                         schedule={editSchedule}
-                        onSuccess={() => { fetchSchedules(); fetchTargetNames(); }}
+                        onSuccess={() => { fetchSchedules(); fetchAgentNames(); }}
                     />
                 )}
             </div>

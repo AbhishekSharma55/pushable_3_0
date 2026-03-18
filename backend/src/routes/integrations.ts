@@ -11,6 +11,11 @@ const connectSchema = z.object({
     logo: z.string().optional(),
 });
 
+const toolPermissionsSchema = z.object({
+    mode: z.enum(["allowlist", "blocklist"]),
+    tools: z.array(z.string()),
+});
+
 const updateConnectionSchema = z.object({
     connectionLabel: z.string().min(2).optional(),
     connectionDescription: z.string().optional(),
@@ -161,6 +166,26 @@ export async function integrationRoutes(fastify: FastifyInstance) {
             return reply.status(204).send();
         }
     );
+
+    // GET /integrations/toolkits/:slug/actions
+    fastify.get("/integrations/toolkits/:slug/actions", async (request) => {
+        const { slug } = request.params as { slug: string };
+        const actions = await integrationService.listToolkitActions(slug);
+        return { data: actions };
+    });
+
+    // PUT /integrations/:id/permissions
+    fastify.put("/integrations/:id/permissions", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { id } = request.params as { id: string };
+        const body = toolPermissionsSchema.parse(request.body);
+        const updated = await integrationService.updateToolPermissions(
+            id,
+            workspaceId,
+            body
+        );
+        return { data: updated };
+    });
 
     // GET /agents/:agentId/integrations
     fastify.get("/agents/:agentId/integrations", async (request) => {

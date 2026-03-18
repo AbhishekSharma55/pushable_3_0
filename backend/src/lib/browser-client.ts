@@ -27,6 +27,18 @@ export const browserClient = {
         return data.wsUrl;
     },
 
+    async getActiveSessions(): Promise<{ sessionId: string }[]> {
+        const res = await fetch(`${BROWSER_SERVICE_URL}/api/browser/sessions`, {
+            method: "GET",
+            signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) {
+            return [];
+        }
+        const body = (await res.json()) as { data: { sessionId: string }[] };
+        return body.data || [];
+    },
+
     async closeSession(sessionId: string): Promise<void> {
         const res = await fetch(
             `${BROWSER_SERVICE_URL}/api/browser/sessions/${sessionId}`,

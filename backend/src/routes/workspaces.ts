@@ -50,4 +50,24 @@ export async function workspaceRoutes(fastify: FastifyInstance) {
         );
         return { data: workspace };
     });
+
+    // GET /workspaces/:id/extension-settings
+    fastify.get("/workspaces/:id/extension-settings", async (request) => {
+        const { id } = request.params as { id: string };
+        const settings = await workspaceService.getExtensionSettings(
+            id,
+            request.user.userId
+        );
+        return { data: settings };
+    });
+
+    // POST /workspaces/:id/extension-settings/regenerate
+    fastify.post("/workspaces/:id/extension-settings/regenerate", async (request) => {
+        const { id } = request.params as { id: string };
+        const result = await workspaceService.regenerateExtensionApiKey(
+            id,
+            request.user.userId
+        );
+        return { data: result };
+    });
 }

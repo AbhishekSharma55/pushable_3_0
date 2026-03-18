@@ -8,6 +8,8 @@ export const workspaces = pgTable("workspaces", {
     ownerId: uuid("owner_id")
         .notNull()
         .references(() => users.id),
+    extensionApiKey: text("extension_api_key"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
+

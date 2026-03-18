@@ -17,6 +17,7 @@ import { getComposioClient } from "../lib/composio.ts";
 import { logger } from "../lib/logger.ts";
 import { HumanMessage } from "@langchain/core/messages";
 import { buildBrowserTools } from "../tools/browser.tools.ts";
+import { buildExtensionBrowserTools } from "../lib/extension-bridge-client.ts";
 
 let checkpointerInstance: PostgresSaver | null = null;
 
@@ -52,10 +53,19 @@ export async function createAgentGraph(
         throw new Error("OPENROUTER_KEY is not set in environment");
     }
 
+    logger.info({
+        agentId,
+        model: agent.model,
+        useOpenRouter,
+        hasOpenRouterKey: !!process.env.OPENROUTER_KEY,
+        hasOpenAIKey: !!process.env.OPENAI_API_KEY
+    }, "Initializing LLM");
+
     const llm = new ChatOpenAI({
         model: agent.model,
         temperature: agent.temperature ?? 0.7,
         streaming: true,
+        maxTokens: 4096, // Limit max tokens to avoid 402 errors on low-credit OpenRouter accounts
         apiKey: useOpenRouter ? process.env.OPENROUTER_KEY : process.env.OPENAI_API_KEY,
         configuration: useOpenRouter
             ? {
@@ -272,6 +282,17 @@ export async function createAgentGraph(
         logger.warn(
             { error, agentId },
             "Failed to load browser tools, proceeding without them"
+        );
+    }
+
+    // --- 6. Extension browser tools (real Chrome via extension) ---
+    try {
+        const extTools = buildExtensionBrowserTools();
+        langchainTools.push(...extTools);
+    } catch (error) {
+        logger.warn(
+            { error, agentId },
+            "Failed to load extension browser tools, proceeding without them"
         );
     }
 

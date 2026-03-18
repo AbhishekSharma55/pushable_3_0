@@ -10,6 +10,7 @@ import { useActiveWorkspace } from '@/hooks/use-active-workspace';
 import { getAgents } from '@/lib/api/agents';
 import type { Agent } from '@/types';
 import { cn } from '@/lib/utils';
+import { ExtensionLiveView } from '@/components/extension/ExtensionLiveView';
 
 type LocationId =
     | 'desk1' | 'desk2' | 'desk3' | 'desk4' | 'desk5' | 'desk6'
@@ -311,6 +312,17 @@ export default function DashboardPage() {
                 </div>
             ) : (
                 <VirtualOffice agents={agents} />
+            )}
+
+            {/* Extension Live View */}
+            {workspace && (
+                <div className="pt-6">
+                    <h2 className="text-2xl font-bold tracking-tight mb-4 flex items-center gap-2">
+                        <Monitor className="w-6 h-6 text-primary" />
+                        Live Browser Control
+                    </h2>
+                    <ExtensionLiveView workspaceId={workspace.id} />
+                </div>
             )}
         </div>
     );

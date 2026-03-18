@@ -20,12 +20,12 @@ _active_ws: dict[str, WebSocket] = {}
 
 @router.websocket("/ws/{session_id}")
 async def stream_screenshots(websocket: WebSocket, session_id: str):
+    await websocket.accept()
+
     # Validate session exists
     if session_id not in browser_manager.active_sessions:
         await websocket.close(code=4004, reason="Session not found")
         return
-
-    await websocket.accept()
 
     # If there's already an active WS for this session, close the old one
     old_ws = _active_ws.get(session_id)

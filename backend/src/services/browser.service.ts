@@ -111,6 +111,24 @@ export const browserService = {
     },
 
     async getSessions(workspaceId: string) {
-        return browserRepository.findSessions(workspaceId);
+        const dbSessions = await browserRepository.findSessions(workspaceId);
+        
+        // Sync active status with python browser-service
+        try {
+            const activeBrowserSessions = await browserClient.getActiveSessions();
+            const activeIds = new Set(activeBrowserSessions.map(s => s.sessionId));
+            
+            for (const session of dbSessions) {
+                if (session.status === "active" && !activeIds.has(session.id)) {
+                    // It died on the browser-service side
+                    await browserRepository.updateSessionStatus(session.id, "error");
+                    session.status = "error" as const;
+                }
+            }
+        } catch (error) {
+            logger.warn({ error }, "Failed to sync sessions with browser-service");
+        }
+
+        return dbSessions;
     },
 };

@@ -9,17 +9,29 @@ export async function buildBrowserTools(
     agentId: string,
     workspaceId: string
 ): Promise<DynamicStructuredTool[]> {
-    // Check if agent has a browser profile assigned
-    const profile = await browserRepository.findProfileByAgentId(
+    // Check if agent has a browser profile assigned, or create a default one
+    let profile = await browserRepository.findProfileByAgentId(
         agentId,
         workspaceId
     );
     if (!profile || profile.status !== "active") {
-        return [];
+        logger.info({ agentId, workspaceId }, "No active browser profile found, creating default");
+        const profilePath = `/app/browser_data/${workspaceId}_${agentId}`;
+        profile = await browserRepository.createProfile({
+            workspaceId,
+            name: "Default Internal Profile",
+            profilePath,
+            assignedAgentId: agentId,
+            os: "linux",
+            metadata: { autoCreated: true }
+        });
+        if (!profile) {
+            return [];
+        }
     }
 
     // Check for existing active session, verify it's alive, or create new one
-    let activeSession = await browserRepository.findActiveSessionByProfileId(
+    let activeSession: any = await browserRepository.findActiveSessionByProfileId(
         profile.id
     );
     let sessionId = "";
@@ -88,7 +100,7 @@ export async function buildBrowserTools(
         new DynamicStructuredTool({
             name: "browser_navigate",
             description:
-                "Navigate the browser to a URL. CAPTCHAs and Cloudflare challenges are solved automatically — this tool waits up to 15 seconds for them to resolve before returning. Do NOT assume navigation failed due to CAPTCHA; just read the returned title and URL to confirm the page loaded.",
+                "Navigate the internal isolated browser to a URL. (NOTE: Do NOT use this if the user asks to use 'Chrome', 'the extension', or their 'own browser' - use ext_browser_navigate instead). CAPTCHAs and Cloudflare challenges are solved automatically — this tool waits up to 15 seconds for them to resolve before returning. Do NOT assume navigation failed due to CAPTCHA; just read the returned title and URL to confirm the page loaded.",
             schema: z.object({
                 url: z.string().describe("The URL to navigate to"),
             }),

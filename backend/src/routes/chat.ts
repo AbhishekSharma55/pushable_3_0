@@ -166,11 +166,12 @@ export async function chatRoutes(fastify: FastifyInstance) {
 
             // 6. Signal done
             reply.raw.write(`data: [DONE]\n\n`);
-        } catch (error) {
-            logger.error(error);
+        } catch (error: any) {
+            logger.error({ error, sessionId, workspaceId }, "Chat processing failed");
+            const errorMessage = error?.message || "An error occurred while processing your message.";
             reply.raw.write(
                 `data: ${JSON.stringify({
-                    error: "An error occurred while processing your message.",
+                    error: `[BACKEND ERROR] ${errorMessage}`,
                 })}\n\n`
             );
             reply.raw.write(`data: [DONE]\n\n`);

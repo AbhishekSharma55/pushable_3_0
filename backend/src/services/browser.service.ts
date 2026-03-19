@@ -68,7 +68,8 @@ export const browserService = {
         profileId: string,
         workspaceId: string,
         agentId?: string,
-        proxyId?: string
+        proxyId?: string,
+        chatSessionId?: string
     ) {
         const profile = await browserRepository.findProfileById(
             profileId,
@@ -87,6 +88,7 @@ export const browserService = {
             workspaceId,
             profileId,
             agentId: agentId ?? null,
+            taskId: chatSessionId ?? null,
         });
 
         try {

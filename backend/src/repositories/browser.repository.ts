@@ -128,6 +128,21 @@ export const browserRepository = {
         return result[0] ?? null;
     },
 
+    async findActiveSessionByChatSession(profileId: string, chatSessionId: string) {
+        const result = await db
+            .select()
+            .from(browserSessions)
+            .where(
+                and(
+                    eq(browserSessions.profileId, profileId),
+                    eq(browserSessions.taskId, chatSessionId),
+                    eq(browserSessions.status, "active")
+                )
+            )
+            .limit(1);
+        return result[0] ?? null;
+    },
+
     async updateSessionStatus(
         id: string,
         status: "starting" | "active" | "closed" | "error",

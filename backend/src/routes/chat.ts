@@ -1,13 +1,17 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
+import { HumanMessage } from "@langchain/core/messages";
 import { Command } from "@langchain/langgraph";
 import { sessionService } from "../services/session.service.ts";
 import { messageRepository } from "../repositories/message.repository.ts";
+import { runRepository } from "../repositories/run.repository.ts";
 import { createAgentGraph } from "../graphs/agent.graph.ts";
+import { runEventBus, type SSEEvent } from "../lib/run-event-bus.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
 import { logger } from "../lib/logger.ts";
 import type { BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
+
+// ─── Schemas ─────────────────────────────────────────────────────────────────
 
 const chatBodySchema = z.object({
     message: z.string().min(1, "Message is required"),
@@ -22,6 +26,8 @@ const approveBodySchema = z.object({
         })
     ),
 });
+
+// ─── Types ───────────────────────────────────────────────────────────────────
 
 interface StreamToolCall {
     id: string;
@@ -45,12 +51,10 @@ interface StreamResult {
     segments: StreamSegment[];
 }
 
-/**
- * Create a browser event handler that emits SSE events for internal
- * browser agent tool calls and tracks them for message saving.
- */
+// ─── Browser event handler (emits to RunEventBus) ────────────────────────────
+
 function createBrowserEventHandler(
-    reply: { raw: { write: (data: string) => boolean } },
+    runId: string,
     browserToolCalls: StreamToolCall[],
     browserSegments: StreamSegment[]
 ): BrowserAgentEventEmitter {
@@ -58,9 +62,7 @@ function createBrowserEventHandler(
         if (event.type === "tool_start" && event.toolCallId && event.toolName) {
             const argsPreview = event.args
                 ? Object.entries(event.args)
-                      .map(
-                          ([k, v]) => `${k}: ${String(v).slice(0, 80)}`
-                      )
+                      .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
                       .join(", ")
                       .slice(0, 150)
                 : "";
@@ -76,38 +78,30 @@ function createBrowserEventHandler(
 
             browserToolCalls.push(toolCallEvent);
 
-            // Track in browser segments
             const lastSeg = browserSegments[browserSegments.length - 1];
             if (lastSeg && lastSeg.type === "tools") {
                 lastSeg.toolCalls!.push(toolCallEvent);
             } else {
-                browserSegments.push({
-                    type: "tools",
-                    toolCalls: [toolCallEvent],
-                });
+                browserSegments.push({ type: "tools", toolCalls: [toolCallEvent] });
             }
 
-            reply.raw.write(
-                `data: ${JSON.stringify({ toolCall: toolCallEvent })}\n\n`
-            );
-        } else if (
-            event.type === "tool_end" &&
-            event.toolCallId &&
-            event.toolName
-        ) {
+            runEventBus.emit(runId, {
+                type: "toolCall",
+                data: { toolCall: toolCallEvent },
+                timestamp: Date.now(),
+            });
+        } else if (event.type === "tool_end" && event.toolCallId && event.toolName) {
             const resultText = event.result?.slice(0, 300) || "";
 
-            // Update existing tracked tool call
-            const existing = browserToolCalls.find(
-                (t) => t.id === event.toolCallId
-            );
+            const existing = browserToolCalls.find((t) => t.id === event.toolCallId);
             if (existing) {
                 existing.status = "done";
                 existing.result = resultText;
             }
 
-            reply.raw.write(
-                `data: ${JSON.stringify({
+            runEventBus.emit(runId, {
+                type: "toolCall",
+                data: {
                     toolCall: {
                         id: event.toolCallId,
                         name: event.toolName,
@@ -115,23 +109,21 @@ function createBrowserEventHandler(
                         status: "done",
                         result: resultText,
                     },
-                })}\n\n`
-            );
+                },
+                timestamp: Date.now(),
+            });
         } else if (event.type === "thinking" && event.content) {
-            // Emit intermediate browser agent reasoning as content
-            reply.raw.write(
-                `data: ${JSON.stringify({
-                    browserAgentThinking: event.content,
-                })}\n\n`
-            );
+            runEventBus.emit(runId, {
+                type: "browserAgentThinking",
+                data: { browserAgentThinking: event.content },
+                timestamp: Date.now(),
+            });
         }
     };
 }
 
-/**
- * After streaming completes, merge browser agent internal tool calls
- * into the main streamResult so they are saved in message metadata.
- */
+// ─── Merge browser events into stream result ─────────────────────────────────
+
 function mergeBrowserEvents(
     streamResult: StreamResult,
     browserToolCalls: StreamToolCall[],
@@ -139,10 +131,8 @@ function mergeBrowserEvents(
 ): void {
     if (browserToolCalls.length === 0) return;
 
-    // Add internal tool calls to the overall list
     streamResult.toolCalls.push(...browserToolCalls);
 
-    // Insert browser segments after the browser_agent tool segment
     const browserAgentSegIdx = streamResult.segments.findIndex(
         (s) =>
             s.type === "tools" &&
@@ -150,13 +140,8 @@ function mergeBrowserEvents(
     );
 
     if (browserAgentSegIdx >= 0) {
-        streamResult.segments.splice(
-            browserAgentSegIdx + 1,
-            0,
-            ...browserSegments
-        );
+        streamResult.segments.splice(browserAgentSegIdx + 1, 0, ...browserSegments);
     } else {
-        // Fallback: append browser segments before the last text segment
         let lastTextIdx = -1;
         for (let i = streamResult.segments.length - 1; i >= 0; i--) {
             if (streamResult.segments[i].type === "text") {
@@ -164,7 +149,7 @@ function mergeBrowserEvents(
                 break;
             }
         }
-        if (lastTextIdx > 0) {
+        if (lastTextIdx >= 0) {
             streamResult.segments.splice(lastTextIdx, 0, ...browserSegments);
         } else {
             streamResult.segments.push(...browserSegments);
@@ -172,10 +157,11 @@ function mergeBrowserEvents(
     }
 }
 
-/** Shared SSE streaming logic for both chat and approve endpoints */
-async function streamGraphToSSE(
+// ─── Process graph stream into events (emits to RunEventBus) ─────────────────
+
+async function processGraphStream(
     stream: AsyncIterable<[unknown, ...unknown[]]>,
-    reply: { raw: { write: (data: string) => boolean } }
+    runId: string
 ): Promise<StreamResult> {
     let fullContent = "";
     const allToolCalls: StreamToolCall[] = [];
@@ -185,22 +171,12 @@ async function streamGraphToSSE(
     for await (const [message] of stream) {
         if (!message) continue;
 
-        logger.info(
-            {
-                type: (message as { constructor?: { name?: string } })?.constructor?.name,
-                isAI: message instanceof AIMessage,
-                isTool: message instanceof ToolMessage,
-                hasToolCalls: !!(message as AIMessage).tool_calls?.length,
-                contentPreview: typeof (message as { content?: unknown }).content === "string"
-                    ? ((message as { content: string }).content).slice(0, 50)
-                    : "non-string",
-            },
-            "Stream chunk received"
-        );
-
-        // Detect AI tool_calls → emit toolCall event for each
+        // Detect AI tool_calls
         const msgObj = message as Record<string, unknown>;
-        const toolCalls = msgObj.tool_calls as Array<{ id?: string; name: string; args?: Record<string, unknown> }> | undefined;
+        const toolCalls = msgObj.tool_calls as
+            | Array<{ id?: string; name: string; args?: Record<string, unknown> }>
+            | undefined;
+
         if (toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0) {
             for (const tc of toolCalls) {
                 const isAgent = tc.name.startsWith("agent_");
@@ -209,9 +185,9 @@ async function streamGraphToSSE(
                     : tc.name;
                 const argsPreview = tc.args
                     ? Object.entries(tc.args)
-                        .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
-                        .join(", ")
-                        .slice(0, 150)
+                          .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
+                          .join(", ")
+                          .slice(0, 150)
                     : "";
 
                 const toolCallEvent: StreamToolCall = {
@@ -225,22 +201,28 @@ async function streamGraphToSSE(
 
                 allToolCalls.push(toolCallEvent);
 
-                // Track in segments
                 if (lastSegmentType === "tools" && segments.length > 0) {
-                    (segments[segments.length - 1] as { type: "tools"; toolCalls: StreamToolCall[] }).toolCalls.push(toolCallEvent);
+                    (
+                        segments[segments.length - 1] as {
+                            type: "tools";
+                            toolCalls: StreamToolCall[];
+                        }
+                    ).toolCalls.push(toolCallEvent);
                 } else {
                     segments.push({ type: "tools", toolCalls: [toolCallEvent] });
                     lastSegmentType = "tools";
                 }
 
-                reply.raw.write(
-                    `data: ${JSON.stringify({ toolCall: toolCallEvent })}\n\n`
-                );
+                runEventBus.emit(runId, {
+                    type: "toolCall",
+                    data: { toolCall: toolCallEvent },
+                    timestamp: Date.now(),
+                });
             }
             continue;
         }
 
-        // Detect tool responses → emit toolResult event
+        // Detect tool responses
         if (msgObj.tool_call_id && typeof msgObj.tool_call_id === "string") {
             const toolName = (msgObj.name as string) || "tool";
             const isAgent = toolName.startsWith("agent_");
@@ -252,7 +234,6 @@ async function streamGraphToSSE(
                     ? (msgObj.content as string).slice(0, 300)
                     : "";
 
-            // Update existing tool call
             const existing = allToolCalls.find((t) => t.id === msgObj.tool_call_id);
             if (existing) {
                 existing.status = "done";
@@ -260,8 +241,9 @@ async function streamGraphToSSE(
                 existing.name = displayName;
             }
 
-            reply.raw.write(
-                `data: ${JSON.stringify({
+            runEventBus.emit(runId, {
+                type: "toolCall",
+                data: {
                     toolCall: {
                         id: msgObj.tool_call_id,
                         name: displayName,
@@ -269,19 +251,21 @@ async function streamGraphToSSE(
                         status: "done",
                         result: resultText,
                     },
-                })}\n\n`
-            );
+                },
+                timestamp: Date.now(),
+            });
             continue;
         }
 
-        // Stream AI message content chunks
+        // Stream AI content chunks
         if (msgObj.content) {
             let chunk = "";
-
             if (typeof msgObj.content === "string") {
                 chunk = msgObj.content;
             } else if (Array.isArray(msgObj.content)) {
-                chunk = (msgObj.content as Array<{ type: string; text: string }>)
+                chunk = (
+                    msgObj.content as Array<{ type: string; text: string }>
+                )
                     .filter((b) => b.type === "text")
                     .map((b) => b.text)
                     .join("");
@@ -290,17 +274,23 @@ async function streamGraphToSSE(
             if (chunk) {
                 fullContent += chunk;
 
-                // Track in segments
                 if (lastSegmentType === "text" && segments.length > 0) {
-                    (segments[segments.length - 1] as { type: "text"; content: string }).content += chunk;
+                    (
+                        segments[segments.length - 1] as {
+                            type: "text";
+                            content: string;
+                        }
+                    ).content += chunk;
                 } else {
                     segments.push({ type: "text", content: chunk });
                     lastSegmentType = "text";
                 }
 
-                reply.raw.write(
-                    `data: ${JSON.stringify({ content: chunk })}\n\n`
-                );
+                runEventBus.emit(runId, {
+                    type: "content",
+                    data: { content: chunk },
+                    timestamp: Date.now(),
+                });
             }
         }
     }
@@ -308,11 +298,12 @@ async function streamGraphToSSE(
     return { content: fullContent, toolCalls: allToolCalls, segments };
 }
 
-/** Check graph state for HITL interrupts and send SSE events if found */
-async function checkAndSendInterrupts(
+// ─── Check for HITL interrupts ───────────────────────────────────────────────
+
+async function checkAndEmitInterrupts(
     graph: Awaited<ReturnType<typeof createAgentGraph>>,
     sessionId: string,
-    reply: { raw: { write: (data: string) => boolean } }
+    runId: string
 ): Promise<boolean> {
     try {
         const graphState = await graph.getState({
@@ -328,19 +319,192 @@ async function checkAndSendInterrupts(
         if (pendingInterrupts.length > 0) {
             const interruptPayload = pendingInterrupts[0]?.value;
             if (interruptPayload) {
-                reply.raw.write(
-                    `data: ${JSON.stringify({
-                        approvalRequest: interruptPayload,
-                    })}\n\n`
-                );
+                runEventBus.emit(runId, {
+                    type: "approvalRequest",
+                    data: { approvalRequest: interruptPayload },
+                    timestamp: Date.now(),
+                });
             }
-            return true; // Graph is interrupted
+            return true;
         }
     } catch (error) {
         logger.warn({ error }, "Failed to check graph state for interrupts");
     }
     return false;
 }
+
+// ─── Execute a run in background (detached from HTTP) ────────────────────────
+
+async function executeRun(
+    runId: string,
+    sessionId: string,
+    workspaceId: string,
+    agentId: string,
+    userId: string,
+    message: string
+): Promise<void> {
+    try {
+        const browserToolCalls: StreamToolCall[] = [];
+        const browserSegments: StreamSegment[] = [];
+        const onBrowserEvent = createBrowserEventHandler(
+            runId,
+            browserToolCalls,
+            browserSegments
+        );
+
+        const graph = await createAgentGraph(
+            agentId,
+            workspaceId,
+            userId,
+            onBrowserEvent,
+            sessionId
+        );
+
+        logger.info({ runId, sessionId }, "Starting graph stream for run");
+
+        const stream = await graph.stream(
+            { messages: [new HumanMessage(message)] },
+            {
+                configurable: { thread_id: sessionId },
+                streamMode: "messages",
+            }
+        );
+
+        const streamResult = await processGraphStream(stream, runId);
+
+        mergeBrowserEvents(streamResult, browserToolCalls, browserSegments);
+
+        logger.info(
+            {
+                runId,
+                contentLength: streamResult.content.length,
+                toolCallCount: streamResult.toolCalls.length,
+            },
+            "Graph stream complete"
+        );
+
+        // Check for HITL interrupts
+        const isInterrupted = await checkAndEmitInterrupts(graph, sessionId, runId);
+
+        // Save assistant message with metadata
+        if (streamResult.content || streamResult.toolCalls.length > 0) {
+            await messageRepository.create({
+                workspaceId,
+                sessionId,
+                role: "assistant",
+                content: streamResult.content,
+                tokenCount: 0,
+                metadata: {
+                    toolCalls: streamResult.toolCalls,
+                    segments: streamResult.segments,
+                },
+            });
+        }
+
+        // Update run status
+        const finalStatus = isInterrupted ? "interrupted" : "completed";
+        await runRepository.updateStatus(runId, finalStatus);
+
+        if (isInterrupted) {
+            // Schedule safety timeout to prevent indefinite memory leak
+            runEventBus.markInterrupted(runId);
+            logger.info({ runId }, "Run interrupted, waiting for approval");
+        } else {
+            runEventBus.complete(runId);
+        }
+    } catch (error) {
+        logger.error({ error, runId }, "Run execution failed");
+        runEventBus.fail(
+            runId,
+            error instanceof Error ? error.message : "An error occurred while processing your message."
+        );
+        await runRepository
+            .updateStatus(runId, "failed", error instanceof Error ? error.message : "Unknown error")
+            .catch((e) => logger.error({ e, runId }, "Failed to update run status"));
+    }
+}
+
+// ─── Resume a run after HITL approval ────────────────────────────────────────
+
+async function resumeRun(
+    runId: string,
+    sessionId: string,
+    workspaceId: string,
+    agentId: string,
+    userId: string,
+    decisions: Array<{ type: string; args?: Record<string, unknown>; message?: string }>
+): Promise<void> {
+    // Clear the interrupted safety timeout before resuming
+    runEventBus.clearInterruptedTimeout(runId);
+
+    try {
+        const browserToolCalls: StreamToolCall[] = [];
+        const browserSegments: StreamSegment[] = [];
+        const onBrowserEvent = createBrowserEventHandler(
+            runId,
+            browserToolCalls,
+            browserSegments
+        );
+
+        const graph = await createAgentGraph(
+            agentId,
+            workspaceId,
+            userId,
+            onBrowserEvent,
+            sessionId
+        );
+
+        const stream = await graph.stream(
+            new Command({ resume: { decisions } }),
+            {
+                configurable: { thread_id: sessionId },
+                streamMode: "messages",
+            }
+        );
+
+        const streamResult = await processGraphStream(stream, runId);
+
+        mergeBrowserEvents(streamResult, browserToolCalls, browserSegments);
+
+        // Check for further interrupts
+        const isInterrupted = await checkAndEmitInterrupts(graph, sessionId, runId);
+
+        if (streamResult.content || streamResult.toolCalls.length > 0) {
+            await messageRepository.create({
+                workspaceId,
+                sessionId,
+                role: "assistant",
+                content: streamResult.content,
+                tokenCount: 0,
+                metadata: {
+                    toolCalls: streamResult.toolCalls,
+                    segments: streamResult.segments,
+                },
+            });
+        }
+
+        const finalStatus = isInterrupted ? "interrupted" : "completed";
+        await runRepository.updateStatus(runId, finalStatus);
+
+        if (isInterrupted) {
+            runEventBus.markInterrupted(runId);
+            logger.info({ runId }, "Run interrupted again after approval, waiting for next approval");
+        } else {
+            runEventBus.complete(runId);
+        }
+    } catch (error) {
+        logger.error({ error, runId }, "Run resume failed");
+        runEventBus.fail(
+            runId,
+            error instanceof Error ? error.message : "An error occurred while processing your approval."
+        );
+        await runRepository
+            .updateStatus(runId, "failed", error instanceof Error ? error.message : "Unknown error")
+            .catch((e) => logger.error({ e, runId }, "Failed to update run status"));
+    }
+}
+
+// ─── Routes ──────────────────────────────────────────────────────────────────
 
 export async function chatRoutes(fastify: FastifyInstance) {
     // Auth preHandler
@@ -364,14 +528,28 @@ export async function chatRoutes(fastify: FastifyInstance) {
         }
     });
 
-    // POST /sessions/:sessionId/chat — streaming SSE
+    // ── POST /sessions/:sessionId/chat ───────────────────────────────────────
+    // Creates a run, starts graph in background, returns runId.
+    // Frontend subscribes to GET /runs/:runId/events for SSE.
     fastify.post("/sessions/:sessionId/chat", async (request, reply) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const { sessionId } = request.params as { sessionId: string };
         const body = chatBodySchema.parse(request.body);
+        const user = request.user as { userId: string };
 
         const session = await sessionService.getSession(sessionId, workspaceId);
 
+        // Guard: prevent concurrent runs on the same session
+        const activeRun = await runRepository.findActiveBySession(sessionId, workspaceId);
+        if (activeRun) {
+            throw new AppError(
+                "A run is already in progress for this session",
+                409,
+                "RUN_IN_PROGRESS"
+            );
+        }
+
+        // Save user message immediately
         await messageRepository.create({
             workspaceId,
             sessionId,
@@ -380,186 +558,173 @@ export async function chatRoutes(fastify: FastifyInstance) {
             tokenCount: 0,
         });
 
-        const origin = request.headers.origin || "*";
-        reply.raw.writeHead(200, {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": origin,
+        // Create run record
+        const run = await runRepository.create({
+            sessionId,
+            workspaceId,
+            status: "in_progress",
         });
 
-        try {
-            const user = request.user as { userId: string };
+        // Initialize the event bus buffer for this run
+        runEventBus.init(run.id);
 
-            // Browser event tracking for real-time SSE + message saving
-            const browserToolCalls: StreamToolCall[] = [];
-            const browserSegments: StreamSegment[] = [];
-            const onBrowserEvent = createBrowserEventHandler(
-                reply,
-                browserToolCalls,
-                browserSegments
-            );
+        logger.info({ runId: run.id, sessionId }, "Run created, starting graph execution");
 
-            const graph = await createAgentGraph(
-                session.agentId,
-                workspaceId,
-                user.userId,
-                onBrowserEvent
-            );
+        // Start graph execution in background (detached from this HTTP response)
+        executeRun(
+            run.id,
+            sessionId,
+            workspaceId,
+            session.agentId,
+            user.userId,
+            body.message
+        ).catch((err) => {
+            logger.error({ err, runId: run.id }, "Unhandled error in background run");
+        });
 
-            logger.info({ sessionId }, "Starting graph stream");
-
-            const stream = await graph.stream(
-                { messages: [new HumanMessage(body.message)] },
-                {
-                    configurable: { thread_id: sessionId },
-                    streamMode: "messages",
-                }
-            );
-
-            logger.info("Graph stream created, iterating...");
-
-            const streamResult = await streamGraphToSSE(stream, reply);
-
-            // Merge browser agent internal events into streamResult
-            mergeBrowserEvents(
-                streamResult,
-                browserToolCalls,
-                browserSegments
-            );
-
-            logger.info(
-                { contentLength: streamResult.content.length, toolCallCount: streamResult.toolCalls.length },
-                "Stream iteration complete"
-            );
-
-            // Check for HITL interrupts
-            const isInterrupted = await checkAndSendInterrupts(
-                graph,
-                sessionId,
-                reply
-            );
-
-            logger.info({ isInterrupted }, "Interrupt check done");
-
-            // Save assistant message with tool calls and segments as metadata
-            if (streamResult.content || streamResult.toolCalls.length > 0) {
-                await messageRepository.create({
-                    workspaceId,
-                    sessionId,
-                    role: "assistant",
-                    content: streamResult.content,
-                    tokenCount: 0,
-                    metadata: {
-                        toolCalls: streamResult.toolCalls,
-                        segments: streamResult.segments,
-                    },
-                });
-            }
-
-            reply.raw.write(`data: [DONE]\n\n`);
-        } catch (error) {
-            logger.error(error);
-            reply.raw.write(
-                `data: ${JSON.stringify({
-                    error: "An error occurred while processing your message.",
-                })}\n\n`
-            );
-            reply.raw.write(`data: [DONE]\n\n`);
-        }
-
-        reply.raw.end();
+        return reply.send({ runId: run.id });
     });
 
-    // POST /sessions/:sessionId/approve — resume graph after HITL interrupt
-    fastify.post("/sessions/:sessionId/approve", async (request, reply) => {
+    // ── GET /runs/:runId/events ──────────────────────────────────────────────
+    // SSE endpoint. Replays buffered events, then streams live events.
+    // Supports reconnection: if client disconnects and reconnects, it gets
+    // the full event history + any new events.
+    fastify.get("/runs/:runId/events", async (request, reply) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
-        const { sessionId } = request.params as { sessionId: string };
-        const body = approveBodySchema.parse(request.body);
+        const { runId } = request.params as { runId: string };
 
-        const session = await sessionService.getSession(sessionId, workspaceId);
+        logger.info({ runId }, "SSE endpoint hit");
 
-        const origin = request.headers.origin || "*";
-        reply.raw.writeHead(200, {
+        // Verify run belongs to workspace
+        const run = await runRepository.findById(runId, workspaceId);
+        if (!run) {
+            throw new AppError("Run not found", 404, "RUN_NOT_FOUND");
+        }
+
+        logger.info({ runId, runStatus: run.status, hasEvents: runEventBus.hasEvents(runId) }, "SSE: run found");
+
+        // Hijack the response so Fastify does NOT try to manage it.
+        // Without this, Fastify interferes with reply.raw writes and
+        // SSE events never reach the client.
+        reply.hijack();
+
+        const res = reply.raw;
+        const origin = request.headers.origin as string | undefined;
+        const headers: Record<string, string> = {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
             Connection: "keep-alive",
             "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Credentials": "true",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization, x-workspace-id",
-        });
+        };
+        if (origin) {
+            headers["Access-Control-Allow-Origin"] = origin;
+            headers["Access-Control-Allow-Credentials"] = "true";
+            headers["Access-Control-Allow-Headers"] =
+                "Content-Type, Authorization, x-workspace-id";
+        }
+        res.writeHead(200, headers);
 
-        try {
-            const user = request.user as { userId: string };
-
-            // Browser event tracking for real-time SSE + message saving
-            const browserToolCalls: StreamToolCall[] = [];
-            const browserSegments: StreamSegment[] = [];
-            const onBrowserEvent = createBrowserEventHandler(
-                reply,
-                browserToolCalls,
-                browserSegments
-            );
-
-            const graph = await createAgentGraph(
-                session.agentId,
-                workspaceId,
-                user.userId,
-                onBrowserEvent
-            );
-
-            // Resume graph from the interrupt with the user's decisions
-            const stream = await graph.stream(
-                new Command({ resume: { decisions: body.decisions } }),
-                {
-                    configurable: { thread_id: sessionId },
-                    streamMode: "messages",
+        // If the run already completed and events were cleaned up from memory,
+        // handle it immediately from DB state
+        if (!runEventBus.hasEvents(runId)) {
+            if (
+                run.status === "completed" ||
+                run.status === "failed" ||
+                run.status === "cancelled"
+            ) {
+                logger.info({ runId, runStatus: run.status }, "SSE: run already done, no events in bus");
+                if (run.status === "failed" && run.error) {
+                    res.write(
+                        `data: ${JSON.stringify({ error: run.error })}\n\n`
+                    );
                 }
-            );
-
-            const streamResult = await streamGraphToSSE(stream, reply);
-
-            // Merge browser agent internal events into streamResult
-            mergeBrowserEvents(
-                streamResult,
-                browserToolCalls,
-                browserSegments
-            );
-
-            // Check for further interrupts (tool chain may have multiple)
-            const isInterrupted = await checkAndSendInterrupts(
-                graph,
-                sessionId,
-                reply
-            );
-
-            if (streamResult.content || streamResult.toolCalls.length > 0) {
-                await messageRepository.create({
-                    workspaceId,
-                    sessionId,
-                    role: "assistant",
-                    content: streamResult.content,
-                    tokenCount: 0,
-                    metadata: {
-                        toolCalls: streamResult.toolCalls,
-                        segments: streamResult.segments,
-                    },
-                });
+                res.write(`data: [DONE]\n\n`);
+                res.end();
+                return;
             }
-
-            reply.raw.write(`data: [DONE]\n\n`);
-        } catch (error) {
-            logger.error(error);
-            reply.raw.write(
-                `data: ${JSON.stringify({
-                    error: "An error occurred while processing your approval.",
-                })}\n\n`
-            );
-            reply.raw.write(`data: [DONE]\n\n`);
         }
 
-        reply.raw.end();
+        // Subscribe to the event bus (replays buffered + streams live)
+        let eventCount = 0;
+        const unsubscribe = runEventBus.subscribe(
+            runId,
+            // onEvent: write SSE event to client
+            (event: SSEEvent) => {
+                eventCount++;
+                if (!res.destroyed) {
+                    res.write(`data: ${JSON.stringify(event.data)}\n\n`);
+                }
+            },
+            // onDone: send [DONE] and close
+            () => {
+                logger.info({ runId, eventCount }, "SSE: sending [DONE]");
+                if (!res.destroyed) {
+                    res.write(`data: [DONE]\n\n`);
+                    res.end();
+                }
+            }
+        );
+
+        logger.info({ runId, eventCount }, "SSE: subscribed to event bus");
+
+        // Clean up subscription when client disconnects
+        request.raw.on("close", () => {
+            logger.info({ runId }, "SSE: client disconnected");
+            unsubscribe();
+        });
+    });
+
+    // ── GET /sessions/:sessionId/active-run ──────────────────────────────────
+    // Returns the active run for a session (if any).
+    // Frontend uses this on page refresh to reconnect.
+    fastify.get("/sessions/:sessionId/active-run", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { sessionId } = request.params as { sessionId: string };
+
+        const run = await runRepository.findActiveBySession(sessionId, workspaceId);
+        return { data: run };
+    });
+
+    // ── POST /runs/:runId/approve ────────────────────────────────────────────
+    // Resume an interrupted run with user's HITL decisions.
+    fastify.post("/runs/:runId/approve", async (request, reply) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { runId } = request.params as { runId: string };
+        const body = approveBodySchema.parse(request.body);
+        const user = request.user as { userId: string };
+
+        const run = await runRepository.findById(runId, workspaceId);
+        if (!run) {
+            throw new AppError("Run not found", 404, "RUN_NOT_FOUND");
+        }
+        if (run.status !== "interrupted") {
+            throw new AppError(
+                `Run is not interrupted (status: ${run.status})`,
+                409,
+                "RUN_NOT_INTERRUPTED"
+            );
+        }
+
+        // Get session to find agentId
+        const session = await sessionService.getSession(run.sessionId, workspaceId);
+
+        // Update run status back to in_progress
+        await runRepository.updateStatus(runId, "in_progress");
+
+        logger.info({ runId }, "Resuming interrupted run with user decisions");
+
+        // Resume graph in background
+        resumeRun(
+            runId,
+            run.sessionId,
+            workspaceId,
+            session.agentId,
+            user.userId,
+            body.decisions
+        ).catch((err) => {
+            logger.error({ err, runId }, "Unhandled error in run resume");
+        });
+
+        return reply.send({ ok: true });
     });
 }

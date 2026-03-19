@@ -300,11 +300,17 @@ function ActionCall({ tc, index }: { tc: ToolCallEvent; index: number }) {
 }
 
 export function ToolCallDisplay({ toolCalls, messageId }: ToolCallDisplayProps) {
+    const [expanded, setExpanded] = useState(false);
+
     if (!toolCalls || toolCalls.length === 0) return null;
 
     const hasPlanningCalls = toolCalls.some((tc) => PLANNING_TOOLS.has(tc.name));
     const plan = hasPlanningCalls ? buildPlanState(toolCalls) : null;
     const actionCalls = toolCalls.filter((tc) => !PLANNING_TOOLS.has(tc.name));
+
+    const latestAction = actionCalls[actionCalls.length - 1];
+    const isRunning = actionCalls.some((tc) => tc.status === 'running');
+    const hasErrors = actionCalls.some((tc) => tc.status === 'rejected');
 
     return (
         <div className="space-y-3">
@@ -312,10 +318,57 @@ export function ToolCallDisplay({ toolCalls, messageId }: ToolCallDisplayProps) 
                 <PlanCard plan={plan} />
             )}
             {actionCalls.length > 0 && (
-                <div className="space-y-1">
-                    {actionCalls.map((tc, j) => (
-                        <ActionCall key={`${messageId}-action-${j}`} tc={tc} index={j} />
-                    ))}
+                <div>
+                    {/* Accordion bar */}
+                    <button
+                        type="button"
+                        onClick={() => setExpanded(!expanded)}
+                        className={cn(
+                            "w-full flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-xs transition-all",
+                            "text-left cursor-pointer",
+                            isRunning
+                                ? "border-border bg-card hover:bg-muted/50"
+                                : "border-border/60 bg-muted/40 hover:bg-muted/60"
+                        )}
+                    >
+                        {isRunning ? (
+                            <Loader2 className="w-4 h-4 text-primary animate-spin shrink-0" />
+                        ) : hasErrors ? (
+                            <XCircle className="w-4 h-4 text-destructive shrink-0" />
+                        ) : (
+                            <CheckCircle2 className="w-4 h-4 text-primary shrink-0" />
+                        )}
+                        <span className="font-medium text-foreground/80 truncate flex-1">
+                            {isRunning
+                                ? `Using ${formatToolName(latestAction.name)}...`
+                                : `Used ${actionCalls.length} tool${actionCalls.length !== 1 ? 's' : ''}`}
+                        </span>
+                        <ChevronRight
+                            className={cn(
+                                "w-3.5 h-3.5 text-muted-foreground/50 shrink-0 transition-transform duration-150",
+                                expanded && "rotate-90"
+                            )}
+                        />
+                    </button>
+
+                    {/* Expanded tool list */}
+                    <AnimatePresence>
+                        {expanded && (
+                            <motion.div
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: 'auto', opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                transition={{ duration: 0.2 }}
+                                className="overflow-hidden"
+                            >
+                                <div className="mt-1.5 space-y-1">
+                                    {actionCalls.map((tc, j) => (
+                                        <ActionCall key={`${messageId}-action-${j}`} tc={tc} index={j} />
+                                    ))}
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
                 </div>
             )}
         </div>

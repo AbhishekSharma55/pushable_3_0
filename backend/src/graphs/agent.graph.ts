@@ -142,7 +142,8 @@ export async function createAgentGraph(
     agentId: string,
     workspaceId: string,
     userId?: string,
-    onBrowserEvent?: BrowserAgentEventEmitter
+    onBrowserEvent?: BrowserAgentEventEmitter,
+    chatSessionId?: string
 ) {
     const agent = await agentRepository.findById(agentId, workspaceId);
     if (!agent) throw new Error("Agent not found");
@@ -426,7 +427,8 @@ export async function createAgentGraph(
             modelId,
             modelMultiplier,
             agentTemperature,
-            onBrowserEvent
+            onBrowserEvent,
+            chatSessionId
         );
         if (browserAgentTool) {
             langchainTools.push(browserAgentTool);
@@ -985,7 +987,7 @@ You can remember important information about users across conversations using th
 
     // If agent has requireApprovalForAll, every tool needs approval
     // (except save_memory and internal planning tools)
-    const internalTools = new Set(["save_memory", "write_todos", "update_todo", "get_todos"]);
+    const internalTools = new Set(["save_memory", "write_todos", "update_todo", "get_todos", "browser_agent"]);
     const effectiveApproval = new Set(approvalRequired);
     if (agent.requireApprovalForAll) {
         for (const tool of langchainTools) {

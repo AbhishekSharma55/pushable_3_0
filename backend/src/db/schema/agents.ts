@@ -1,5 +1,6 @@
 import { boolean, pgTable, real, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { workspaces } from "./workspaces.ts";
+import { browserProxies } from "./browserProxies.ts";
 
 export const agents = pgTable("agents", {
     id: uuid("id").primaryKey().defaultRandom(),
@@ -19,6 +20,9 @@ export const agents = pgTable("agents", {
     canManageChannels: boolean("can_manage_channels").default(false).notNull(),
     canManageAgents: boolean("can_manage_agents").default(false).notNull(),
     requireApprovalForAll: boolean("require_approval_for_all").default(false).notNull(),
+    // Browser automation
+    browserEnabled: boolean("browser_enabled").default(true).notNull(),
+    browserProxyId: uuid("browser_proxy_id").references(() => browserProxies.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

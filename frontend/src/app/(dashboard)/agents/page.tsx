@@ -57,7 +57,9 @@ import type { Artifact } from '@/lib/artifact-parser';
 import { ArtifactPanel, FileIcon } from '@/components/artifact';
 import { downloadArtifact } from '@/lib/artifact-download';
 import { getProfiles, startSession as startBrowserSession, endSession as endBrowserSession } from '@/lib/api/browser';
+import { getBrowserSession } from '@/lib/api/sessions';
 import { BrowserPreview } from '@/components/browser/browser-preview';
+import { BROWSER_WS_URL } from '@/lib/constants';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Agent, Session, Message, BrowserProfile } from '@/types';
@@ -305,6 +307,44 @@ export default function AgentsPage() {
         setShowBrowserPreview(false);
     }, [selectedAgent]);
 
+    // Auto-open browser panel when agent uses browser tools
+    useEffect(() => {
+        if (!workspace || !activeSession) return;
+        // Already showing browser — no need to poll
+        if (showBrowserPreview && browserWsUrl) return;
+
+        // Check if any message has browser-related tool calls
+        const hasBrowserTool = messages.some((m) =>
+            m.toolCalls?.some((tc) =>
+                tc.name?.toLowerCase().includes('browser')
+            )
+        );
+        if (!hasBrowserTool) return;
+
+        let cancelled = false;
+
+        const fetchBrowserSession = async () => {
+            try {
+                const data = await getBrowserSession(workspace.id, activeSession.id);
+                if (cancelled || !data) return;
+                setBrowserSessionId(data.sessionId);
+                setBrowserWsUrl(`${BROWSER_WS_URL}/ws/${data.sessionId}`);
+                setShowBrowserPreview(true);
+            } catch {
+                // Browser session not ready yet — will retry
+            }
+        };
+
+        // Poll quickly until browser session is found
+        fetchBrowserSession();
+        const interval = setInterval(fetchBrowserSession, 1000);
+
+        return () => {
+            cancelled = true;
+            clearInterval(interval);
+        };
+    }, [workspace, activeSession, messages, showBrowserPreview, browserWsUrl]);
+
     const handleStartBrowser = async () => {
         if (!workspace || !browserProfile || !selectedAgent) return;
         setStartingBrowser(true);
@@ -336,6 +376,127 @@ export default function AgentsPage() {
         setShowBrowserPreview(false);
     };
 
+    // ── SSE reader helper ─────────────────────────────────────────────────────
+    const readSSE = async (
+        url: string,
+        headers: Record<string, string>,
+        assistantMsgId: string,
+        signal: AbortSignal
+    ) => {
+        const response = await fetch(url, { headers, signal });
+        if (!response.ok || !response.body) throw new Error(`SSE failed: ${response.status}`);
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let fullContent = '';
+        const segments: ChatSegment[] = [];
+        let lastSegmentType: 'text' | 'tools' | null = null;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() ?? '';
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const data = line.slice(6).trim();
+                if (data === '[DONE]') {
+                    setMessages((prev) => prev.map((m) => m.id === assistantMsgId ? { ...m, content: fullContent, isStreaming: false, segments: [...segments] } : m));
+                    continue;
+                }
+                try {
+                    const parsed = JSON.parse(data);
+                    if (parsed.content) {
+                        fullContent += parsed.content;
+                        if (lastSegmentType === 'text' && segments.length > 0) {
+                            (segments[segments.length - 1] as { type: 'text'; content: string }).content += parsed.content;
+                        } else {
+                            segments.push({ type: 'text', content: parsed.content });
+                            lastSegmentType = 'text';
+                        }
+                        setMessages((prev) => prev.map((m) => m.id === assistantMsgId ? { ...m, content: fullContent, segments: [...segments] } : m));
+                    }
+                    if (parsed.toolCall) {
+                        const tc = parsed.toolCall as ToolCallEvent;
+                        setMessages((prev) => prev.map((m) => {
+                            if (m.id !== assistantMsgId) return m;
+                            const existing = m.toolCalls || [];
+                            if (tc.status === 'running') {
+                                if (lastSegmentType === 'tools' && segments.length > 0) {
+                                    (segments[segments.length - 1] as { type: 'tools'; toolCalls: ToolCallEvent[] }).toolCalls.push(tc);
+                                } else {
+                                    segments.push({ type: 'tools', toolCalls: [tc] });
+                                    lastSegmentType = 'tools';
+                                }
+                                return { ...m, toolCalls: [...existing, tc], segments: [...segments] };
+                            }
+                            const updatedToolCalls = existing.map((et) => et.id === tc.id ? { ...et, ...tc, fullArgs: et.fullArgs || tc.fullArgs } : et);
+                            for (const seg of segments) {
+                                if (seg.type === 'tools') {
+                                    seg.toolCalls = seg.toolCalls.map((et) => et.id === tc.id ? { ...et, ...tc, fullArgs: et.fullArgs || tc.fullArgs } : et);
+                                }
+                            }
+                            return { ...m, toolCalls: updatedToolCalls, segments: [...segments] };
+                        }));
+                    }
+                    if (parsed.approvalRequest) {
+                        const request = parsed.approvalRequest as ApprovalRequest;
+                        setPendingApproval({ msgId: assistantMsgId, request });
+                        setMessages((prev) => prev.map((m) => {
+                            if (m.id !== assistantMsgId) return m;
+                            return {
+                                ...m, isStreaming: false, approvalRequest: request,
+                                toolCalls: (m.toolCalls || []).map((tc) => {
+                                    const needs = request.toolCalls.some((a) => a.name === tc.name || a.id === tc.id);
+                                    return needs ? { ...tc, status: 'pending_approval' as const } : tc;
+                                }),
+                            };
+                        }));
+                    }
+                    if (parsed.error) toast.error(parsed.error);
+                } catch { /* ignore */ }
+            }
+        }
+
+        // Stream ended without [DONE] — finalize
+        setMessages((prev) => prev.map((m) => m.id === assistantMsgId ? { ...m, content: fullContent, isStreaming: false, segments: [...segments] } : m));
+    };
+
+    // ── Polling fallback for when SSE doesn't work ───────────────────────────
+    const pollForCompletion = async (sessionId: string, assistantMsgId: string, signal: AbortSignal) => {
+        const pollInterval = 1500;
+        while (!signal.aborted) {
+            await new Promise((r) => setTimeout(r, pollInterval));
+            if (signal.aborted) break;
+            try {
+                const token = getToken();
+                const runRes = await fetch(`${API_URL}/api/sessions/${sessionId}/active-run`, {
+                    headers: { Authorization: `Bearer ${token}`, 'x-workspace-id': workspace!.id },
+                    signal,
+                });
+                const runData = await runRes.json();
+                if (!runData.data) {
+                    // Run completed — load messages from DB
+                    const msgsRes = await getMessages(workspace!.id, sessionId);
+                    const hydrated: ChatMessage[] = msgsRes.map((msg: ChatMessage & { metadata?: Record<string, unknown> }) => {
+                        const meta = msg.metadata as Record<string, unknown> | undefined;
+                        if (meta && msg.role === 'assistant') {
+                            return { ...msg, toolCalls: (meta.toolCalls as ToolCallEvent[] | undefined) || undefined, segments: (meta.segments as ChatSegment[] | undefined) || undefined };
+                        }
+                        return msg;
+                    });
+                    setMessages(hydrated);
+                    return;
+                }
+            } catch {
+                // Keep polling
+            }
+        }
+    };
+
     const sendMessage = async () => {
         if (!chatInput.trim() || !workspace || !activeSession || sending) return;
         const content = chatInput.trim();
@@ -352,95 +513,38 @@ export default function AgentsPage() {
         };
         setMessages((prev) => [...prev, userMsg, assistantMsg]);
 
+        const abortController = new AbortController();
+
         try {
             const token = getToken();
-            const response = await fetch(`${API_URL}/api/sessions/${activeSession.id}/chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
-                body: JSON.stringify({ message: content }),
-            });
-            if (!response.ok || !response.body) throw new Error('Failed');
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            let fullContent = '';
-            // Track segments for interleaved rendering
-            const segments: ChatSegment[] = [];
-            let lastSegmentType: 'text' | 'tools' | null = null;
+            const hdrs = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id };
 
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                for (const line of decoder.decode(value, { stream: true }).split('\n')) {
-                    if (!line.startsWith('data: ')) continue;
-                    const data = line.slice(6);
-                    if (data === '[DONE]') {
-                        setMessages((prev) => prev.map((m) => m.id === assistantMsg.id ? { ...m, content: fullContent, isStreaming: false, segments: [...segments] } : m));
-                        continue;
-                    }
-                    try {
-                        const parsed = JSON.parse(data);
-                        if (parsed.content) {
-                            fullContent += parsed.content;
-                            // Add to or create text segment
-                            if (lastSegmentType === 'text' && segments.length > 0) {
-                                const last = segments[segments.length - 1] as { type: 'text'; content: string };
-                                last.content += parsed.content;
-                            } else {
-                                segments.push({ type: 'text', content: parsed.content });
-                                lastSegmentType = 'text';
-                            }
-                            setMessages((prev) => prev.map((m) => m.id === assistantMsg.id ? { ...m, content: fullContent, segments: [...segments] } : m));
-                        }
-                        if (parsed.toolCall) {
-                            const tc = parsed.toolCall as ToolCallEvent;
-                            // Track in tool calls array
-                            setMessages((prev) => prev.map((m) => {
-                                if (m.id !== assistantMsg.id) return m;
-                                const existing = m.toolCalls || [];
-                                if (tc.status === 'running') {
-                                    // Add to or create tools segment
-                                    if (lastSegmentType === 'tools' && segments.length > 0) {
-                                        const last = segments[segments.length - 1] as { type: 'tools'; toolCalls: ToolCallEvent[] };
-                                        last.toolCalls.push(tc);
-                                    } else {
-                                        segments.push({ type: 'tools', toolCalls: [tc] });
-                                        lastSegmentType = 'tools';
-                                    }
-                                    return { ...m, toolCalls: [...existing, tc], segments: [...segments] };
-                                }
-                                // Update existing tool call
-                                const updatedToolCalls = existing.map((et) => et.id === tc.id ? { ...et, ...tc, fullArgs: et.fullArgs || tc.fullArgs } : et);
-                                // Also update in segments
-                                for (const seg of segments) {
-                                    if (seg.type === 'tools') {
-                                        seg.toolCalls = seg.toolCalls.map((et) => et.id === tc.id ? { ...et, ...tc, fullArgs: et.fullArgs || tc.fullArgs } : et);
-                                    }
-                                }
-                                return { ...m, toolCalls: updatedToolCalls, segments: [...segments] };
-                            }));
-                            continue;
-                        }
-                        if (parsed.approvalRequest) {
-                            const request = parsed.approvalRequest as ApprovalRequest;
-                            setPendingApproval({ msgId: assistantMsg.id, request });
-                            setMessages((prev) => prev.map((m) => {
-                                if (m.id !== assistantMsg.id) return m;
-                                return {
-                                    ...m, isStreaming: false, approvalRequest: request,
-                                    toolCalls: (m.toolCalls || []).map((tc) => {
-                                        const needs = request.toolCalls.some((a) => a.name === tc.name || a.id === tc.id);
-                                        return needs ? { ...tc, status: 'pending_approval' as const } : tc;
-                                    }),
-                                };
-                            }));
-                        }
-                        if (parsed.error) toast.error(parsed.error);
-                    } catch { /* ignore */ }
-                }
+            // POST returns { runId } — start background execution
+            const postRes = await fetch(`${API_URL}/api/sessions/${activeSession.id}/chat`, {
+                method: 'POST', headers: hdrs, body: JSON.stringify({ message: content }),
+            });
+            if (!postRes.ok) throw new Error('Failed to send');
+            const { runId } = await postRes.json();
+
+            // Start polling fallback in parallel
+            pollForCompletion(activeSession.id, assistantMsg.id, abortController.signal).catch(() => {});
+
+            // Try SSE streaming from the run events endpoint
+            try {
+                await readSSE(
+                    `${API_URL}/api/runs/${runId}/events`,
+                    { Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
+                    assistantMsg.id,
+                    abortController.signal
+                );
+                abortController.abort(); // Stop polling — SSE delivered the result
+            } catch {
+                // SSE failed — polling will deliver the result
             }
         } catch {
             toast.error('Failed to send message');
             setMessages((prev) => prev.filter((m) => m.id !== assistantMsg.id));
+            abortController.abort();
         } finally {
             setSending(false);
         }
@@ -458,81 +562,47 @@ export default function AgentsPage() {
         }));
         setPendingApproval(null);
         setSending(true);
+
+        const abortController = new AbortController();
+
         try {
             const token = getToken();
-            const response = await fetch(`${API_URL}/api/sessions/${activeSession.id}/approve`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
-                body: JSON.stringify({ decisions }),
+            const hdrs = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id };
+
+            // Get the active run for this session to find the runId
+            const activeRunRes = await fetch(`${API_URL}/api/sessions/${activeSession.id}/active-run`, {
+                headers: { Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
             });
-            if (!response.ok || !response.body) throw new Error('Failed');
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            let lastApproveSegType: 'text' | 'tools' | null = null;
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                for (const line of decoder.decode(value, { stream: true }).split('\n')) {
-                    if (!line.startsWith('data: ')) continue;
-                    const data = line.slice(6);
-                    if (data === '[DONE]') { setMessages((prev) => prev.map((m) => m.id === msgId ? { ...m, isStreaming: false } : m)); continue; }
-                    try {
-                        const parsed = JSON.parse(data);
-                        if (parsed.content) {
-                            lastApproveSegType = 'text';
-                            setMessages((prev) => prev.map((m) => {
-                                if (m.id !== msgId) return m;
-                                const segs = [...(m.segments || [])];
-                                const lastSeg = segs[segs.length - 1];
-                                if (lastSeg && lastSeg.type === 'text') {
-                                    lastSeg.content += parsed.content;
-                                } else {
-                                    segs.push({ type: 'text', content: parsed.content });
-                                }
-                                return { ...m, content: m.content + parsed.content, segments: segs };
-                            }));
-                        }
-                        if (parsed.toolCall) {
-                            const tc = parsed.toolCall as ToolCallEvent;
-                            setMessages((prev) => prev.map((m) => {
-                                if (m.id !== msgId) return m;
-                                const existing = m.toolCalls || [];
-                                const segs = [...(m.segments || [])];
+            const activeRunData = await activeRunRes.json();
+            const runId = activeRunData.data?.id;
+            if (!runId) throw new Error('No active run found');
 
-                                if (tc.status === 'running') {
-                                    // New tool call — add to toolCalls and segments
-                                    if (lastApproveSegType === 'tools' && segs.length > 0) {
-                                        const lastSeg = segs[segs.length - 1];
-                                        if (lastSeg.type === 'tools') {
-                                            lastSeg.toolCalls = [...lastSeg.toolCalls, tc];
-                                        }
-                                    } else {
-                                        segs.push({ type: 'tools', toolCalls: [tc] });
-                                    }
-                                    lastApproveSegType = 'tools';
-                                    return { ...m, toolCalls: [...existing, tc], segments: segs };
-                                }
+            // POST approval
+            const approveRes = await fetch(`${API_URL}/api/runs/${runId}/approve`, {
+                method: 'POST', headers: hdrs, body: JSON.stringify({ decisions }),
+            });
+            if (!approveRes.ok) throw new Error('Approval failed');
 
-                                // Update existing tool call status
-                                const updatedToolCalls = existing.map((et) => et.id === tc.id ? { ...et, ...tc, fullArgs: et.fullArgs || tc.fullArgs } : et);
-                                for (const seg of segs) {
-                                    if (seg.type === 'tools') {
-                                        seg.toolCalls = seg.toolCalls.map((et) => et.id === tc.id ? { ...et, ...tc, fullArgs: et.fullArgs || tc.fullArgs } : et);
-                                    }
-                                }
-                                return { ...m, toolCalls: updatedToolCalls, segments: segs };
-                            }));
-                            continue;
-                        }
-                        if (parsed.approvalRequest) {
-                            const request = parsed.approvalRequest as ApprovalRequest;
-                            setPendingApproval({ msgId, request });
-                            setMessages((prev) => prev.map((m) => m.id !== msgId ? m : { ...m, isStreaming: false, approvalRequest: request }));
-                        }
-                    } catch { /* ignore */ }
-                }
+            // Start polling fallback
+            pollForCompletion(activeSession.id, msgId, abortController.signal).catch(() => {});
+
+            // Try SSE for the continued run
+            try {
+                await readSSE(
+                    `${API_URL}/api/runs/${runId}/events`,
+                    { Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
+                    msgId,
+                    abortController.signal
+                );
+                abortController.abort();
+            } catch {
+                // Polling will handle it
             }
-        } catch { toast.error('Failed to process approval'); } finally { setSending(false); }
+        } catch {
+            toast.error('Failed to process approval');
+        } finally {
+            setSending(false);
+        }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

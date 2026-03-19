@@ -24,3 +24,4 @@ export { browserSessions, browserSessionStatusEnum } from "./browserSessions.ts"
 export { browserProxies, proxyProtocolEnum, proxyTestStatusEnum } from "./browserProxies.ts";
 export { channelConnections, connectionChannelTypeEnum, connectionStatusEnum } from "./channelConnections.ts";
 export { agentMemories } from "./agentMemories.ts";
+export { runs, runStatusEnum } from "./runs.ts";

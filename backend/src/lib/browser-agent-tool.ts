@@ -17,6 +17,55 @@ import { buildBrowserAgentPrompt } from "./browser-agent-prompt.ts";
 import { logger } from "./logger.ts";
 import { calculateCreditCost, deductCredits } from "./credit-engine.ts";
 
+/**
+ * Sanitize the browser agent's final response to strip any leaked
+ * DOM/HTML/page-state content that shouldn't be shown to the user.
+ */
+function sanitizeBrowserResponse(text: string): string {
+    let cleaned = text;
+
+    // Remove lines that look like page state element listings:
+    //   [0] <tag ...> "label"
+    //   [12] <input type="text" name="q"> "Search"
+    cleaned = cleaned.replace(
+        /^\s*\[?\d+\]?\s*<[a-z][a-z0-9]*[^>]*>.*$/gm,
+        ""
+    );
+
+    // Remove page state headers that may have been echoed
+    cleaned = cleaned.replace(
+        /^\s*\[Current Page State\].*$/gm,
+        ""
+    );
+    cleaned = cleaned.replace(
+        /^\s*Interactive elements\s*\(\d+\)\s*:?\s*$/gm,
+        ""
+    );
+    cleaned = cleaned.replace(
+        /^\s*Page:\s+.+$/gm,
+        ""
+    );
+    cleaned = cleaned.replace(
+        /^\s*URL:\s+https?:\/\/.+$/gm,
+        ""
+    );
+    cleaned = cleaned.replace(
+        /^\s*Scroll:\s+\d+.*$/gm,
+        ""
+    );
+
+    // Remove raw HTML blocks (anything with multiple HTML tags on consecutive lines)
+    cleaned = cleaned.replace(
+        /(<[a-z][a-z0-9]*[\s>][\s\S]*?<\/[a-z][a-z0-9]*>)/gi,
+        ""
+    );
+
+    // Collapse excessive blank lines left by removals
+    cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+
+    return cleaned.trim();
+}
+
 // ---- Event emitter interface for real-time SSE streaming ----
 
 export interface BrowserAgentEvent {
@@ -45,9 +94,9 @@ const BROWSER_AGENT_RECURSION_LIMIT = 50;
  * via natural-language instructions; this tool spins up a lightweight
  * LangGraph, executes the task, and returns the result.
  *
- * When `onEvent` is provided, internal tool calls and intermediate AI
- * thinking are emitted in real-time so the SSE stream stays alive and
- * the frontend can show progress.
+ * Key architectural feature: before every LLM turn, the agent auto-fetches
+ * the current page state (interactive elements with index numbers) and
+ * injects it as context. The LLM always "sees" the page before deciding.
  */
 export async function buildBrowserAgentTool(
     agentId: string,
@@ -55,13 +104,16 @@ export async function buildBrowserAgentTool(
     modelId: string,
     modelMultiplier: number,
     temperature: number,
-    onEvent?: BrowserAgentEventEmitter
+    onEvent?: BrowserAgentEventEmitter,
+    chatSessionId?: string
 ): Promise<DynamicStructuredTool | null> {
-    // Get raw browser tools for this agent's profile / session
-    const browserTools = await buildBrowserTools(agentId, workspaceId);
-    if (browserTools.length === 0) return null;
+    // Get browser tools + page state helper (scoped to chat session)
+    const browserResult = await buildBrowserTools(agentId, workspaceId, chatSessionId);
+    if (!browserResult) return null;
 
-    // Wrap each browser tool with credit deduction (same pattern as main graph)
+    const { tools: browserTools, getPageState } = browserResult;
+
+    // Wrap each browser tool with credit deduction
     const wrappedBrowserTools: DynamicStructuredTool[] = browserTools.map(
         (bt) =>
             new DynamicStructuredTool({
@@ -90,7 +142,7 @@ export async function buildBrowserAgentTool(
 
     const systemPrompt = buildBrowserAgentPrompt();
 
-    // Pre-build the tools-by-name map (stable across invocations)
+    // Pre-build the tools-by-name map
     const toolsByName = new Map<string, DynamicStructuredTool>();
     for (const tool of wrappedBrowserTools) {
         toolsByName.set(tool.name, tool);
@@ -105,8 +157,10 @@ export async function buildBrowserAgentTool(
             "Delegate a browser automation task to the Browser Agent. " +
             "Describe what you want done in natural language — the browser agent " +
             "will autonomously navigate websites, interact with pages, fill forms, " +
-            "extract data, handle CAPTCHAs, and return the result. " +
-            "Include the target URL and expected outcome in your instruction.",
+            "extract data, handle CAPTCHAs, and return a clean summary. " +
+            "Include the target URL and expected outcome in your instruction. " +
+            "The result is a human-readable summary — relay it to the user as-is, " +
+            "never include raw HTML, DOM elements, or page state details.",
         schema: z.object({
             instruction: z
                 .string()
@@ -129,10 +183,12 @@ export async function buildBrowserAgentTool(
 
             try {
                 // Fresh LLM per invocation (stateless)
-                const { llm } = createLLM({ modelId, temperature });
+                // Always use Gemini Flash for browser agent — optimised for speed + vision
+                const BROWSER_AGENT_MODEL = "google/gemini-3-flash-preview";
+                const { llm } = createLLM({ modelId: BROWSER_AGENT_MODEL, temperature });
                 const llmWithTools = llm.bindTools(wrappedBrowserTools);
 
-                // --- Agent node ---
+                // --- Agent node (auto-injects page state before LLM call) ---
                 const agentNode = async (
                     state: typeof BrowserAgentState.State
                 ) => {
@@ -157,13 +213,36 @@ export async function buildBrowserAgentTool(
                         )
                     );
 
-                    const systemMsg = new SystemMessage(systemPrompt);
-                    const response = await llmWithTools.invoke([
-                        systemMsg,
-                        ...state.messages,
-                    ]);
+                    // ── Auto-inject current page state ──
+                    // Fetch interactive elements before every LLM decision
+                    let pageStateMsg: HumanMessage | null = null;
+                    try {
+                        const pageState = await getPageState();
+                        if (
+                            pageState &&
+                            !pageState.startsWith("Error") &&
+                            !pageState.startsWith("Browser action failed")
+                        ) {
+                            pageStateMsg = new HumanMessage(
+                                `[Current Page State]\n${pageState}`
+                            );
+                        }
+                    } catch (err) {
+                        logger.warn(
+                            { err },
+                            "Browser agent: failed to fetch page state"
+                        );
+                    }
 
-                    // Emit intermediate thinking (AI content when it also has tool_calls)
+                    // Build messages: system + page state + conversation
+                    const systemMsg = new SystemMessage(systemPrompt);
+                    const messages = pageStateMsg
+                        ? [systemMsg, pageStateMsg, ...state.messages]
+                        : [systemMsg, ...state.messages];
+
+                    const response = await llmWithTools.invoke(messages);
+
+                    // Emit intermediate thinking
                     if (onEvent) {
                         const aiMsg = response as AIMessage;
                         const hasToolCalls =
@@ -183,8 +262,6 @@ export async function buildBrowserAgentTool(
                                           .join("")
                                     : "";
 
-                        // Emit thinking when the agent has both text + tool_calls
-                        // (intermediate reasoning before the next action)
                         if (hasToolCalls && textContent) {
                             onEvent({
                                 type: "thinking",
@@ -210,7 +287,6 @@ export async function buildBrowserAgentTool(
                         const tool = toolsByName.get(tc.name);
                         if (!tool) {
                             const errContent = `Tool "${tc.name}" not found`;
-                            // Emit not-found as a completed tool call
                             onEvent?.({
                                 type: "tool_start",
                                 toolCallId: tc.id!,
@@ -307,16 +383,20 @@ export async function buildBrowserAgentTool(
                 // Extract the final AI response
                 const messages = result.messages;
                 const lastMsg = messages[messages.length - 1];
-                const responseText =
+                const rawResponse =
                     typeof lastMsg.content === "string"
                         ? lastMsg.content
                         : JSON.stringify(lastMsg.content);
+
+                // Sanitize: strip any leaked DOM/HTML/page-state content
+                const responseText = sanitizeBrowserResponse(rawResponse);
 
                 logger.info(
                     {
                         agentId,
                         invocationId,
                         responseLength: responseText.length,
+                        rawLength: rawResponse.length,
                         totalMessages: messages.length,
                     },
                     "Browser agent invocation completed"

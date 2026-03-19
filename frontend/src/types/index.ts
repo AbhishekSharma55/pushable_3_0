@@ -35,6 +35,8 @@ export interface Agent {
     canManageChannels: boolean;
     canManageAgents: boolean;
     requireApprovalForAll: boolean;
+    browserEnabled: boolean;
+    browserProxyId: string | null;
     createdAt: string;
     updatedAt: string;
 }
@@ -55,6 +57,18 @@ export interface Session {
     agentId: string;
     title: string;
     createdAt: string;
+    updatedAt?: string;
+}
+
+export interface Run {
+    id: string;
+    sessionId: string;
+    workspaceId: string;
+    status: 'queued' | 'in_progress' | 'completed' | 'failed' | 'interrupted' | 'cancelled';
+    error: string | null;
+    metadata: Record<string, unknown>;
+    createdAt: string;
+    updatedAt: string;
 }
 
 export interface Message {

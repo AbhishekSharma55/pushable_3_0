@@ -9,6 +9,8 @@ export const agentRepository = {
         systemPrompt?: string;
         model?: string;
         temperature?: number;
+        browserEnabled?: boolean;
+        browserProxyId?: string | null;
     }) {
         const result = await db.insert(agents).values(data).returning();
         return result[0];
@@ -72,6 +74,8 @@ export const agentRepository = {
             systemPrompt: string;
             model: string;
             temperature: number;
+            browserEnabled: boolean;
+            browserProxyId: string | null;
         }>
     ) {
         const result = await db

@@ -166,11 +166,37 @@ async def click(req: ClickRequest):
 async def type_text(req: TypeRequest):
     try:
         page = browser_manager.get_page(req.sessionId)
+        locator = page.locator(req.selector).first
+        
+        # Click to focus the input field
+        await locator.click()
+        await asyncio.sleep(0.1)
+        
         if req.clearFirst:
-            await page.click(req.selector, click_count=3)
+            # Select all and delete (most realistic way to clear)
+            # Use 'Control+A' for Windows/Linux and 'Meta+A' for Mac
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Meta+A") 
             await page.keyboard.press("Backspace")
-        await page.type(req.selector, req.text, delay=50)
+            await asyncio.sleep(0.1)
+            
+        # Type character by character with a realistic delay
+        await locator.press_sequentially(req.text, delay=100)
+        await asyncio.sleep(0.2)
+        
+        # Force React/Vue framework state updates by explicitly dispatching final events
+        await locator.evaluate("""el => {
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+        }""")
+        
+        # Click outside to ensure blur actually happens in the browser UI
+        await page.mouse.click(0, 0)
+        await asyncio.sleep(0.1)
+
         return _ok("Typed successfully")
+
     except KeyError as e:
         return _err(str(e))
     except Exception as e:

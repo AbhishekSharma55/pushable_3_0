@@ -19,6 +19,7 @@ import {
     Blocks,
     Globe,
     PlugZap,
+    KeyRound,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -51,6 +52,7 @@ const navItems = [
     {label: 'Integrations', href: '/integrations', icon: Blocks },
     { label: 'Browser', href: '/browser-profiles', icon: Globe },
     { label: 'Extension', href: '/extension-settings', icon: PlugZap },
+    { label: 'Secrets', href: '/secrets', icon: KeyRound },
     { label: 'Knowledge Base', href: '/kb', icon: BookOpen },
     { label: 'Skills', href: '/skills', icon: Zap },
     { label: 'Tools', href: '/tools', icon: Wrench },

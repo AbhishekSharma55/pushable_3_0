@@ -22,3 +22,4 @@ export { integrations, integrationStatusEnum } from "./integrations.ts";
 export { agentIntegrations } from "./agentIntegrations.ts";
 export { browserProfiles, browserProfileStatusEnum } from "./browserProfiles.ts";
 export { browserSessions, browserSessionStatusEnum } from "./browserSessions.ts";
+export { vaultConnections, vaultProviderEnum, vaultConnectionStatusEnum } from "./vaultConnections.ts";

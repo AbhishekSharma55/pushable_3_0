@@ -18,6 +18,7 @@ import { logger } from "../lib/logger.ts";
 import { HumanMessage } from "@langchain/core/messages";
 import { buildBrowserTools } from "../tools/browser.tools.ts";
 import { buildExtensionBrowserTools } from "../lib/extension-bridge-client.ts";
+import { buildVaultTools } from "../tools/vault.tools.ts";
 
 let checkpointerInstance: PostgresSaver | null = null;
 
@@ -293,6 +294,17 @@ export async function createAgentGraph(
         logger.warn(
             { error, agentId },
             "Failed to load extension browser tools, proceeding without them"
+        );
+    }
+
+    // --- 7. Vault tools (Bitwarden credential access) ---
+    try {
+        const vaultTools = await buildVaultTools(workspaceId);
+        langchainTools.push(...vaultTools);
+    } catch (error) {
+        logger.warn(
+            { error, agentId },
+            "Failed to load vault tools, proceeding without them"
         );
     }
 

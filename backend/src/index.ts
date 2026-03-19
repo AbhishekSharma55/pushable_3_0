@@ -21,6 +21,7 @@ import { scheduleRoutes } from "./routes/schedules.ts";
 import { integrationRoutes } from "./routes/integrations.ts";
 import { browserRoutes } from "./routes/browser.ts";
 import { internalRoutes } from "./routes/internal.ts";
+import { vaultRoutes } from "./routes/vault.ts";
 import { startWorkers, stopWorkers } from "./lib/workers.ts";
 import { initScheduler } from "./lib/scheduler.ts";
 import { taskQueue, workflowQueue } from "./lib/queue.ts";
@@ -82,6 +83,7 @@ await app.register(workflowRoutes, { prefix: "/api" });
 await app.register(scheduleRoutes, { prefix: "/api" });
 await app.register(integrationRoutes, { prefix: "/api" });
 await app.register(browserRoutes, { prefix: "/api" });
+await app.register(vaultRoutes, { prefix: "/api" });
 await app.register(internalRoutes, { prefix: "/api/internal" });
 
 const port = Number(process.env.PORT) || 4000;

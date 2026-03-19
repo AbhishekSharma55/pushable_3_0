@@ -36,13 +36,15 @@ services:
       DATABASE_URL: postgresql://postgres:abhishek0003@postgres:5432/pushable_ai
       JWT_SECRET: pushable-ai-super-secret-jwt-key-32chars
       PORT: "4000"
-      OPENROUTER_KEY: ${OPENROUTER_KEY:-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}
+      OPENROUTER_KEY: ${OPENROUTER_KEY:-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}
       REDIS_URL: redis://redis:6379
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-ak_sYMIgmVF81jyVXtDGmWQ}
       FRONTEND_URL: http://localhost:3000
       BROWSER_SERVICE_URL: http://browser-service:8080
       BRIDGE_API_KEY: ""
       EXTENSION_BRIDGE_URL: ws://extension-bridge:3001
+      BW_DEVICE_ID: "b661b739-3e2c-4517-9ec0-63cb10842b84"
+      BW_DATA_ROOT: /data/bw-sessions
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,6 +52,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend/src:/app/src
+      - bw-data:/data/bw-sessions
 
   browser-service:
     build:
@@ -100,4 +103,5 @@ services:
 volumes:
   pgdata:
   redisdata:
+  bw-data:
 

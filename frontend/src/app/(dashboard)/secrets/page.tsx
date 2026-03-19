@@ -14,6 +14,7 @@ import {
     EyeOff,
     ExternalLink,
     Info,
+    Mail,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -56,12 +57,14 @@ export default function SecretsPage() {
 
     // Connect dialog
     const [connectOpen, setConnectOpen] = useState(false);
-    const [clientId, setClientId] = useState('');
-    const [clientSecret, setClientSecret] = useState('');
+    const [email, setEmail] = useState('');
     const [masterPassword, setMasterPassword] = useState('');
-    const [showSecret, setShowSecret] = useState(false);
     const [showPassword, setShowPassword] = useState(false);
     const [connecting, setConnecting] = useState(false);
+
+    // Device verification
+    const [needsVerification, setNeedsVerification] = useState(false);
+    const [verificationCode, setVerificationCode] = useState('');
 
     // Test connection
     const [testing, setTesting] = useState(false);
@@ -89,20 +92,43 @@ export default function SecretsPage() {
             setConnecting(true);
             await connectVault(workspace.id, {
                 provider: 'bitwarden',
-                clientId,
-                clientSecret,
+                email,
                 masterPassword,
+                ...(verificationCode ? { verificationCode } : {}),
             });
             toast.success('Bitwarden vault connected successfully!');
             setConnectOpen(false);
-            setClientId('');
-            setClientSecret('');
+            setEmail('');
             setMasterPassword('');
+            setVerificationCode('');
+            setNeedsVerification(false);
             fetchStatus();
         } catch (err: unknown) {
-            const error = err as { response?: { data?: { error?: { message?: string } } } };
-            const msg = error?.response?.data?.error?.message || 'Failed to connect vault';
-            toast.error(msg);
+            const error = err as {
+                response?: {
+                    data?: { error?: { message?: string; code?: string } };
+                };
+            };
+            const code = error?.response?.data?.error?.code;
+            const msg =
+                error?.response?.data?.error?.message ||
+                'Failed to connect vault';
+
+            if (code === 'DEVICE_VERIFICATION_REQUIRED') {
+                setNeedsVerification(true);
+                setVerificationCode('');
+                toast.info(
+                    'Check your email for a verification code from Bitwarden.'
+                );
+            } else if (code === 'DEVICE_VERIFICATION_INVALID') {
+                setNeedsVerification(true);
+                setVerificationCode('');
+                toast.error(
+                    'Verification code is invalid or expired. Check your email for a new code.'
+                );
+            } else {
+                toast.error(msg);
+            }
         } finally {
             setConnecting(false);
         }
@@ -228,10 +254,13 @@ export default function SecretsPage() {
                                             Bitwarden Vault Connected
                                         </p>
                                         <p className="text-xs text-muted-foreground mt-0.5">
-                                            Your vault credentials are
-                                            encrypted and stored securely.
-                                            Agents can now access login
-                                            items during tasks.
+                                            Connected as{' '}
+                                            <span className="font-medium text-foreground">
+                                                {vaultStatus.email}
+                                            </span>
+                                            . Agents can access login items
+                                            during tasks. Your master password
+                                            is not stored.
                                         </p>
                                     </div>
                                 </div>
@@ -276,11 +305,12 @@ export default function SecretsPage() {
                                                 Disconnect Bitwarden Vault
                                             </AlertDialogTitle>
                                             <AlertDialogDescription>
-                                                This will remove your stored
-                                                vault credentials. Agents will
-                                                no longer be able to access
-                                                your passwords during
-                                                automation tasks.
+                                                This will remove all stored
+                                                tokens and vault keys. Agents
+                                                will no longer be able to access
+                                                your passwords during automation
+                                                tasks. You can reconnect at any
+                                                time.
                                             </AlertDialogDescription>
                                         </AlertDialogHeader>
                                         <AlertDialogFooter>
@@ -309,9 +339,9 @@ export default function SecretsPage() {
                                     No vault integration configured
                                 </p>
                                 <p className="text-sm text-muted-foreground/70 mt-1 max-w-md">
-                                    Connect your Bitwarden vault so agents
-                                    can securely fetch login credentials
-                                    when automating tasks that require
+                                    Connect your Bitwarden vault so agents can
+                                    securely fetch login credentials when
+                                    automating tasks that require
                                     authentication.
                                 </p>
                             </div>
@@ -332,19 +362,12 @@ export default function SecretsPage() {
                             1
                         </div>
                         <p className="text-sm font-medium">
-                            Get your API Key
+                            Enter Your Credentials
                         </p>
                         <p className="text-xs text-muted-foreground">
-                            Go to{' '}
-                            <a
-                                href="https://vault.bitwarden.com/#/settings/security/security-keys"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-primary underline underline-offset-2"
-                            >
-                                vault.bitwarden.com
-                            </a>{' '}
-                            → Settings → Security → Keys → View API Key
+                            Enter your Bitwarden email and master password.
+                            Your password is used once to derive a vault key,
+                            then immediately discarded.
                         </p>
                     </div>
                     <div className="space-y-1.5">
@@ -352,12 +375,12 @@ export default function SecretsPage() {
                             2
                         </div>
                         <p className="text-sm font-medium">
-                            Connect Once
+                            Secure Key Derivation
                         </p>
                         <p className="text-xs text-muted-foreground">
-                            Enter your client_id, client_secret, and
-                            master password. They&apos;re encrypted with
-                            AES-256 and stored securely.
+                            We authenticate with Bitwarden, derive your vault
+                            decryption key, and store only encrypted tokens.
+                            Your master password is never stored or logged.
                         </p>
                     </div>
                     <div className="space-y-1.5">
@@ -369,15 +392,25 @@ export default function SecretsPage() {
                         </p>
                         <p className="text-xs text-muted-foreground">
                             When a task requires login, the agent
-                            automatically fetches the right credentials
-                            from your vault by item name.
+                            automatically fetches the right credentials from
+                            your vault. Tokens refresh silently — no password
+                            needed again.
                         </p>
                     </div>
                 </div>
             </div>
 
             {/* Connect Dialog */}
-            <Dialog open={connectOpen} onOpenChange={setConnectOpen}>
+            <Dialog
+                open={connectOpen}
+                onOpenChange={(open) => {
+                    setConnectOpen(open);
+                    if (!open) {
+                        setNeedsVerification(false);
+                        setVerificationCode('');
+                    }
+                }}
+            >
                 <DialogContent className="sm:max-w-lg">
                     <DialogHeader>
                         <DialogTitle className="flex items-center gap-2">
@@ -405,9 +438,8 @@ export default function SecretsPage() {
                             Connect Bitwarden Vault
                         </DialogTitle>
                         <DialogDescription>
-                            Enter your Bitwarden API credentials to
-                            securely connect your vault for automated
-                            credential access.
+                            Sign in with your Bitwarden account to securely
+                            connect your vault for automated credential access.
                         </DialogDescription>
                     </DialogHeader>
 
@@ -417,75 +449,39 @@ export default function SecretsPage() {
                             <Shield className="h-4 w-4 text-blue-600 mt-0.5 flex-shrink-0" />
                             <div className="space-y-1">
                                 <p className="font-medium text-blue-700 dark:text-blue-400">
-                                    Security Notice
+                                    Your Master Password Is Never Stored
                                 </p>
                                 <p className="text-xs text-muted-foreground">
-                                    Your credentials will be encrypted
-                                    using AES-256-GCM and stored securely.
-                                    They are only decrypted momentarily
-                                    when an agent needs to fetch a
-                                    credential.
+                                    Your master password is used once to derive
+                                    a vault decryption key, then immediately
+                                    discarded. Only encrypted OAuth tokens and
+                                    the derived key are stored — protected with
+                                    AES-256-GCM encryption at rest.
                                 </p>
                             </div>
                         </div>
                     </div>
 
                     <div className="space-y-4 py-2">
-                        {/* Client ID */}
+                        {/* Email */}
                         <div className="space-y-2">
-                            <Label htmlFor="bw-client-id">
-                                Client ID
-                            </Label>
-                            <Input
-                                id="bw-client-id"
-                                placeholder="user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                                value={clientId}
-                                onChange={(e) =>
-                                    setClientId(e.target.value)
-                                }
-                                className="font-mono text-sm"
-                            />
-                            <p className="text-xs text-muted-foreground">
-                                Starts with{' '}
-                                <code className="px-1 py-0.5 rounded bg-muted">
-                                    user.
-                                </code>{' '}
-                                — found in your API Key dialog
-                            </p>
-                        </div>
-
-                        {/* Client Secret */}
-                        <div className="space-y-2">
-                            <Label htmlFor="bw-client-secret">
-                                Client Secret
+                            <Label htmlFor="bw-email">
+                                Bitwarden Email
                             </Label>
                             <div className="relative">
+                                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                                 <Input
-                                    id="bw-client-secret"
-                                    type={
-                                        showSecret ? 'text' : 'password'
-                                    }
-                                    placeholder="Your client secret"
-                                    value={clientSecret}
-                                    onChange={(e) =>
-                                        setClientSecret(e.target.value)
-                                    }
-                                    className="font-mono text-sm pr-10"
+                                    id="bw-email"
+                                    type="email"
+                                    placeholder="you@example.com"
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    className="pl-9"
                                 />
-                                <button
-                                    type="button"
-                                    onClick={() =>
-                                        setShowSecret(!showSecret)
-                                    }
-                                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-muted text-muted-foreground"
-                                >
-                                    {showSecret ? (
-                                        <EyeOff className="h-4 w-4" />
-                                    ) : (
-                                        <Eye className="h-4 w-4" />
-                                    )}
-                                </button>
                             </div>
+                            <p className="text-xs text-muted-foreground">
+                                The email address for your Bitwarden account
+                            </p>
                         </div>
 
                         {/* Master Password */}
@@ -497,9 +493,7 @@ export default function SecretsPage() {
                                 <Input
                                     id="bw-master-password"
                                     type={
-                                        showPassword
-                                            ? 'text'
-                                            : 'password'
+                                        showPassword ? 'text' : 'password'
                                     }
                                     placeholder="Your Bitwarden master password"
                                     value={masterPassword}
@@ -523,21 +517,58 @@ export default function SecretsPage() {
                                 </button>
                             </div>
                             <p className="text-xs text-muted-foreground">
-                                Required to decrypt your vault — Bitwarden
-                                uses end-to-end encryption.
+                                Used once to derive your vault key — never
+                                stored or logged anywhere.
                             </p>
                         </div>
+
+                        {/* Verification Code (shown after device verification required) */}
+                        {needsVerification && (
+                            <div className="space-y-2">
+                                <div className="rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-sm">
+                                    <div className="flex items-start gap-2">
+                                        <Mail className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                                        <div className="space-y-1">
+                                            <p className="font-medium text-amber-700 dark:text-amber-400">
+                                                Device Verification Required
+                                            </p>
+                                            <p className="text-xs text-muted-foreground">
+                                                Bitwarden sent a verification
+                                                code to{' '}
+                                                <span className="font-medium">
+                                                    {email}
+                                                </span>
+                                                . Enter it below to continue.
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                                <Label htmlFor="bw-verification-code">
+                                    Verification Code
+                                </Label>
+                                <Input
+                                    id="bw-verification-code"
+                                    type="text"
+                                    placeholder="Enter code from email"
+                                    value={verificationCode}
+                                    onChange={(e) =>
+                                        setVerificationCode(e.target.value)
+                                    }
+                                    autoFocus
+                                />
+                            </div>
+                        )}
                     </div>
 
                     <DialogFooter className="flex items-center justify-between sm:justify-between">
                         <a
-                            href="https://vault.bitwarden.com/#/settings/security/security-keys"
+                            href="https://vault.bitwarden.com"
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-xs text-muted-foreground hover:text-primary flex items-center gap-1"
                         >
                             <ExternalLink className="h-3 w-3" />
-                            Get API Key
+                            Open Bitwarden
                         </a>
                         <div className="flex gap-2">
                             <Button
@@ -551,9 +582,10 @@ export default function SecretsPage() {
                                 onClick={handleConnect}
                                 disabled={
                                     connecting ||
-                                    !clientId.trim() ||
-                                    !clientSecret.trim() ||
-                                    !masterPassword.trim()
+                                    !email.trim() ||
+                                    !masterPassword.trim() ||
+                                    (needsVerification &&
+                                        !verificationCode.trim())
                                 }
                                 className="gap-1.5 bg-[#175DDC] hover:bg-[#1452c4]"
                             >
@@ -563,8 +595,10 @@ export default function SecretsPage() {
                                     <Lock className="h-4 w-4" />
                                 )}
                                 {connecting
-                                    ? 'Connecting...'
-                                    : 'Connect Bitwarden'}
+                                    ? 'Verifying...'
+                                    : needsVerification
+                                      ? 'Verify & Connect'
+                                      : 'Connect Bitwarden'}
                             </Button>
                         </div>
                     </DialogFooter>

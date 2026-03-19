@@ -32,7 +32,8 @@
       "Bash(docker exec:*)",
       "Bash(docker rm:*)",
       "Bash(gh api:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(bw list:*)"
     ]
   }
 }

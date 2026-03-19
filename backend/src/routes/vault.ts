@@ -1,19 +1,21 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { vaultRepository } from "../repositories/vault.repository.ts";
-import { encrypt, decrypt } from "../lib/encryption.ts";
 import {
+    connectVault,
+    saveConnection,
     testConnection,
     getCredential,
+    disconnectVault,
 } from "../services/bitwarden.service.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
 import { logger } from "../lib/logger.ts";
 
 const connectSchema = z.object({
     provider: z.literal("bitwarden"),
-    clientId: z.string().min(1, "Client ID is required"),
-    clientSecret: z.string().min(1, "Client Secret is required"),
+    email: z.string().email("A valid email address is required"),
     masterPassword: z.string().min(1, "Master Password is required"),
+    verificationCode: z.string().optional(),
 });
 
 const getCredentialSchema = z.object({
@@ -42,43 +44,57 @@ export async function vaultRoutes(fastify: FastifyInstance) {
         }
     });
 
-    // POST /vault/connect — Save and test Bitwarden credentials
+    // POST /vault/connect
     fastify.post("/vault/connect", async (request, reply) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const body = connectSchema.parse(request.body);
 
-        // Test the credentials first
-        logger.info({ workspaceId }, "Testing Bitwarden connection");
-        const testResult = await testConnection(
-            body.clientId,
-            body.clientSecret,
-            body.masterPassword
+        logger.info(
+            { workspaceId, email: body.email },
+            "Connecting Bitwarden vault via CLI"
         );
 
-        if (!testResult.success) {
-            throw new AppError(
-                `Bitwarden connection failed: ${testResult.error}`,
-                400,
-                "VAULT_CONNECTION_FAILED"
+        let result;
+        try {
+            result = await connectVault(
+                body.email,
+                body.masterPassword,
+                workspaceId,
+                body.verificationCode
             );
+        } catch (error: unknown) {
+            const message =
+                error instanceof Error
+                    ? error.message
+                    : "Bitwarden connection failed";
+            const errorCode = (error as any)?.code || "VAULT_CONNECTION_FAILED";
+
+            await vaultRepository.logAudit({
+                workspaceId,
+                action: "connect",
+                success: false,
+                errorMessage: message,
+            });
+            throw new AppError(message, 400, errorCode);
         }
 
-        // Delete any existing vault connection for this workspace
-        await vaultRepository.deleteByWorkspace(workspaceId);
-
-        // Encrypt and store credentials
-        const connection = await vaultRepository.create({
+        // Store session key in DB
+        const connection = await saveConnection(
             workspaceId,
-            provider: body.provider,
-            encryptedClientId: encrypt(body.clientId),
-            encryptedClientSecret: encrypt(body.clientSecret),
-            encryptedMasterPassword: encrypt(body.masterPassword),
-            status: "active",
+            result.sessionKey,
+            result.email
+        );
+
+        await vaultRepository.logAudit({
+            workspaceId,
+            connectionId: connection.id,
+            action: "connect",
+            success: true,
         });
 
         logger.info(
             { workspaceId, connectionId: connection.id },
-            "Bitwarden vault connected successfully"
+            "Bitwarden vault connected via CLI"
         );
 
         return reply.status(201).send({
@@ -86,19 +102,25 @@ export async function vaultRoutes(fastify: FastifyInstance) {
                 id: connection.id,
                 provider: connection.provider,
                 status: connection.status,
+                email: connection.email,
                 createdAt: connection.createdAt,
             },
         });
     });
 
-    // GET /vault/status — Get vault connection status
+    // GET /vault/status
     fastify.get("/vault/status", async (request) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const connection = await vaultRepository.findByWorkspace(workspaceId);
 
         if (!connection) {
             return {
-                data: { connected: false, provider: null, status: null },
+                data: {
+                    connected: false,
+                    provider: null,
+                    status: null,
+                    email: null,
+                },
             };
         }
 
@@ -108,12 +130,14 @@ export async function vaultRoutes(fastify: FastifyInstance) {
                 id: connection.id,
                 provider: connection.provider,
                 status: connection.status,
+                email: connection.email,
+                tokenExpiresAt: connection.tokenExpiresAt,
                 createdAt: connection.createdAt,
             },
         };
     });
 
-    // POST /vault/test — Test existing vault connection
+    // POST /vault/test
     fastify.post("/vault/test", async (request) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const connection = await vaultRepository.findByWorkspace(workspaceId);
@@ -126,57 +150,24 @@ export async function vaultRoutes(fastify: FastifyInstance) {
             );
         }
 
-        const clientId = decrypt(connection.encryptedClientId);
-        const clientSecret = decrypt(connection.encryptedClientSecret);
-        const masterPassword = decrypt(connection.encryptedMasterPassword);
-
-        const testResult = await testConnection(
-            clientId,
-            clientSecret,
-            masterPassword
-        );
-
-        if (!testResult.success) {
-            await vaultRepository.updateStatus(connection.id, "failed");
-            return { data: { success: false, error: testResult.error } };
-        }
-
-        await vaultRepository.updateStatus(connection.id, "active");
-        return { data: { success: true } };
+        const result = await testConnection(workspaceId);
+        return { data: result };
     });
 
-    // DELETE /vault/disconnect — Remove vault connection
+    // DELETE /vault/disconnect
     fastify.delete("/vault/disconnect", async (request, reply) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
-        await vaultRepository.deleteByWorkspace(workspaceId);
+        await disconnectVault(workspaceId);
         logger.info({ workspaceId }, "Vault connection removed");
         return reply.status(204).send();
     });
 
-    // POST /vault/get-credential — Fetch credential by item name
+    // POST /vault/get-credential
     fastify.post("/vault/get-credential", async (request) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const body = getCredentialSchema.parse(request.body);
-        const connection = await vaultRepository.findByWorkspace(workspaceId);
 
-        if (!connection || connection.status !== "active") {
-            throw new AppError(
-                "No active vault connection found",
-                404,
-                "VAULT_NOT_FOUND"
-            );
-        }
-
-        const clientId = decrypt(connection.encryptedClientId);
-        const clientSecret = decrypt(connection.encryptedClientSecret);
-        const masterPassword = decrypt(connection.encryptedMasterPassword);
-
-        const credential = await getCredential(
-            clientId,
-            clientSecret,
-            masterPassword,
-            body.itemName
-        );
+        const credential = await getCredential(workspaceId, body.itemName);
 
         if (!credential) {
             return {

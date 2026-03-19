@@ -1,7 +1,6 @@
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import { vaultRepository } from "../repositories/vault.repository.ts";
-import { decrypt } from "../lib/encryption.ts";
 import { getCredential } from "../services/bitwarden.service.ts";
 import { logger } from "../lib/logger.ts";
 
@@ -35,18 +34,8 @@ export async function buildVaultTools(
             }),
             func: async ({ itemName }) => {
                 try {
-                    const clientId = decrypt(connection.encryptedClientId);
-                    const clientSecret = decrypt(
-                        connection.encryptedClientSecret
-                    );
-                    const masterPassword = decrypt(
-                        connection.encryptedMasterPassword
-                    );
-
                     const credential = await getCredential(
-                        clientId,
-                        clientSecret,
-                        masterPassword,
+                        workspaceId,
                         itemName
                     );
 

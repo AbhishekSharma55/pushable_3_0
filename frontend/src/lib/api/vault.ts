@@ -5,14 +5,16 @@ export interface VaultStatus {
     id?: string;
     provider?: string;
     status?: 'active' | 'inactive' | 'failed';
+    email?: string;
+    tokenExpiresAt?: string;
     createdAt?: string;
 }
 
 export interface VaultConnectPayload {
     provider: 'bitwarden';
-    clientId: string;
-    clientSecret: string;
+    email: string;
     masterPassword: string;
+    verificationCode?: string;
 }
 
 export const getVaultStatus = (workspaceId: string): Promise<VaultStatus> =>
@@ -25,7 +27,7 @@ export const getVaultStatus = (workspaceId: string): Promise<VaultStatus> =>
 export const connectVault = (
     workspaceId: string,
     payload: VaultConnectPayload
-): Promise<{ id: string; provider: string; status: string }> =>
+): Promise<{ id: string; provider: string; status: string; email: string }> =>
     apiClient
         .post('/api/vault/connect', payload, {
             headers: { 'x-workspace-id': workspaceId },
@@ -47,4 +49,3 @@ export const disconnectVault = (workspaceId: string) =>
     apiClient.delete('/api/vault/disconnect', {
         headers: { 'x-workspace-id': workspaceId },
     });
-

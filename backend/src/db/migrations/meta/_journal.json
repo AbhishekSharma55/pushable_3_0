@@ -8,6 +8,13 @@
       "when": 1773811308492,
       "tag": "0000_medical_havok",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1773905957154,
+      "tag": "0001_open_scarlet_witch",
+      "breakpoints": true
     }
   ]
 }

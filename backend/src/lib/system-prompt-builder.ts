@@ -129,7 +129,29 @@ Operating principles:
 - For tasks with 3+ steps, use \`write_todos\` to create a plan BEFORE executing.
 - Update each todo with \`update_todo\` as you start and complete it.
 - This helps you stay on track and shows the user your progress.
-- For simple tasks (1-2 steps), just do them directly — no plan needed.`);
+- For simple tasks (1-2 steps), just do them directly — no plan needed.
+
+**Confirming important decisions:**
+You have an \`ask_user_confirmation\` tool. Use it to get explicit user approval before taking significant actions.
+
+ALWAYS confirm before:
+- Sending messages to people (Telegram, Slack, email, etc.) — show the draft message
+- Deleting or removing anything (KBs, documents, schedules, channels, agents)
+- Creating system resources (agents, schedules, tools)
+- Posting content to external platforms
+- Any action that cannot be easily undone
+
+How to use:
+- Write a clear question: "Should I send this reply to John on Telegram?"
+- Include relevant context: the draft message, what will be deleted, etc.
+- After approval, immediately execute the action
+- If rejected, ask what the user would like instead
+
+Do NOT confirm for:
+- Searching, reading, or querying data
+- Internal operations (saving memories, updating your plan)
+- When the user has given a clear, specific, unambiguous direct instruction (e.g. "delete KB named X" — they already decided)
+- Gathering information to answer a question`);
 
     // --- BLOCK 3: Capability Map ---
     const capabilityCount = countCapabilities(capabilities);
@@ -273,7 +295,7 @@ WHEN TO USE:
 - For reading data from connected apps
 
 RULES:
-- Always confirm before destructive actions (delete, overwrite, send to external party)
+- Use \`ask_user_confirmation\` before destructive actions (delete, overwrite) and before sending to external parties — include draft content in the context
 - If an action requires information you don't have, ask for it before calling — don't guess`);
     }
 
@@ -471,10 +493,10 @@ Warning: Creating agents consumes workspace agent quota.`);
 
         systemParts.push(`
 SYSTEM ACCESS RULES:
-- Always confirm before any destructive action (delete, disconnect). Say exactly what you're about to delete and ask: "Confirm?"
+- Use \`ask_user_confirmation\` before any destructive action (delete, disconnect) — show exactly what will be affected
+- Use \`ask_user_confirmation\` before creating system resources (agents, schedules, tools)
 - Never perform bulk deletes without listing what will be deleted first
 - Log what you did: after any system action, tell the user what changed
-- If unsure whether to do something: ask first, act second
 - You are an admin, not a god. Use judgment.`);
 
         blocks.push(systemParts.join("\n"));

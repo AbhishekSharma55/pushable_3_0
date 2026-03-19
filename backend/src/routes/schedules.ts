@@ -26,6 +26,12 @@ const updateScheduleSchema = z.object({
     prompt: z.string().min(1).optional(),
     cron: z.string().min(1).optional(),
     enabled: z.boolean().optional(),
+    humanizeDelay: z.number().int().min(0).max(30).optional(),
+    businessHoursOnly: z.boolean().optional(),
+    workStartHour: z.number().int().min(0).max(23).optional(),
+    workEndHour: z.number().int().min(0).max(23).optional(),
+    workDays: z.array(z.number().int().min(0).max(6)).optional(),
+    timezone: z.string().optional(),
 });
 
 const previewSchema = z.object({
@@ -94,5 +100,27 @@ export async function scheduleRoutes(fastify: FastifyInstance) {
         const { id } = request.params as { id: string };
         await scheduleService.deleteSchedule(id, workspaceId);
         return reply.status(204).send();
+    });
+
+    // GET /schedules/:id/runs — paginated execution history
+    fastify.get("/schedules/:id/runs", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { id } = request.params as { id: string };
+        const { limit = "50", offset = "0" } = request.query as { limit?: string; offset?: string };
+        const runs = await scheduleService.getScheduleRuns(
+            id,
+            workspaceId,
+            Math.min(parseInt(limit, 10) || 50, 100),
+            parseInt(offset, 10) || 0
+        );
+        return { data: runs };
+    });
+
+    // GET /schedules/:id/stats — aggregate stats
+    fastify.get("/schedules/:id/stats", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { id } = request.params as { id: string };
+        const stats = await scheduleService.getScheduleStats(id, workspaceId);
+        return { data: stats };
     });
 }

@@ -1,4 +1,5 @@
 import { scheduleRepository } from "../repositories/schedule.repository.ts";
+import { scheduleRunRepository } from "../repositories/schedule-run.repository.ts";
 import { NotFoundError, AppError } from "../lib/errors.ts";
 import {
     registerJob,
@@ -146,6 +147,12 @@ export const scheduleService = {
             prompt: string;
             cron: string;
             enabled: boolean;
+            humanizeDelay: number;
+            businessHoursOnly: boolean;
+            workStartHour: number;
+            workEndHour: number;
+            workDays: number[];
+            timezone: string;
         }>
     ) {
         const schedule = await scheduleRepository.findById(id, workspaceId);
@@ -153,10 +160,18 @@ export const scheduleService = {
 
         if (data.cron) validateCron(data.cron);
 
+        // Regenerate nextRunDescription when cron or timezone changes
+        const updatePayload: typeof data & { nextRunDescription?: string } = { ...data };
+        if (data.cron || data.timezone) {
+            const cron = data.cron || schedule.cron;
+            const timezone = data.timezone || schedule.timezone;
+            updatePayload.nextRunDescription = getNextRunDescription(cron, timezone);
+        }
+
         const updated = await scheduleRepository.update(
             id,
             workspaceId,
-            data
+            updatePayload
         );
         if (!updated) throw new NotFoundError("Schedule not found");
 
@@ -178,6 +193,18 @@ export const scheduleService = {
         if (!schedule) throw new NotFoundError("Schedule not found");
         await removeJob(id);
         await scheduleRepository.delete(id, workspaceId);
+    },
+
+    async getScheduleRuns(scheduleId: string, workspaceId: string, limit: number, offset: number) {
+        const schedule = await scheduleRepository.findById(scheduleId, workspaceId);
+        if (!schedule) throw new NotFoundError("Schedule not found");
+        return scheduleRunRepository.findBySchedule(scheduleId, workspaceId, limit, offset);
+    },
+
+    async getScheduleStats(scheduleId: string, workspaceId: string) {
+        const schedule = await scheduleRepository.findById(scheduleId, workspaceId);
+        if (!schedule) throw new NotFoundError("Schedule not found");
+        return scheduleRunRepository.getStats(scheduleId, workspaceId);
     },
 
     async previewSchedule(naturalLanguage: string, timezone: string) {

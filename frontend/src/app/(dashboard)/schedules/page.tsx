@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import Link from 'next/link';
 import {
     Clock,
     Plus,
@@ -190,7 +191,7 @@ export default function SchedulesPage() {
                                     <div className="flex items-start justify-between gap-4">
                                         <div className="flex-1 min-w-0 space-y-2">
                                             <div className="flex items-center gap-2">
-                                                <h3 className="text-sm font-semibold truncate">{schedule.name}</h3>
+                                                <Link href={`/schedules/${schedule.id}`} className="text-sm font-semibold truncate hover:underline">{schedule.name}</Link>
                                                 {schedule.presetKey && (
                                                     <Badge variant="outline" className="text-[10px] px-1.5 py-0 bg-amber-500/10 text-amber-600 border-amber-500/20">
                                                         preset

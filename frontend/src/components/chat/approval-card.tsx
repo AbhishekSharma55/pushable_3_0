@@ -1,16 +1,30 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { ShieldAlert, Check, X } from 'lucide-react';
+import { CircleHelp, Check, X, ShieldAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
-interface ApprovalRequest {
+// New format: agent asks a decision question
+interface ConfirmationRequest {
+    type: 'confirmation';
+    question: string;
+    context?: string;
+}
+
+// Legacy format: tool-level approval (backward compat for in-flight runs)
+interface LegacyApprovalRequest {
     toolCalls: Array<{
         id: string;
         name: string;
         args: Record<string, unknown>;
     }>;
+}
+
+export type ApprovalRequest = ConfirmationRequest | LegacyApprovalRequest;
+
+function isConfirmationRequest(req: ApprovalRequest): req is ConfirmationRequest {
+    return 'type' in req && req.type === 'confirmation';
 }
 
 interface ApprovalCardProps {
@@ -35,6 +49,56 @@ function formatToolName(name: string): string {
 }
 
 export function ApprovalCard({ request, onApprove, onReject, disabled }: ApprovalCardProps) {
+    if (isConfirmationRequest(request)) {
+        return (
+            <motion.div
+                initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                transition={{ duration: 0.3, ease: 'easeOut' }}
+                className="rounded-xl border-2 border-primary/20 bg-card overflow-hidden"
+            >
+                <div className="bg-primary/5 px-4 py-2.5 flex items-center gap-2 border-b border-primary/10">
+                    <CircleHelp className="h-4 w-4 text-primary" />
+                    <span className="text-sm font-medium">Confirmation Needed</span>
+                </div>
+                <div className="p-4 space-y-3">
+                    <p className="text-sm text-foreground leading-relaxed">
+                        {request.question}
+                    </p>
+                    {request.context && (
+                        <div className="rounded-lg bg-muted/50 border border-border px-3 py-2">
+                            <p className="text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed">
+                                {request.context}
+                            </p>
+                        </div>
+                    )}
+                    <div className="flex items-center gap-2 pt-2 border-t border-border">
+                        <Button
+                            size="sm"
+                            className="gap-1.5 text-xs h-8"
+                            disabled={disabled}
+                            onClick={onApprove}
+                        >
+                            <Check className="h-3.5 w-3.5" />
+                            Approve
+                        </Button>
+                        <Button
+                            size="sm"
+                            variant="outline"
+                            className="gap-1.5 text-xs h-8 text-destructive hover:text-destructive"
+                            disabled={disabled}
+                            onClick={onReject}
+                        >
+                            <X className="h-3.5 w-3.5" />
+                            Reject
+                        </Button>
+                    </div>
+                </div>
+            </motion.div>
+        );
+    }
+
+    // Legacy format: tool-level approval (backward compat)
     return (
         <motion.div
             initial={{ opacity: 0, y: 8, scale: 0.98 }}

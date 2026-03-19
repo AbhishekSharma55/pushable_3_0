@@ -76,13 +76,10 @@ interface ToolCallEvent {
     result?: string;
 }
 
-interface ApprovalRequest {
-    toolCalls: Array<{
-        id: string;
-        name: string;
-        args: Record<string, unknown>;
-    }>;
-}
+// Confirmation format (new — agent asks a question) or legacy tool-calls format
+type ApprovalRequest =
+    | { type: 'confirmation'; question: string; context?: string }
+    | { toolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> };
 
 // Ordered sequence of content and tool call events for interleaved rendering
 type ChatSegment =
@@ -447,13 +444,14 @@ export default function AgentsPage() {
                         setPendingApproval({ msgId: assistantMsgId, request });
                         setMessages((prev) => prev.map((m) => {
                             if (m.id !== assistantMsgId) return m;
-                            return {
-                                ...m, isStreaming: false, approvalRequest: request,
-                                toolCalls: (m.toolCalls || []).map((tc) => {
+                            // For legacy tool-calls format, mark matching tools as pending
+                            const updatedToolCalls = 'toolCalls' in request
+                                ? (m.toolCalls || []).map((tc) => {
                                     const needs = request.toolCalls.some((a) => a.name === tc.name || a.id === tc.id);
                                     return needs ? { ...tc, status: 'pending_approval' as const } : tc;
-                                }),
-                            };
+                                })
+                                : m.toolCalls;
+                            return { ...m, isStreaming: false, approvalRequest: request, toolCalls: updatedToolCalls };
                         }));
                     }
                     if (parsed.error) toast.error(parsed.error);
@@ -891,8 +889,8 @@ export default function AgentsPage() {
                                                                     {msg.approvalRequest && pendingApproval?.msgId === msg.id && (
                                                                         <ApprovalCard
                                                                             request={msg.approvalRequest}
-                                                                            onApprove={() => handleApproval(msg.approvalRequest!.toolCalls.map(() => ({ type: 'approve' as const })))}
-                                                                            onReject={() => handleApproval(msg.approvalRequest!.toolCalls.map(() => ({ type: 'reject' as const })))}
+                                                                            onApprove={() => handleApproval([{ type: 'approve' as const }])}
+                                                                            onReject={() => handleApproval([{ type: 'reject' as const }])}
                                                                             disabled={sending}
                                                                         />
                                                                     )}
@@ -906,8 +904,8 @@ export default function AgentsPage() {
                                                                     {msg.approvalRequest && pendingApproval?.msgId === msg.id && (
                                                                         <ApprovalCard
                                                                             request={msg.approvalRequest}
-                                                                            onApprove={() => handleApproval(msg.approvalRequest!.toolCalls.map(() => ({ type: 'approve' as const })))}
-                                                                            onReject={() => handleApproval(msg.approvalRequest!.toolCalls.map(() => ({ type: 'reject' as const })))}
+                                                                            onApprove={() => handleApproval([{ type: 'approve' as const }])}
+                                                                            onReject={() => handleApproval([{ type: 'reject' as const }])}
                                                                             disabled={sending}
                                                                         />
                                                                     )}

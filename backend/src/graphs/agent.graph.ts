@@ -178,7 +178,6 @@ export async function createAgentGraph(
 
     const langchainTools: DynamicStructuredTool[] = [];
     const mcpClients: MultiServerMCPClient[] = [];
-    const approvalRequired = new Set<string>();
 
     const toolCapabilities: ToolCapability[] = [];
     const mcpServerCapabilities: MCPServerCapability[] = [];
@@ -261,9 +260,6 @@ export async function createAgentGraph(
                 });
 
                 langchainTools.push(functionTool);
-                if (tool.requiresApproval) {
-                    approvalRequired.add(functionTool.name);
-                }
                 toolCapabilities.push({
                     name: tool.name,
                     description: tool.description,
@@ -486,12 +482,6 @@ export async function createAgentGraph(
             permissions: systemPermissions,
         });
         langchainTools.push(...systemTools);
-        // All system tools that mutate state require approval
-        for (const st of systemTools) {
-            if (/^system_(delete|create|update|cancel)/.test(st.name)) {
-                approvalRequired.add(st.name);
-            }
-        }
     }
 
     // --- 8. Memory tools (when user context is available) ---
@@ -508,6 +498,33 @@ export async function createAgentGraph(
         (todos) => { currentTodos = todos; }
     );
     langchainTools.push(...planningTools);
+
+    // --- 8c. Decision confirmation tool (human-in-the-loop for decisions) ---
+    const askUserConfirmationTool = new DynamicStructuredTool({
+        name: "ask_user_confirmation",
+        description:
+            "Ask the user to confirm before taking a significant action. " +
+            "Use this before sending messages, deleting resources, creating system resources, " +
+            "or making any irreversible change. Present a clear, human-readable question.",
+        schema: z.object({
+            question: z
+                .string()
+                .describe(
+                    "A clear question for the user. E.g. 'Should I send this message to John on Telegram?'"
+                ),
+            context: z
+                .string()
+                .optional()
+                .describe(
+                    "Additional context to show the user — draft content, what will be deleted, etc."
+                ),
+        }),
+        func: async () => {
+            // Execution is handled by the tool node via interrupt — this is never called directly
+            return "Confirmation processed.";
+        },
+    });
+    langchainTools.push(askUserConfirmationTool);
 
     // --- 9. Channel awareness + send message tool ---
     const channelInfos: ChannelInfo[] = [];
@@ -671,7 +688,6 @@ export async function createAgentGraph(
             });
 
             langchainTools.push(sendChannelMessageTool);
-            approvalRequired.add("send_channel_message");
         }
     } catch (error) {
         logger.warn(
@@ -985,67 +1001,41 @@ You can remember important information about users across conversations using th
         toolsByName.set(tool.name, tool);
     }
 
-    // If agent has requireApprovalForAll, every tool needs approval
-    // (except save_memory and internal planning tools)
-    const internalTools = new Set(["save_memory", "write_todos", "update_todo", "get_todos", "browser_agent"]);
-    const effectiveApproval = new Set(approvalRequired);
-    if (agent.requireApprovalForAll) {
-        for (const tool of langchainTools) {
-            if (!internalTools.has(tool.name)) {
-                effectiveApproval.add(tool.name);
-            }
-        }
-    }
-
     const humanReviewToolNode = async (state: typeof AgentState.State) => {
         // Sync planning state so tools can read/write it
         currentTodos = state.todos || [];
         const lastMessage = state.messages[state.messages.length - 1] as AIMessage;
         const toolCalls = lastMessage.tool_calls ?? [];
 
-        // Determine which tool calls need approval
-        const needsApproval = toolCalls.filter(
-            (tc) => effectiveApproval.has(tc.name)
-        );
-
-        // If any need approval, interrupt with all pending approvals bundled
-        let decisions: Record<string, { type: string; args?: Record<string, unknown>; message?: string }> = {};
-
-        if (needsApproval.length > 0) {
-            const response = interrupt({
-                toolCalls: needsApproval.map((tc) => ({
-                    id: tc.id,
-                    name: tc.name,
-                    args: tc.args,
-                })),
-            }) as { decisions: Array<{ type: string; args?: Record<string, unknown>; message?: string }> };
-
-            // Map decisions by tool call id
-            needsApproval.forEach((tc, i) => {
-                decisions[tc.id!] = response.decisions[i] || { type: "approve" };
-            });
-        }
-
-        // Execute all tool calls
         const results: ToolMessage[] = [];
         for (const tc of toolCalls) {
-            const decision = decisions[tc.id!];
+            // Decision confirmation — interrupt for user approval
+            if (tc.name === "ask_user_confirmation") {
+                const response = interrupt({
+                    type: "confirmation",
+                    question: tc.args.question as string,
+                    context: tc.args.context as string | undefined,
+                }) as { decisions: Array<{ type: string; message?: string }> };
 
-            // Handle rejection
-            if (decision && decision.type === "reject") {
-                results.push(new ToolMessage({
-                    content: `Action rejected by user${decision.message ? `: ${decision.message}` : ""}`,
-                    tool_call_id: tc.id!,
-                    name: tc.name,
-                }));
+                const decision = response.decisions?.[0] || { type: "approve" };
+
+                if (decision.type === "reject") {
+                    results.push(new ToolMessage({
+                        content: `User rejected this action.${decision.message ? ` Reason: ${decision.message}` : ""} Do not proceed with the proposed action.`,
+                        tool_call_id: tc.id!,
+                        name: tc.name,
+                    }));
+                } else {
+                    results.push(new ToolMessage({
+                        content: `User approved.${decision.message ? ` Note: ${decision.message}` : ""} Proceed with the action.`,
+                        tool_call_id: tc.id!,
+                        name: tc.name,
+                    }));
+                }
                 continue;
             }
 
-            // Use edited args if provided
-            const args = decision?.type === "edit" && decision.args
-                ? decision.args
-                : tc.args;
-
+            // All other tools execute directly — no permission gates
             const tool = toolsByName.get(tc.name);
             if (!tool) {
                 results.push(new ToolMessage({
@@ -1057,7 +1047,7 @@ You can remember important information about users across conversations using th
             }
 
             try {
-                const result = await tool.invoke(args);
+                const result = await tool.invoke(tc.args);
                 results.push(new ToolMessage({
                     content: typeof result === "string" ? result : JSON.stringify(result),
                     tool_call_id: tc.id!,

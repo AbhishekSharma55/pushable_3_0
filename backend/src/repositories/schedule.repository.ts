@@ -63,6 +63,12 @@ export const scheduleRepository = {
             cron: string;
             enabled: boolean;
             nextRunDescription: string;
+            humanizeDelay: number;
+            businessHoursOnly: boolean;
+            workStartHour: number;
+            workEndHour: number;
+            workDays: number[];
+            timezone: string;
         }>
     ) {
         const result = await db

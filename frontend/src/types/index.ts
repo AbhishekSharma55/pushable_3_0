@@ -197,6 +197,27 @@ export interface SchedulePreset {
     icon: string;
 }
 
+export interface ScheduleRun {
+    id: string;
+    scheduleId: string;
+    workspaceId: string;
+    status: 'running' | 'completed' | 'failed' | 'skipped';
+    resultText: string | null;
+    error: string | null;
+    creditsUsed: number;
+    durationMs: number | null;
+    startedAt: string;
+    completedAt: string | null;
+}
+
+export interface ScheduleStats {
+    totalRuns: number;
+    totalCredits: number;
+    successCount: number;
+    failCount: number;
+    avgDurationMs: number;
+}
+
 export interface ChannelConnection {
     id: string;
     workspaceId: string;

@@ -15,30 +15,31 @@ BEGIN
        AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='schedules' AND column_name='agent_id') THEN
         ALTER TABLE "schedules" ADD COLUMN "agent_id" uuid;
         UPDATE "schedules" SET "agent_id" = "target_id";
-        ALTER TABLE "schedules" ALTER COLUMN "agent_id" SET NOT NULL;
-        -- Add foreign key
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'schedules_agent_id_agents_id_fk') THEN
-            ALTER TABLE "schedules" ADD CONSTRAINT "schedules_agent_id_agents_id_fk"
-                FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;
-        END IF;
     END IF;
 
-    -- If agent_id exists but is nullable, make it NOT NULL
+    -- If agent_id exists but is nullable, fill NULLs from target_id if available
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='schedules' AND column_name='agent_id' AND is_nullable='YES') THEN
-        -- Fill any NULLs from target_id if available
         IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='schedules' AND column_name='target_id') THEN
             UPDATE "schedules" SET "agent_id" = "target_id" WHERE "agent_id" IS NULL;
         END IF;
-        ALTER TABLE "schedules" ALTER COLUMN "agent_id" SET NOT NULL;
     END IF;
 END $$;
 
--- 3. Add prompt column if missing
+-- 3. Delete orphaned schedules that reference non-existent agents
+DELETE FROM "schedules" WHERE "agent_id" IS NOT NULL
+    AND "agent_id" NOT IN (SELECT "id" FROM "agents");
+-- Also delete any with NULL agent_id (can't satisfy NOT NULL constraint)
+DELETE FROM "schedules" WHERE "agent_id" IS NULL;
+
+-- 4. Now safe to set NOT NULL and add FK
+ALTER TABLE "schedules" ALTER COLUMN "agent_id" SET NOT NULL;
+
+-- 5. Add prompt column if missing
 ALTER TABLE "schedules" ADD COLUMN IF NOT EXISTS "prompt" text;
 UPDATE "schedules" SET "prompt" = "name" WHERE "prompt" IS NULL;
 ALTER TABLE "schedules" ALTER COLUMN "prompt" SET NOT NULL;
 
--- 4. Add FK constraint if missing
+-- 6. Add FK constraint if missing
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'schedules_agent_id_agents_id_fk') THEN

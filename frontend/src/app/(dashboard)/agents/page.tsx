@@ -468,6 +468,7 @@ export default function AgentsPage() {
             if (!response.ok || !response.body) throw new Error('Failed');
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
+            let lastApproveSegType: 'text' | 'tools' | null = null;
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -477,16 +478,51 @@ export default function AgentsPage() {
                     if (data === '[DONE]') { setMessages((prev) => prev.map((m) => m.id === msgId ? { ...m, isStreaming: false } : m)); continue; }
                     try {
                         const parsed = JSON.parse(data);
-                        if (parsed.content) setMessages((prev) => prev.map((m) => m.id === msgId ? { ...m, content: m.content + parsed.content } : m));
+                        if (parsed.content) {
+                            lastApproveSegType = 'text';
+                            setMessages((prev) => prev.map((m) => {
+                                if (m.id !== msgId) return m;
+                                const segs = [...(m.segments || [])];
+                                const lastSeg = segs[segs.length - 1];
+                                if (lastSeg && lastSeg.type === 'text') {
+                                    lastSeg.content += parsed.content;
+                                } else {
+                                    segs.push({ type: 'text', content: parsed.content });
+                                }
+                                return { ...m, content: m.content + parsed.content, segments: segs };
+                            }));
+                        }
                         if (parsed.toolCall) {
                             const tc = parsed.toolCall as ToolCallEvent;
                             setMessages((prev) => prev.map((m) => {
                                 if (m.id !== msgId) return m;
                                 const existing = m.toolCalls || [];
-                                const found = existing.find((et) => et.id === tc.id);
-                                if (found) return { ...m, toolCalls: existing.map((et) => et.id === tc.id ? { ...et, ...tc, fullArgs: et.fullArgs || tc.fullArgs } : et) };
-                                return { ...m, toolCalls: [...existing, tc] };
+                                const segs = [...(m.segments || [])];
+
+                                if (tc.status === 'running') {
+                                    // New tool call — add to toolCalls and segments
+                                    if (lastApproveSegType === 'tools' && segs.length > 0) {
+                                        const lastSeg = segs[segs.length - 1];
+                                        if (lastSeg.type === 'tools') {
+                                            lastSeg.toolCalls = [...lastSeg.toolCalls, tc];
+                                        }
+                                    } else {
+                                        segs.push({ type: 'tools', toolCalls: [tc] });
+                                    }
+                                    lastApproveSegType = 'tools';
+                                    return { ...m, toolCalls: [...existing, tc], segments: segs };
+                                }
+
+                                // Update existing tool call status
+                                const updatedToolCalls = existing.map((et) => et.id === tc.id ? { ...et, ...tc, fullArgs: et.fullArgs || tc.fullArgs } : et);
+                                for (const seg of segs) {
+                                    if (seg.type === 'tools') {
+                                        seg.toolCalls = seg.toolCalls.map((et) => et.id === tc.id ? { ...et, ...tc, fullArgs: et.fullArgs || tc.fullArgs } : et);
+                                    }
+                                }
+                                return { ...m, toolCalls: updatedToolCalls, segments: segs };
                             }));
+                            continue;
                         }
                         if (parsed.approvalRequest) {
                             const request = parsed.approvalRequest as ApprovalRequest;

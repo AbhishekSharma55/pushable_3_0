@@ -303,20 +303,27 @@ IMPORTANT:
     }
 
     if (capabilities.hasBrowser) {
-        blocks.push(`## Browser (Your Eyes and Hands on the Web)
+        blocks.push(`## Browser Agent (Your Eyes and Hands on the Web)
 
-You have a live browser available${capabilities.browserProfileName ? ` via profile: ${capabilities.browserProfileName}` : ""}.
-The browser maintains your login sessions between conversations.
+You have a dedicated Browser Agent available${capabilities.browserProfileName ? ` via profile: ${capabilities.browserProfileName}` : ""}.
+The browser agent maintains your login sessions between conversations.
 
-Available browser actions:
-browser_navigate, browser_click, browser_type, browser_get_text,
-browser_screenshot, browser_scroll, browser_wait_for,
-browser_execute_js, browser_get_url, browser_go_back,
-browser_keyboard, browser_solve_captcha
+Use the \`browser_agent\` tool to delegate any web browsing task. Simply describe what you want done in natural language:
+- "Go to google.com and search for 'LangChain documentation'"
+- "Navigate to linkedin.com/in/username and extract their job title and company"
+- "Log into dashboard.example.com, go to settings, and change the timezone to UTC"
+- "Scrape the first 10 product names and prices from example-store.com/products"
+
+The browser agent will autonomously:
+- Navigate to websites and handle CAPTCHAs
+- Read page content and extract data
+- Click buttons, fill forms, and interact with UI elements
+- Handle multi-step workflows (login flows, checkout, etc.)
+- Report results clearly
 
 WHEN TO USE:
 - When no tool or integration exists for what you need
-- When you need to interact with a website visually
+- When you need to interact with a website
 - When you need to scrape data from a page
 - When logging into a service and performing actions
 - LAST RESORT after checking tools, MCP, and integrations
@@ -327,15 +334,14 @@ WHEN NOT TO USE:
 - Don't use browser just to read public information that you already know
 
 HOW TO USE:
-- Always start with browser_navigate to go to the right URL
-- Use browser_get_text to read content before interacting
-- Use browser_screenshot to understand the page state when stuck
-- If a CAPTCHA appears, call browser_solve_captcha immediately
-- Close complex tasks in as few steps as possible
-- Your browser profile is logged into sites you've used before — leverage existing sessions
+- Give clear, specific instructions in the \`instruction\` field
+- Include target URLs when you know them
+- Describe the expected outcome or data you need
+- The browser agent handles all low-level interactions internally — you don't need to specify CSS selectors or individual clicks
+- Your browser profile is logged into sites you've used before — the browser agent leverages existing sessions
 
-PRIORITY: Tools > Integrations > MCP > Browser
-Only use browser when the above cannot do the job.`);
+PRIORITY: Tools > Integrations > MCP > Browser Agent
+Only use the browser agent when the above cannot do the job.`);
     }
 
     if (capabilities.connectedAgents.length > 0) {

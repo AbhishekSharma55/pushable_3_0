@@ -51,15 +51,27 @@ async function runMigrations() {
             await sql`INSERT INTO "_migrations" (name) VALUES (${file})`;
             count++;
             logger.info({ migration: file }, "Migration applied successfully");
-        } catch (error) {
-            // If the migration fails, log but don't crash — drizzle-kit push
-            // may have already applied these changes in dev/Docker environments
-            logger.warn({ migration: file, error }, "Migration failed (may already be applied by drizzle-kit push)");
-            // Mark as applied so we don't retry
-            try {
-                await sql`INSERT INTO "_migrations" (name) VALUES (${file}) ON CONFLICT DO NOTHING`;
-            } catch {
-                // ignore
+        } catch (error: any) {
+            // Check if this is a "already exists" or "does not exist" type error
+            // that indicates the migration was already partially applied
+            const pgCode = error?.cause?.code || error?.code || "";
+            const isAlreadyApplied = [
+                "42P07", // relation already exists
+                "42710", // type already exists
+                "42701", // column already exists
+            ].includes(pgCode);
+
+            if (isAlreadyApplied) {
+                logger.info({ migration: file, code: pgCode }, "Migration already applied (detected from DB state), marking as done");
+                try {
+                    await sql`INSERT INTO "_migrations" (name) VALUES (${file}) ON CONFLICT DO NOTHING`;
+                } catch {
+                    // ignore
+                }
+            } else {
+                // Real failure — do NOT mark as applied so it retries next deploy
+                logger.error({ migration: file, error }, "Migration failed — will retry on next startup");
+                throw error;
             }
         }
     }

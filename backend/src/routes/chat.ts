@@ -7,6 +7,7 @@ import { messageRepository } from "../repositories/message.repository.ts";
 import { createAgentGraph } from "../graphs/agent.graph.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
 import { logger } from "../lib/logger.ts";
+import type { BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
 
 const chatBodySchema = z.object({
     message: z.string().min(1, "Message is required"),
@@ -42,6 +43,133 @@ interface StreamResult {
     content: string;
     toolCalls: StreamToolCall[];
     segments: StreamSegment[];
+}
+
+/**
+ * Create a browser event handler that emits SSE events for internal
+ * browser agent tool calls and tracks them for message saving.
+ */
+function createBrowserEventHandler(
+    reply: { raw: { write: (data: string) => boolean } },
+    browserToolCalls: StreamToolCall[],
+    browserSegments: StreamSegment[]
+): BrowserAgentEventEmitter {
+    return (event) => {
+        if (event.type === "tool_start" && event.toolCallId && event.toolName) {
+            const argsPreview = event.args
+                ? Object.entries(event.args)
+                      .map(
+                          ([k, v]) => `${k}: ${String(v).slice(0, 80)}`
+                      )
+                      .join(", ")
+                      .slice(0, 150)
+                : "";
+
+            const toolCallEvent: StreamToolCall = {
+                id: event.toolCallId,
+                name: event.toolName,
+                args: argsPreview,
+                fullArgs: event.args,
+                type: "tool",
+                status: "running",
+            };
+
+            browserToolCalls.push(toolCallEvent);
+
+            // Track in browser segments
+            const lastSeg = browserSegments[browserSegments.length - 1];
+            if (lastSeg && lastSeg.type === "tools") {
+                lastSeg.toolCalls!.push(toolCallEvent);
+            } else {
+                browserSegments.push({
+                    type: "tools",
+                    toolCalls: [toolCallEvent],
+                });
+            }
+
+            reply.raw.write(
+                `data: ${JSON.stringify({ toolCall: toolCallEvent })}\n\n`
+            );
+        } else if (
+            event.type === "tool_end" &&
+            event.toolCallId &&
+            event.toolName
+        ) {
+            const resultText = event.result?.slice(0, 300) || "";
+
+            // Update existing tracked tool call
+            const existing = browserToolCalls.find(
+                (t) => t.id === event.toolCallId
+            );
+            if (existing) {
+                existing.status = "done";
+                existing.result = resultText;
+            }
+
+            reply.raw.write(
+                `data: ${JSON.stringify({
+                    toolCall: {
+                        id: event.toolCallId,
+                        name: event.toolName,
+                        type: "tool",
+                        status: "done",
+                        result: resultText,
+                    },
+                })}\n\n`
+            );
+        } else if (event.type === "thinking" && event.content) {
+            // Emit intermediate browser agent reasoning as content
+            reply.raw.write(
+                `data: ${JSON.stringify({
+                    browserAgentThinking: event.content,
+                })}\n\n`
+            );
+        }
+    };
+}
+
+/**
+ * After streaming completes, merge browser agent internal tool calls
+ * into the main streamResult so they are saved in message metadata.
+ */
+function mergeBrowserEvents(
+    streamResult: StreamResult,
+    browserToolCalls: StreamToolCall[],
+    browserSegments: StreamSegment[]
+): void {
+    if (browserToolCalls.length === 0) return;
+
+    // Add internal tool calls to the overall list
+    streamResult.toolCalls.push(...browserToolCalls);
+
+    // Insert browser segments after the browser_agent tool segment
+    const browserAgentSegIdx = streamResult.segments.findIndex(
+        (s) =>
+            s.type === "tools" &&
+            s.toolCalls?.some((tc) => tc.name === "browser_agent")
+    );
+
+    if (browserAgentSegIdx >= 0) {
+        streamResult.segments.splice(
+            browserAgentSegIdx + 1,
+            0,
+            ...browserSegments
+        );
+    } else {
+        // Fallback: append browser segments before the last text segment
+        let lastTextIdx = -1;
+        for (let i = streamResult.segments.length - 1; i >= 0; i--) {
+            if (streamResult.segments[i].type === "text") {
+                lastTextIdx = i;
+                break;
+            }
+        }
+        if (lastTextIdx > 0) {
+            streamResult.segments.splice(lastTextIdx, 0, ...browserSegments);
+        } else {
+            streamResult.segments.push(...browserSegments);
+        }
+    }
 }
 
 /** Shared SSE streaming logic for both chat and approve endpoints */
@@ -263,10 +391,21 @@ export async function chatRoutes(fastify: FastifyInstance) {
 
         try {
             const user = request.user as { userId: string };
+
+            // Browser event tracking for real-time SSE + message saving
+            const browserToolCalls: StreamToolCall[] = [];
+            const browserSegments: StreamSegment[] = [];
+            const onBrowserEvent = createBrowserEventHandler(
+                reply,
+                browserToolCalls,
+                browserSegments
+            );
+
             const graph = await createAgentGraph(
                 session.agentId,
                 workspaceId,
-                user.userId
+                user.userId,
+                onBrowserEvent
             );
 
             logger.info({ sessionId }, "Starting graph stream");
@@ -282,6 +421,13 @@ export async function chatRoutes(fastify: FastifyInstance) {
             logger.info("Graph stream created, iterating...");
 
             const streamResult = await streamGraphToSSE(stream, reply);
+
+            // Merge browser agent internal events into streamResult
+            mergeBrowserEvents(
+                streamResult,
+                browserToolCalls,
+                browserSegments
+            );
 
             logger.info(
                 { contentLength: streamResult.content.length, toolCallCount: streamResult.toolCalls.length },
@@ -347,10 +493,21 @@ export async function chatRoutes(fastify: FastifyInstance) {
 
         try {
             const user = request.user as { userId: string };
+
+            // Browser event tracking for real-time SSE + message saving
+            const browserToolCalls: StreamToolCall[] = [];
+            const browserSegments: StreamSegment[] = [];
+            const onBrowserEvent = createBrowserEventHandler(
+                reply,
+                browserToolCalls,
+                browserSegments
+            );
+
             const graph = await createAgentGraph(
                 session.agentId,
                 workspaceId,
-                user.userId
+                user.userId,
+                onBrowserEvent
             );
 
             // Resume graph from the interrupt with the user's decisions
@@ -363,6 +520,13 @@ export async function chatRoutes(fastify: FastifyInstance) {
             );
 
             const streamResult = await streamGraphToSSE(stream, reply);
+
+            // Merge browser agent internal events into streamResult
+            mergeBrowserEvents(
+                streamResult,
+                browserToolCalls,
+                browserSegments
+            );
 
             // Check for further interrupts (tool chain may have multiple)
             const isInterrupted = await checkAndSendInterrupts(

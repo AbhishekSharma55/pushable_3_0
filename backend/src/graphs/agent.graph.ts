@@ -19,7 +19,7 @@ import { buildAgentCallerTool } from "../lib/agent-tool.ts";
 import { integrationRepository } from "../repositories/integration.repository.ts";
 import { getComposioClient } from "../lib/composio.ts";
 import { logger } from "../lib/logger.ts";
-import { buildBrowserTools } from "../tools/browser.tools.ts";
+import { buildBrowserAgentTool, type BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
 import { buildSystemTools } from "../tools/system.tools.ts";
 import { buildMemoryTools } from "../tools/memory.tools.ts";
 import { buildPlanningTools, type Todo } from "../tools/planning.tools.ts";
@@ -141,7 +141,8 @@ async function resolveModel(
 export async function createAgentGraph(
     agentId: string,
     workspaceId: string,
-    userId?: string
+    userId?: string,
+    onBrowserEvent?: BrowserAgentEventEmitter
 ) {
     const agent = await agentRepository.findById(agentId, workspaceId);
     if (!agent) throw new Error("Agent not found");
@@ -416,39 +417,25 @@ export async function createAgentGraph(
         }
     }
 
-    // --- 4. Browser tools (wrapped with credit deduction) ---
+    // --- 4. Browser Agent (internal autonomous agent for browser tasks) ---
     let hasBrowser = false;
     try {
-        const rawBrowserTools = await buildBrowserTools(agentId, workspaceId);
-        if (rawBrowserTools.length > 0) {
-            // Wrap each browser tool to deduct credits per action
-            for (const bt of rawBrowserTools) {
-                const wrappedTool = new DynamicStructuredTool({
-                    name: bt.name,
-                    description: bt.description,
-                    schema: bt.schema,
-                    func: async (params) => {
-                        const cost = calculateCreditCost({ action: "browser_action" });
-                        // Fire-and-forget credit deduction — don't block browser action
-                        deductCredits({
-                            workspaceId,
-                            amount: cost,
-                            type: "browser_action",
-                            metadata: { agentId, action: bt.name },
-                        }).catch((err) =>
-                            logger.warn({ err }, "Browser action credit deduction failed")
-                        );
-                        return bt.func(params);
-                    },
-                });
-                langchainTools.push(wrappedTool);
-            }
+        const browserAgentTool = await buildBrowserAgentTool(
+            agentId,
+            workspaceId,
+            modelId,
+            modelMultiplier,
+            agentTemperature,
+            onBrowserEvent
+        );
+        if (browserAgentTool) {
+            langchainTools.push(browserAgentTool);
             hasBrowser = true;
         }
     } catch (error) {
         logger.warn(
             { error, agentId },
-            "Failed to load browser tools, proceeding without them"
+            "Failed to load browser agent, proceeding without it"
         );
     }
 

@@ -155,6 +155,19 @@ class RunEventBus {
         }
     }
 
+    /**
+     * Clear old buffered events for a run that is being resumed.
+     * Prevents replaying stale approvalRequest events to new subscribers.
+     * The run stays active so new events can be emitted and streamed.
+     */
+    clearEventsForResume(runId: string): void {
+        const state = this.get(runId);
+        if (state) {
+            state.events = [];
+            state.status = "active";
+        }
+    }
+
     /** Check if a run is still active in the event bus. */
     isActive(runId: string): boolean {
         return this.get(runId)?.status === "active";

@@ -386,8 +386,26 @@ async function executeRun(
         // Check for HITL interrupts
         const isInterrupted = await checkAndEmitInterrupts(graph, sessionId, runId);
 
+        // Get interrupt payload for persistence (if interrupted)
+        let approvalRequest: unknown = undefined;
+        if (isInterrupted) {
+            try {
+                const graphState = await graph.getState({
+                    configurable: { thread_id: sessionId },
+                });
+                const pendingInterrupts = (
+                    graphState.tasks as Array<{
+                        interrupts?: Array<{ value?: unknown }>;
+                    }>
+                ).flatMap((t) => t.interrupts || []);
+                approvalRequest = pendingInterrupts[0]?.value;
+            } catch {
+                // Already emitted via checkAndEmitInterrupts
+            }
+        }
+
         // Save assistant message with metadata
-        if (streamResult.content || streamResult.toolCalls.length > 0) {
+        if (streamResult.content || streamResult.toolCalls.length > 0 || isInterrupted) {
             await messageRepository.create({
                 workspaceId,
                 sessionId,
@@ -397,6 +415,7 @@ async function executeRun(
                 metadata: {
                     toolCalls: streamResult.toolCalls,
                     segments: streamResult.segments,
+                    ...(approvalRequest ? { approvalRequest } : {}),
                 },
             });
         }
@@ -469,7 +488,25 @@ async function resumeRun(
         // Check for further interrupts
         const isInterrupted = await checkAndEmitInterrupts(graph, sessionId, runId);
 
-        if (streamResult.content || streamResult.toolCalls.length > 0) {
+        // Get interrupt payload for persistence (if interrupted again)
+        let approvalRequest: unknown = undefined;
+        if (isInterrupted) {
+            try {
+                const graphState = await graph.getState({
+                    configurable: { thread_id: sessionId },
+                });
+                const pendingInterrupts = (
+                    graphState.tasks as Array<{
+                        interrupts?: Array<{ value?: unknown }>;
+                    }>
+                ).flatMap((t) => t.interrupts || []);
+                approvalRequest = pendingInterrupts[0]?.value;
+            } catch {
+                // Already emitted via checkAndEmitInterrupts
+            }
+        }
+
+        if (streamResult.content || streamResult.toolCalls.length > 0 || isInterrupted) {
             await messageRepository.create({
                 workspaceId,
                 sessionId,
@@ -479,6 +516,7 @@ async function resumeRun(
                 metadata: {
                     toolCalls: streamResult.toolCalls,
                     segments: streamResult.segments,
+                    ...(approvalRequest ? { approvalRequest } : {}),
                 },
             });
         }
@@ -711,6 +749,10 @@ export async function chatRoutes(fastify: FastifyInstance) {
         // Update run status back to in_progress
         await runRepository.updateStatus(runId, "in_progress");
 
+        // Clear old buffered events (including the stale approvalRequest)
+        // so new SSE subscribers don't replay them
+        runEventBus.clearEventsForResume(runId);
+
         logger.info({ runId }, "Resuming interrupted run with user decisions");
 
         // Resume graph in background
@@ -726,5 +768,55 @@ export async function chatRoutes(fastify: FastifyInstance) {
         });
 
         return reply.send({ ok: true });
+    });
+
+    // ── GET /notifications/pending ────────────────────────────────────────────
+    // Returns all interrupted runs (pending approvals) for the workspace,
+    // enriched with session/agent info for the notification panel.
+    fastify.get("/notifications/pending", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const interruptedRuns = await runRepository.findInterruptedByWorkspace(workspaceId);
+
+        // Also fetch the last assistant message for each run to get the approval request details
+        const notifications = await Promise.all(
+            interruptedRuns.map(async (run) => {
+                let approvalRequest: unknown = null;
+                try {
+                    const msgs = await messageRepository.findBySession(
+                        run.sessionId,
+                        workspaceId
+                    );
+                    const lastAssistant = [...msgs]
+                        .reverse()
+                        .find(
+                            (m) =>
+                                m.role === "assistant" &&
+                                (m.metadata as Record<string, unknown>)
+                                    ?.approvalRequest
+                        );
+                    if (lastAssistant) {
+                        approvalRequest = (
+                            lastAssistant.metadata as Record<string, unknown>
+                        ).approvalRequest;
+                    }
+                } catch {
+                    // Skip if messages can't be loaded
+                }
+                return {
+                    id: run.id,
+                    type: "approval" as const,
+                    runId: run.id,
+                    sessionId: run.sessionId,
+                    agentId: run.agentId,
+                    agentName: run.agentName,
+                    sessionTitle: run.sessionTitle,
+                    approvalRequest,
+                    createdAt: run.createdAt,
+                    updatedAt: run.updatedAt,
+                };
+            })
+        );
+
+        return { data: notifications };
     });
 }

@@ -228,13 +228,14 @@ export default function AgentsPage() {
     useEffect(() => {
         if (!workspace || !activeSession) {
             setMessages([]);
+            setPendingApproval(null);
             return;
         }
-        const fetch = async () => {
+        const load = async () => {
             try {
                 setLoadingMessages(true);
                 const data = await getMessages(workspace.id, activeSession.id);
-                // Hydrate tool calls and segments from metadata
+                // Hydrate tool calls, segments, and approvalRequest from metadata
                 const hydrated: ChatMessage[] = data.map((msg: ChatMessage & { metadata?: Record<string, unknown> }) => {
                     const meta = msg.metadata as Record<string, unknown> | undefined;
                     if (meta && msg.role === 'assistant') {
@@ -242,18 +243,36 @@ export default function AgentsPage() {
                             ...msg,
                             toolCalls: (meta.toolCalls as ToolCallEvent[] | undefined) || undefined,
                             segments: (meta.segments as ChatSegment[] | undefined) || undefined,
+                            approvalRequest: (meta.approvalRequest as ApprovalRequest | undefined) || undefined,
                         };
                     }
                     return msg;
                 });
                 setMessages(hydrated);
+
+                // Check for active interrupted run (handles page refresh during HITL)
+                const token = getToken();
+                const runRes = await fetch(`${API_URL}/api/sessions/${activeSession.id}/active-run`, {
+                    headers: { Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
+                });
+                const runData = await runRes.json();
+                if (runData.data) {
+                    const runStatus = runData.data.status as string;
+                    if (runStatus === 'interrupted') {
+                        // Restore approval state: find the last assistant message with approvalRequest
+                        const approvalMsg = [...hydrated].reverse().find((m) => m.approvalRequest);
+                        if (approvalMsg?.approvalRequest) {
+                            setPendingApproval({ msgId: approvalMsg.id, request: approvalMsg.approvalRequest });
+                        }
+                    }
+                }
             } catch {
                 toast.error('Failed to load messages');
             } finally {
                 setLoadingMessages(false);
             }
         };
-        fetch();
+        load();
     }, [workspace, activeSession]);
 
     useEffect(() => { scrollToBottom(); }, [messages, scrollToBottom]);
@@ -560,6 +579,7 @@ export default function AgentsPage() {
                     if (parsed.approvalRequest) {
                         const request = parsed.approvalRequest as ApprovalRequest;
                         setPendingApproval({ msgId: assistantMsgId, request });
+                        setSending(false);
                         setMessages((prev) => prev.map((m) => {
                             if (m.id !== assistantMsgId) return m;
                             // For legacy tool-calls format, mark matching tools as pending
@@ -571,6 +591,9 @@ export default function AgentsPage() {
                                 : m.toolCalls;
                             return { ...m, isStreaming: false, approvalRequest: request, toolCalls: updatedToolCalls };
                         }));
+                        // Stop reading SSE — graph is paused, no more events until resume.
+                        // Returning lets the caller abort polling to prevent duplicates.
+                        return;
                     }
                     if (parsed.error) toast.error(parsed.error);
                 } catch { /* ignore */ }
@@ -605,6 +628,32 @@ export default function AgentsPage() {
                         return msg;
                     });
                     setMessages(hydrated);
+                    return;
+                }
+
+                // Detect interrupted runs (HITL approval needed)
+                const runStatus = runData.data.status as string;
+                if (runStatus === 'interrupted') {
+                    const msgsRes = await getMessages(workspace!.id, sessionId);
+                    const hydrated: ChatMessage[] = msgsRes.map((msg: ChatMessage & { metadata?: Record<string, unknown> }) => {
+                        const meta = msg.metadata as Record<string, unknown> | undefined;
+                        if (meta && msg.role === 'assistant') {
+                            return {
+                                ...msg,
+                                toolCalls: (meta.toolCalls as ToolCallEvent[] | undefined) || undefined,
+                                segments: (meta.segments as ChatSegment[] | undefined) || undefined,
+                                approvalRequest: (meta.approvalRequest as ApprovalRequest | undefined) || undefined,
+                            };
+                        }
+                        return msg;
+                    });
+                    setMessages(hydrated);
+                    // Find the last assistant message with an approval request
+                    const approvalMsg = [...hydrated].reverse().find((m) => m.approvalRequest);
+                    if (approvalMsg?.approvalRequest) {
+                        setPendingApproval({ msgId: approvalMsg.id, request: approvalMsg.approvalRequest });
+                        setSending(false);
+                    }
                     return;
                 }
             } catch {

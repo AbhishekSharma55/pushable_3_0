@@ -1,6 +1,8 @@
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, desc } from "drizzle-orm";
 import { db } from "../db/client.ts";
 import { runs } from "../db/schema/index.ts";
+import { sessions } from "../db/schema/index.ts";
+import { agents } from "../db/schema/index.ts";
 
 export const runRepository = {
     async create(data: {
@@ -43,6 +45,33 @@ export const runRepository = {
             )
             .limit(1);
         return result[0] ?? null;
+    },
+
+    async findInterruptedByWorkspace(workspaceId: string) {
+        const result = await db
+            .select({
+                id: runs.id,
+                sessionId: runs.sessionId,
+                workspaceId: runs.workspaceId,
+                status: runs.status,
+                metadata: runs.metadata,
+                createdAt: runs.createdAt,
+                updatedAt: runs.updatedAt,
+                sessionTitle: sessions.title,
+                agentId: sessions.agentId,
+                agentName: agents.name,
+            })
+            .from(runs)
+            .innerJoin(sessions, eq(runs.sessionId, sessions.id))
+            .innerJoin(agents, eq(sessions.agentId, agents.id))
+            .where(
+                and(
+                    eq(runs.workspaceId, workspaceId),
+                    eq(runs.status, "interrupted")
+                )
+            )
+            .orderBy(desc(runs.updatedAt));
+        return result;
     },
 
     async updateStatus(

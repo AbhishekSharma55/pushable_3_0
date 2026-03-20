@@ -30,17 +30,23 @@ services:
       context: ./backend
       dockerfile: Dockerfile.prod
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     ports:
       - "${BACKEND_PORT:-4000}:4000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-abhishek0003}@postgres:5432/${POSTGRES_DB:-pushable_ai}
       JWT_SECRET: ${JWT_SECRET:-pushable-ai-super-secret-jwt-key-32chars}
       PORT: "4000"
-      OPENROUTER_KEY: ${OPENROUTER_KEY:-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}
+      OPENROUTER_KEY: ${OPENROUTER_KEY}
       REDIS_URL: redis://redis:6379
-      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY:-ak_sYMIgmVF81jyVXtDGmWQ}
+      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       BROWSER_SERVICE_URL: http://browser-service:8080
+      GATEWAY: ${GATEWAY:-}
+      CLAUDE_ACCESS_TOKEN: ${CLAUDE_ACCESS_TOKEN:-}
+      CLAUDE_REFRESH_TOKEN: ${CLAUDE_REFRESH_TOKEN:-}
       NODE_ENV: production
     depends_on:
       postgres:

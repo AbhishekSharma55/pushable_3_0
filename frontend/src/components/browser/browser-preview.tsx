@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { X, Loader2, WifiOff, Monitor } from 'lucide-react';
+import { X, Loader2, WifiOff, Monitor, Mouse, Keyboard } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { useBrowserInteraction } from '@/hooks/use-browser-interaction';
 
 interface BrowserPreviewProps {
     wsUrl: string;
@@ -17,11 +18,20 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
     const prevUrlRef = useRef<string | null>(null);
     const reconnectCount = useRef(0);
     const reconnectTimer = useRef<NodeJS.Timeout | undefined>(undefined);
-    const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+    const canvasRef = useRef<HTMLDivElement>(null);
+
+    const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'server-restarted'>('connecting');
     const [frameCount, setFrameCount] = useState(0);
 
+    // ── Interactive browser control ──
+    const { isFocused, cursorPos, containerProps: interactionProps } = useBrowserInteraction({
+        wsRef,
+        imgRef,
+        containerRef: canvasRef,
+        enabled: status === 'connected',
+    });
+
     const connect = useCallback(() => {
-        // Close any existing connection first
         if (wsRef.current) {
             wsRef.current.onclose = null;
             wsRef.current.onerror = null;
@@ -50,12 +60,8 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
 
         ws.onmessage = (event) => {
             if (!mountedRef.current) return;
-
-            console.log('[BrowserPreview] frame received:', event.data instanceof ArrayBuffer ? `${event.data.byteLength} bytes` : typeof event.data);
-
             if (!(event.data instanceof ArrayBuffer)) return;
 
-            // Revoke previous object URL to prevent memory leak
             if (prevUrlRef.current) {
                 URL.revokeObjectURL(prevUrlRef.current);
             }
@@ -73,8 +79,19 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
 
         ws.onclose = (event) => {
             if (!mountedRef.current) return;
+
+            if (event.code === 1006) {
+                setStatus('server-restarted');
+                return;
+            }
+
+            if (event.code === 1000) {
+                setStatus('disconnected');
+                return;
+            }
+
             setStatus('disconnected');
-            if (event.code !== 1000 && reconnectCount.current < 5) {
+            if (reconnectCount.current < 3) {
                 reconnectTimer.current = setTimeout(() => {
                     if (!mountedRef.current) return;
                     reconnectCount.current++;
@@ -83,9 +100,7 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
             }
         };
 
-        ws.onerror = () => {
-            // onclose will fire after this
-        };
+        ws.onerror = () => {};
     }, [wsUrl]);
 
     useEffect(() => {
@@ -119,7 +134,7 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
             <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-muted/30">
                 <div className="flex items-center gap-2">
                     <Monitor className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-sm font-medium">Live Browser Preview (v2)</span>
+                    <span className="text-sm font-medium">Live Browser Preview</span>
                     {frameCount > 0 && (
                         <span className="text-[10px] text-muted-foreground ml-1">{frameCount}f</span>
                     )}
@@ -132,24 +147,66 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
                                   : 'bg-red-500'
                         }`}
                     />
+                    {isFocused && (
+                        <span className="text-[10px] text-emerald-600 flex items-center gap-1 ml-1">
+                            <Keyboard className="h-3 w-3" />
+                            Active
+                        </span>
+                    )}
                 </div>
                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onClose}>
                     <X className="h-4 w-4" />
                 </Button>
             </div>
 
-            {/* Preview area */}
-            <div className="relative bg-neutral-900 aspect-[16/10]">
+            {/* Interactive preview area */}
+            <div
+                ref={canvasRef}
+                {...interactionProps}
+                className="relative bg-neutral-900 aspect-[16/10]"
+                style={{ outline: 'none', cursor: isFocused ? 'none' : 'default' }}
+            >
                 <img
                     ref={imgRef}
                     alt="Browser preview"
-                    className="block w-full h-full object-contain"
+                    className="block w-full h-full object-contain select-none"
                     style={{ minHeight: '100%', minWidth: '100%' }}
                     draggable={false}
                 />
 
+                {/* Custom cursor indicator */}
+                {isFocused && cursorPos && (
+                    <div
+                        className="absolute pointer-events-none z-20"
+                        style={{ left: cursorPos.x, top: cursorPos.y, transform: 'translate(-50%, -50%)' }}
+                    >
+                        <div className="w-4 h-4 rounded-full border-2 border-white/90 shadow-[0_0_0_1px_rgba(0,0,0,0.3),0_0_4px_rgba(0,0,0,0.4)]" />
+                        <div className="absolute inset-0 flex items-center justify-center">
+                            <div className="w-1 h-1 rounded-full bg-white/90" />
+                        </div>
+                    </div>
+                )}
+
+                {/* Click to interact overlay */}
+                {!isFocused && status === 'connected' && (
+                    <div className="absolute inset-0 flex items-center justify-center z-10">
+                        <div className="bg-black/50 text-white text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 backdrop-blur-sm">
+                            <Mouse className="h-3.5 w-3.5" />
+                            Click to interact
+                        </div>
+                    </div>
+                )}
+
+                {/* Keyboard active indicator */}
+                {isFocused && (
+                    <div className="absolute bottom-2 right-2 bg-black/60 text-white text-[10px] px-2 py-1 rounded flex items-center gap-1 pointer-events-none z-20">
+                        <Keyboard className="h-3 w-3" />
+                        Keyboard active
+                    </div>
+                )}
+
                 {status === 'connecting' && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-background/80">
+                    <div className="absolute inset-0 flex items-center justify-center bg-background/80 z-30">
                         <div className="flex flex-col items-center gap-2">
                             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                             <span className="text-sm text-muted-foreground">Connecting to browser...</span>
@@ -157,14 +214,27 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
                     </div>
                 )}
 
-                {status === 'disconnected' && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-background/80">
+                {status === 'server-restarted' && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-background/80 z-30">
                         <div className="flex flex-col items-center gap-3">
                             <WifiOff className="h-6 w-6 text-muted-foreground" />
-                            <span className="text-sm text-muted-foreground">Connection lost</span>
-                            <Button variant="outline" size="sm" onClick={handleReconnect}>
-                                Reconnect
-                            </Button>
+                            <span className="text-sm font-medium">Browser service restarted. Please start a new session.</span>
+                        </div>
+                    </div>
+                )}
+
+                {status === 'disconnected' && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-background/80 z-30">
+                        <div className="flex flex-col items-center gap-3">
+                            <WifiOff className="h-6 w-6 text-muted-foreground" />
+                            <span className="text-sm text-muted-foreground">
+                                {reconnectCount.current >= 3 ? 'Could not reconnect. Start a new session.' : 'Connection lost. Reconnecting...'}
+                            </span>
+                            {reconnectCount.current >= 3 ? null : (
+                                <Button variant="outline" size="sm" onClick={handleReconnect}>
+                                    Reconnect
+                                </Button>
+                            )}
                         </div>
                     </div>
                 )}

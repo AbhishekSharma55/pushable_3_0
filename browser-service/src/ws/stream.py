@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 import logging
 
@@ -7,6 +8,7 @@ from starlette.websockets import WebSocketState
 
 from ..browser_manager import browser_manager
 from ..session_store import session_store
+from ..input_handler import handle_input_event
 
 logger = logging.getLogger("ws_stream")
 
@@ -16,6 +18,43 @@ INTERVAL_MS = int(os.getenv("SCREENSHOT_INTERVAL_MS", "200"))
 
 # Track active WebSocket per session to prevent duplicate streams
 _active_ws: dict[str, WebSocket] = {}
+
+
+async def _receive_input(websocket: WebSocket, session_id: str) -> None:
+    """Background task: receive JSON control events from the client and
+    execute them on the Playwright page via the input handler."""
+    try:
+        while True:
+            try:
+                raw = await websocket.receive()
+            except Exception:
+                break
+
+            # Starlette returns a dict; check for disconnect
+            if raw.get("type") == "websocket.disconnect":
+                break
+
+            text = raw.get("text")
+            if not text:
+                continue
+
+            try:
+                event = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+
+            try:
+                page = browser_manager.get_page(session_id)
+                await handle_input_event(page, event)
+            except KeyError:
+                # Session was closed
+                break
+            except Exception as e:
+                logger.debug("Input handling error for %s: %s", session_id, e)
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
 
 
 @router.websocket("/ws/{session_id}")
@@ -45,8 +84,11 @@ async def stream_screenshots(websocket: WebSocket, session_id: str):
     # Give the browser a moment to be fully ready
     await asyncio.sleep(1.0)
 
+    # Start input receiver as a background task
+    input_task = asyncio.create_task(_receive_input(websocket, session_id))
+
+    frame_count = 0
     try:
-        frame_count = 0
         while True:
             # Check we're still the active WS for this session
             if _active_ws.get(session_id) is not websocket:
@@ -83,8 +125,15 @@ async def stream_screenshots(websocket: WebSocket, session_id: str):
     except Exception as e:
         logger.error("WebSocket error for session %s: %s", session_id, e)
     finally:
+        # Cancel input receiver
+        input_task.cancel()
+        try:
+            await input_task
+        except asyncio.CancelledError:
+            pass
+
         # Only clean up if we're still the active WS
         if _active_ws.get(session_id) is websocket:
             _active_ws.pop(session_id, None)
             session_store.set_streaming(session_id, False)
-        logger.info("Streaming stopped for session %s (sent %d frames)", session_id, frame_count if 'frame_count' in dir() else 0)
+        logger.info("Streaming stopped for session %s (sent %d frames)", session_id, frame_count)

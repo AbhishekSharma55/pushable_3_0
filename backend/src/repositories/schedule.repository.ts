@@ -5,11 +5,21 @@ import { schedules } from "../db/schema/index.ts";
 export const scheduleRepository = {
     async create(data: {
         workspaceId: string;
+        agentId: string;
         name: string;
+        prompt: string;
         cron: string;
-        targetType: "task" | "workflow";
-        targetId: string;
         enabled?: boolean;
+        naturalLanguage?: string;
+        humanizeDelay?: number;
+        timezone?: string;
+        businessHoursOnly?: boolean;
+        workStartHour?: number;
+        workEndHour?: number;
+        workDays?: number[];
+        scheduleType?: "natural" | "preset" | "custom";
+        presetKey?: string;
+        nextRunDescription?: string;
     }) {
         const result = await db.insert(schedules).values(data).returning();
         return result[0];
@@ -49,10 +59,16 @@ export const scheduleRepository = {
         workspaceId: string,
         data: Partial<{
             name: string;
+            prompt: string;
             cron: string;
             enabled: boolean;
-            targetType: "task" | "workflow";
-            targetId: string;
+            nextRunDescription: string;
+            humanizeDelay: number;
+            businessHoursOnly: boolean;
+            workStartHour: number;
+            workEndHour: number;
+            workDays: number[];
+            timezone: string;
         }>
     ) {
         const result = await db

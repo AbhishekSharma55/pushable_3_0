@@ -2,6 +2,7 @@ import { kbRepository } from "../repositories/kb.repository.ts";
 import { NotFoundError, AppError } from "../lib/errors.ts";
 import { generateEmbeddings, generateEmbedding } from "../lib/embeddings.ts";
 import { logger } from "../lib/logger.ts";
+import { checkCredits, deductCredits, BASE_CREDIT_COSTS } from "../lib/credit-engine.ts";
 
 const ALLOWED_TYPES = new Set([
     "text/plain",
@@ -101,6 +102,19 @@ export const kbService = {
         const kb = await kbRepository.findKBById(kbId, workspaceId);
         if (!kb) throw new NotFoundError("Knowledge base not found");
 
+        // Check credits before upload
+        const creditCheck = await checkCredits(
+            workspaceId,
+            BASE_CREDIT_COSTS.KB_DOCUMENT_UPLOAD
+        );
+        if (!creditCheck.allowed) {
+            throw new AppError(
+                "Insufficient credits to upload document.",
+                402,
+                "INSUFFICIENT_CREDITS"
+            );
+        }
+
         // Validate file size
         if (file.buffer.length > MAX_FILE_SIZE) {
             throw new AppError(
@@ -186,6 +200,16 @@ export const kbService = {
             );
         }
 
+        // Deduct credits after successful upload (fire-and-forget)
+        deductCredits({
+            workspaceId,
+            amount: BASE_CREDIT_COSTS.KB_DOCUMENT_UPLOAD,
+            type: "kb_upload",
+            metadata: { kbId, documentId: document.id, filename: file.filename },
+        }).catch((err) =>
+            logger.warn({ err }, "KB upload credit deduction failed")
+        );
+
         return document;
     },
 
@@ -213,5 +237,85 @@ export const kbService = {
             queryEmbedding,
             topK
         );
+    },
+
+    async getChunksByDocument(documentId: string, workspaceId: string) {
+        const doc = await kbRepository.findDocumentById(documentId, workspaceId);
+        if (!doc) throw new NotFoundError("Document not found");
+        return kbRepository.findChunksByDocument(documentId, workspaceId);
+    },
+
+    async getChunksByKB(kbId: string, workspaceId: string) {
+        const kb = await kbRepository.findKBById(kbId, workspaceId);
+        if (!kb) throw new NotFoundError("Knowledge base not found");
+        return kbRepository.findChunksByKB(kbId, workspaceId);
+    },
+
+    async updateChunk(id: string, workspaceId: string, newContent: string) {
+        const chunk = await kbRepository.findChunkById(id, workspaceId);
+        if (!chunk) throw new NotFoundError("Chunk not found");
+
+        const updated = await kbRepository.updateChunk(id, workspaceId, newContent);
+
+        try {
+            const embedding = await generateEmbedding(newContent);
+            await kbRepository.updateChunkEmbedding(id, embedding);
+        } catch (error) {
+            logger.error({ error, chunkId: id }, "Failed to re-embed chunk");
+            throw new AppError(
+                "Failed to re-generate embedding. Content was saved but embedding may be stale.",
+                500,
+                "EMBEDDING_ERROR"
+            );
+        }
+
+        return updated;
+    },
+
+    async deleteChunk(id: string, workspaceId: string) {
+        const chunk = await kbRepository.findChunkById(id, workspaceId);
+        if (!chunk) throw new NotFoundError("Chunk not found");
+
+        await kbRepository.deleteChunk(id, workspaceId);
+        await kbRepository.updateDocumentChunkCount(chunk.documentId, workspaceId, -1);
+    },
+
+    async addManualChunk(
+        data: { kbId: string; documentId: string; content: string },
+        workspaceId: string
+    ) {
+        const kb = await kbRepository.findKBById(data.kbId, workspaceId);
+        if (!kb) throw new NotFoundError("Knowledge base not found");
+
+        const doc = await kbRepository.findDocumentById(data.documentId, workspaceId);
+        if (!doc) throw new NotFoundError("Document not found");
+
+        let embedding: number[];
+        try {
+            embedding = await generateEmbedding(data.content);
+        } catch (error) {
+            logger.error({ error }, "Failed to generate embedding for manual chunk");
+            throw new AppError(
+                "Failed to generate embedding. Please try again.",
+                500,
+                "EMBEDDING_ERROR"
+            );
+        }
+
+        const chunk = await kbRepository.insertManualChunk({
+            workspaceId,
+            kbId: data.kbId,
+            documentId: data.documentId,
+            content: data.content,
+            embedding,
+            metadata: {
+                source: "manual",
+                addedAt: new Date().toISOString(),
+            },
+        });
+
+        await kbRepository.updateDocumentChunkCount(data.documentId, workspaceId, 1);
+
+        return chunk;
     },
 };

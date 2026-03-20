@@ -1,6 +1,7 @@
 {
   "permissions": {
     "allow": [
+      "*",
       "Bash(cd:*)",
       "Bash(npx drizzle-kit:*)",
       "Bash(node:*)",
@@ -33,7 +34,19 @@
       "Bash(docker rm:*)",
       "Bash(gh api:*)",
       "Bash(curl:*)",
-      "Bash(bw list:*)"
+      "Bash(bw list:*)",
+      "Bash(docker run:*)",
+      "Bash(pnpm db:push)",
+      "Bash(source .env)",
+      "Bash(cat:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(grep -rn:*)",
+      "Bash(docker info:*)",
+      "Read(//var/run/**)",
+      "Bash(systemctl is-active:*)",
+      "Bash(DOCKER_HOST=unix:///var/run/docker.sock docker info --format {{.ServerVersion}})",
+      "Bash(pnpm install:*)"
     ]
   }
 }

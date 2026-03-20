@@ -1,7 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { sessionService } from "../services/session.service.ts";
+import { browserRepository } from "../repositories/browser.repository.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
+import { logger } from "../lib/logger.ts";
 
 const createSessionSchema = z.object({
     title: z.string().min(1, "Title is required"),
@@ -60,11 +62,66 @@ export async function sessionRoutes(fastify: FastifyInstance) {
         return reply.status(204).send();
     });
 
+    // GET /sessions — list all sessions in workspace
+    fastify.get("/sessions", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const sessions = await sessionService.getAllSessions(workspaceId);
+        return { data: sessions };
+    });
+
     // GET /sessions/:id/messages
     fastify.get("/sessions/:id/messages", async (request) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const { id } = request.params as { id: string };
         const messages = await sessionService.getMessages(id, workspaceId);
         return { data: messages };
+    });
+
+    // GET /sessions/:id/browser-session — returns active browser session for a chat session
+    fastify.get("/sessions/:id/browser-session", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { id: chatSessionId } = request.params as { id: string };
+
+        try {
+            // Get the chat session to find the agent
+            const session = await sessionService.getSession(chatSessionId, workspaceId);
+
+            // Find browser profile for this agent
+            const profile = await browserRepository.findProfileByAgentId(
+                session.agentId,
+                workspaceId
+            );
+            if (!profile) {
+                return { data: null };
+            }
+
+            // Try to find browser session scoped to this chat session
+            let browserSession = await browserRepository.findActiveSessionByChatSession(
+                profile.id,
+                chatSessionId
+            );
+
+            // Fallback: find ANY active session for this profile
+            if (!browserSession) {
+                browserSession = await browserRepository.findActiveSessionByProfileId(
+                    profile.id
+                );
+            }
+
+            if (!browserSession) {
+                return { data: null };
+            }
+
+            // Return just the session ID — frontend constructs the WS URL
+            return {
+                data: {
+                    sessionId: browserSession.id,
+                    status: browserSession.status,
+                },
+            };
+        } catch (error) {
+            logger.warn({ error, chatSessionId }, "Failed to look up browser session");
+            return { data: null };
+        }
     });
 }

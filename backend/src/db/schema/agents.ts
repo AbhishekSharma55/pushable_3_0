@@ -1,5 +1,6 @@
-import { pgTable, real, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, pgTable, real, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { workspaces } from "./workspaces.ts";
+import { browserProxies } from "./browserProxies.ts";
 
 export const agents = pgTable("agents", {
     id: uuid("id").primaryKey().defaultRandom(),
@@ -10,6 +11,18 @@ export const agents = pgTable("agents", {
     systemPrompt: text("system_prompt"),
     model: text("model").default("gpt-4o-mini").notNull(),
     temperature: real("temperature").default(0.7).notNull(),
+    // System-level access
+    systemLevelAccess: boolean("system_level_access").default(false).notNull(),
+    canManageKB: boolean("can_manage_kb").default(false).notNull(),
+    canManageSkills: boolean("can_manage_skills").default(false).notNull(),
+    canManageTools: boolean("can_manage_tools").default(false).notNull(),
+    canManageSchedules: boolean("can_manage_schedules").default(false).notNull(),
+    canManageChannels: boolean("can_manage_channels").default(false).notNull(),
+    canManageAgents: boolean("can_manage_agents").default(false).notNull(),
+    requireApprovalForAll: boolean("require_approval_for_all").default(false).notNull(),
+    // Browser automation
+    browserEnabled: boolean("browser_enabled").default(true).notNull(),
+    browserProxyId: uuid("browser_proxy_id").references(() => browserProxies.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

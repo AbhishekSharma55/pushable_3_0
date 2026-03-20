@@ -44,6 +44,10 @@ export const sessionService = {
         await sessionRepository.delete(id, workspaceId);
     },
 
+    async getAllSessions(workspaceId: string) {
+        return sessionRepository.findByWorkspace(workspaceId);
+    },
+
     async getMessages(sessionId: string, workspaceId: string) {
         // Verify session exists
         const session = await sessionRepository.findById(

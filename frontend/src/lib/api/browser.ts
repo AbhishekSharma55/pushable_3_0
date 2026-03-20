@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { BrowserProfile, BrowserSession } from '@/types';
+import type { BrowserProfile, BrowserSession, BrowserProxy } from '@/types';
 
 export interface CreateProfileInput {
     name: string;
@@ -26,12 +26,46 @@ export const deleteProfile = (workspaceId: string, id: string) =>
 export const startSession = (
     workspaceId: string,
     profileId: string,
-    agentId?: string
+    agentId?: string,
+    proxyId?: string
 ): Promise<{ sessionId: string; wsUrl: string }> =>
-    apiClient.post('/api/browser/sessions/start', { profileId, agentId }, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+    apiClient.post('/api/browser/sessions/start', { profileId, agentId, proxyId }, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
 
 export const endSession = (workspaceId: string, sessionId: string) =>
     apiClient.delete(`/api/browser/sessions/${sessionId}`, { headers: { 'x-workspace-id': workspaceId } });
 
 export const getSessions = (workspaceId: string): Promise<BrowserSession[]> =>
     apiClient.get('/api/browser/sessions', { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+// ── Proxies ──
+
+export const getProxies = (workspaceId: string): Promise<BrowserProxy[]> =>
+    apiClient.get('/api/browser/proxies', { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+export interface CreateProxyInput {
+    label: string;
+    connectionString?: string;
+    host?: string;
+    port?: number;
+    username?: string;
+    password?: string;
+    protocol?: 'http' | 'https' | 'socks5';
+    country?: string;
+    city?: string;
+}
+
+export const createProxy = (workspaceId: string, data: CreateProxyInput): Promise<BrowserProxy> =>
+    apiClient.post('/api/browser/proxies', data, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+export const testProxy = (workspaceId: string, id: string): Promise<{ success: boolean; ip?: string; error?: string }> =>
+    apiClient.post(`/api/browser/proxies/${id}/test`, {}, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+export const updateProxy = (
+    workspaceId: string,
+    id: string,
+    data: Partial<CreateProxyInput & { isActive: boolean }>
+): Promise<BrowserProxy> =>
+    apiClient.put(`/api/browser/proxies/${id}`, data, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+export const deleteProxy = (workspaceId: string, id: string) =>
+    apiClient.delete(`/api/browser/proxies/${id}`, { headers: { 'x-workspace-id': workspaceId } });

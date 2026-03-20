@@ -9,10 +9,15 @@ export const messageRepository = {
         role: "user" | "assistant" | "tool";
         content: string;
         tokenCount?: number;
+        metadata?: Record<string, unknown>;
     }) {
         const result = await db
             .insert(messages)
-            .values({ ...data, tokenCount: data.tokenCount ?? 0 })
+            .values({
+                ...data,
+                tokenCount: data.tokenCount ?? 0,
+                metadata: data.metadata ?? {},
+            })
             .returning();
         return result[0];
     },

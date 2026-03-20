@@ -20,8 +20,24 @@ export const getToolkits = (options?: {
 export const getIntegrations = (workspaceId: string): Promise<Integration[]> =>
     apiClient.get('/api/integrations', { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
 
-export const connectIntegration = (workspaceId: string, toolkitSlug: string, name: string, logo?: string): Promise<{ connectionUrl: string; integrationId: string }> =>
-    apiClient.post('/api/integrations/connect', { toolkitSlug, name, logo }, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+export const connectIntegration = (
+    workspaceId: string,
+    data: {
+        toolkitSlug: string;
+        name: string;
+        connectionLabel: string;
+        connectionDescription?: string;
+        logo?: string;
+    }
+): Promise<{ connectionUrl: string; integrationId: string }> =>
+    apiClient.post('/api/integrations/connect', data, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+export const updateIntegration = (
+    workspaceId: string,
+    id: string,
+    data: { connectionLabel?: string; connectionDescription?: string }
+): Promise<Integration> =>
+    apiClient.put(`/api/integrations/${id}`, data, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
 
 export const pollIntegrationStatus = (workspaceId: string, id: string): Promise<{ status: string }> =>
     apiClient.get(`/api/integrations/${id}/status`, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
@@ -44,3 +60,29 @@ export const removeFromAgent = (workspaceId: string, agentId: string, integratio
 
 export const getAgentIntegrations = (workspaceId: string, agentId: string): Promise<Integration[]> =>
     apiClient.get(`/api/agents/${agentId}/integrations`, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+export interface ToolkitAction {
+    slug: string;
+    name: string;
+    description: string;
+    tags: string[];
+}
+
+export interface ToolPermissions {
+    mode: 'allowlist' | 'blocklist';
+    tools: string[];
+}
+
+export const getToolkitActions = (slug: string): Promise<ToolkitAction[]> =>
+    apiClient.get(`/api/integrations/toolkits/${slug}/actions`).then(r => r.data.data);
+
+export const updateToolPermissions = (
+    workspaceId: string,
+    integrationId: string,
+    permissions: ToolPermissions
+): Promise<Integration> =>
+    apiClient.put(
+        `/api/integrations/${integrationId}/permissions`,
+        permissions,
+        { headers: { 'x-workspace-id': workspaceId } }
+    ).then(r => r.data.data);

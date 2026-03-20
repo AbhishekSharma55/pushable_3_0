@@ -8,11 +8,67 @@ export const integrationRepository = {
         composioToolkitSlug: string;
         composioConnectionId: string;
         name: string;
+        connectionLabel: string;
+        connectionDescription?: string;
+        connectionIcon?: string;
         status?: "active" | "inactive" | "pending" | "failed";
         metadata?: Record<string, unknown>;
     }) {
         const result = await db.insert(integrations).values(data).returning();
         return result[0];
+    },
+
+    async findByLabelInWorkspace(label: string, workspaceId: string) {
+        const result = await db
+            .select()
+            .from(integrations)
+            .where(
+                and(
+                    eq(integrations.connectionLabel, label),
+                    eq(integrations.workspaceId, workspaceId)
+                )
+            )
+            .limit(1);
+        return result[0] ?? null;
+    },
+
+    async updateConnection(
+        id: string,
+        workspaceId: string,
+        data: Partial<{
+            connectionLabel: string;
+            connectionDescription: string;
+        }>
+    ) {
+        const result = await db
+            .update(integrations)
+            .set({ ...data, updatedAt: new Date() })
+            .where(
+                and(
+                    eq(integrations.id, id),
+                    eq(integrations.workspaceId, workspaceId)
+                )
+            )
+            .returning();
+        return result[0] ?? null;
+    },
+
+    async updateMetadata(
+        id: string,
+        workspaceId: string,
+        metadata: Record<string, unknown>
+    ) {
+        const result = await db
+            .update(integrations)
+            .set({ metadata, updatedAt: new Date() })
+            .where(
+                and(
+                    eq(integrations.id, id),
+                    eq(integrations.workspaceId, workspaceId)
+                )
+            )
+            .returning();
+        return result[0] ?? null;
     },
 
     async findById(id: string, workspaceId: string) {

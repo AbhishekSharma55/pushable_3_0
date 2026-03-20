@@ -25,6 +25,14 @@ export const sessionRepository = {
             .orderBy(sessions.createdAt);
     },
 
+    async findByWorkspace(workspaceId: string) {
+        return db
+            .select()
+            .from(sessions)
+            .where(eq(sessions.workspaceId, workspaceId))
+            .orderBy(sessions.createdAt);
+    },
+
     async findById(id: string, workspaceId: string) {
         const result = await db
             .select()

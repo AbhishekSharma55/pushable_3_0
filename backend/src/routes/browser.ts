@@ -19,6 +19,7 @@ const updateProfileSchema = z.object({
 const startSessionSchema = z.object({
     profileId: z.string().uuid(),
     agentId: z.string().uuid().optional(),
+    proxyId: z.string().uuid().optional(),
 });
 
 export async function browserRoutes(fastify: FastifyInstance) {
@@ -86,7 +87,8 @@ export async function browserRoutes(fastify: FastifyInstance) {
         const result = await browserService.startSession(
             body.profileId,
             workspaceId,
-            body.agentId
+            body.agentId,
+            body.proxyId
         );
         return reply.status(201).send({ data: result });
     });

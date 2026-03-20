@@ -27,8 +27,28 @@ export interface Agent {
     systemPrompt: string | null;
     model: string;
     temperature: number;
+    systemLevelAccess: boolean;
+    canManageKB: boolean;
+    canManageSkills: boolean;
+    canManageTools: boolean;
+    canManageSchedules: boolean;
+    canManageChannels: boolean;
+    canManageAgents: boolean;
+    requireApprovalForAll: boolean;
+    browserEnabled: boolean;
+    browserProxyId: string | null;
     createdAt: string;
     updatedAt: string;
+}
+
+export interface SystemPermissionsInput {
+    systemLevelAccess: boolean;
+    canManageKB: boolean;
+    canManageSkills: boolean;
+    canManageTools: boolean;
+    canManageSchedules: boolean;
+    canManageChannels: boolean;
+    canManageAgents: boolean;
 }
 
 export interface Session {
@@ -37,6 +57,18 @@ export interface Session {
     agentId: string;
     title: string;
     createdAt: string;
+    updatedAt?: string;
+}
+
+export interface Run {
+    id: string;
+    sessionId: string;
+    workspaceId: string;
+    status: 'queued' | 'in_progress' | 'completed' | 'failed' | 'interrupted' | 'cancelled';
+    error: string | null;
+    metadata: Record<string, unknown>;
+    createdAt: string;
+    updatedAt: string;
 }
 
 export interface Message {
@@ -56,6 +88,7 @@ export interface Tool {
     type: 'mcp' | 'function';
     config: Record<string, unknown>;
     isGlobal: boolean;
+    requiresApproval: boolean;
     createdAt: string;
     updatedAt: string;
 }
@@ -88,6 +121,16 @@ export interface KBDocument {
     createdAt: string;
 }
 
+export interface KBChunk {
+    id: string;
+    workspaceId: string;
+    kbId: string;
+    documentId: string;
+    content: string;
+    metadata: Record<string, unknown>;
+    createdAt: string;
+}
+
 export interface Skill {
     id: string;
     workspaceId: string;
@@ -99,42 +142,15 @@ export interface Skill {
     updatedAt: string;
 }
 
-export interface Task {
-    id: string;
-    workspaceId: string;
-    agentId: string;
-    title: string;
-    description: string | null;
-    status: 'pending' | 'running' | 'done' | 'failed';
-    result: string | null;
-    createdAt: string;
-    updatedAt: string;
-}
-
-export interface Workflow {
-    id: string;
-    workspaceId: string;
-    name: string;
-    createdAt: string;
-    updatedAt: string;
-    steps?: WorkflowStep[];
-}
-
-export interface WorkflowStep {
-    id: string;
-    workspaceId: string;
-    workflowId: string;
-    taskId: string;
-    order: number;
-    createdAt: string;
-}
-
 export interface Integration {
     id: string;
     workspaceId: string;
     composioToolkitSlug: string;
     composioConnectionId: string;
     name: string;
+    connectionLabel: string;
+    connectionDescription: string | null;
+    connectionIcon: string | null;
     status: 'active' | 'inactive' | 'pending' | 'failed';
     metadata: Record<string, unknown>;
     createdAt: string;
@@ -152,12 +168,66 @@ export interface Toolkit {
 export interface Schedule {
     id: string;
     workspaceId: string;
+    agentId: string;
     name: string;
+    prompt: string;
     cron: string;
-    targetType: 'task' | 'workflow';
-    targetId: string;
     enabled: boolean;
     lastRunAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+    naturalLanguage: string | null;
+    humanizeDelay: number;
+    timezone: string;
+    businessHoursOnly: boolean;
+    workStartHour: number;
+    workEndHour: number;
+    workDays: number[];
+    scheduleType: 'natural' | 'preset' | 'custom';
+    presetKey: string | null;
+    nextRunDescription: string | null;
+}
+
+export interface SchedulePreset {
+    key: string;
+    label: string;
+    description: string;
+    cron: string | null;
+    humanizeDelay: number;
+    icon: string;
+}
+
+export interface ScheduleRun {
+    id: string;
+    scheduleId: string;
+    workspaceId: string;
+    status: 'running' | 'completed' | 'failed' | 'skipped';
+    resultText: string | null;
+    error: string | null;
+    creditsUsed: number;
+    durationMs: number | null;
+    startedAt: string;
+    completedAt: string | null;
+}
+
+export interface ScheduleStats {
+    totalRuns: number;
+    totalCredits: number;
+    successCount: number;
+    failCount: number;
+    avgDurationMs: number;
+}
+
+export interface ChannelConnection {
+    id: string;
+    workspaceId: string;
+    agentId: string;
+    channelType: 'telegram' | 'slack';
+    name: string;
+    status: 'active' | 'inactive' | 'error';
+    config: Record<string, unknown>;
+    errorMessage: string | null;
+    lastMessageAt: string | null;
     createdAt: string;
     updatedAt: string;
 }
@@ -175,13 +245,61 @@ export interface BrowserProfile {
     updatedAt: string;
 }
 
+export interface LLMModel {
+    id: string;
+    provider: string;
+    modelId: string;
+    displayName: string;
+    description: string | null;
+    multiplier: number;
+    contextWindow: number | null;
+    minimumPlan: 'free' | 'starter' | 'pro' | 'scale';
+    isFeatured: boolean;
+    available: boolean;
+    requiredPlan: string;
+    creditCostPerMessage: number;
+}
+
+export interface CreditBalance {
+    planCredits: number;
+    topupCredits: number;
+    availableCredits: number;
+    overageEnabled: boolean;
+    overageLimit: number;
+    totalConsumed: number;
+}
+
+export interface LedgerEntry {
+    id: string;
+    amount: number;
+    type: string;
+    creditsAfter: number;
+    metadata: Record<string, unknown>;
+    createdAt: string;
+}
+
 export interface BrowserSession {
     id: string;
     workspaceId: string;
     profileId: string;
     agentId: string | null;
-    taskId: string | null;
     status: 'starting' | 'active' | 'closed' | 'error';
     createdAt: string;
     closedAt: string | null;
+}
+
+export interface BrowserProxy {
+    id: string;
+    workspaceId: string;
+    label: string;
+    host: string;
+    port: number;
+    protocol: 'http' | 'https' | 'socks5';
+    country: string | null;
+    city: string | null;
+    isActive: boolean;
+    lastTestedAt: string | null;
+    lastTestStatus: 'success' | 'failed' | 'untested';
+    createdAt: string;
+    updatedAt: string;
 }

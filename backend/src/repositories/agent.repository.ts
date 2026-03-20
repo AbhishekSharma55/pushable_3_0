@@ -9,9 +9,44 @@ export const agentRepository = {
         systemPrompt?: string;
         model?: string;
         temperature?: number;
+        browserEnabled?: boolean;
+        browserProxyId?: string | null;
     }) {
         const result = await db.insert(agents).values(data).returning();
         return result[0];
+    },
+
+    async updateSystemPermissions(
+        id: string,
+        workspaceId: string,
+        data: {
+            systemLevelAccess: boolean;
+            canManageKB: boolean;
+            canManageSkills: boolean;
+            canManageTools: boolean;
+            canManageSchedules: boolean;
+            canManageChannels: boolean;
+            canManageAgents: boolean;
+        }
+    ) {
+        // If systemLevelAccess is off, force all permissions to false
+        const perms = data.systemLevelAccess
+            ? data
+            : {
+                  systemLevelAccess: false,
+                  canManageKB: false,
+                  canManageSkills: false,
+                  canManageTools: false,
+                  canManageSchedules: false,
+                  canManageChannels: false,
+                  canManageAgents: false,
+              };
+        const result = await db
+            .update(agents)
+            .set({ ...perms, updatedAt: new Date() })
+            .where(and(eq(agents.id, id), eq(agents.workspaceId, workspaceId)))
+            .returning();
+        return result[0] ?? null;
     },
 
     async findById(id: string, workspaceId: string) {
@@ -39,6 +74,8 @@ export const agentRepository = {
             systemPrompt: string;
             model: string;
             temperature: number;
+            browserEnabled: boolean;
+            browserProxyId: string | null;
         }>
     ) {
         const result = await db

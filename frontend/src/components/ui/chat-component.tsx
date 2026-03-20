@@ -42,11 +42,15 @@ import {
 } from "@/components/ui/select";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useChatWs } from "@/hooks/use-chat-ws";
+import { useChatWs, type ChatMessage } from "@/hooks/use-chat-ws";
+import { ToolCallDisplay } from "@/components/chat/tool-call-display";
 import { useSessions, type Session } from "@/hooks/use-sessions";
 import { useAgents, type Agent } from "@/hooks/use-agents";
 import { TextShimmer } from "@/components/ui/text-shimmer";
-import { InlineBrowserPreview } from "@/components/ui/inline-browser-preview";
+import { BrowserPreview } from "@/components/browser/browser-preview";
+import { getBrowserSession } from "@/lib/api/sessions";
+import { BROWSER_WS_URL } from "@/lib/constants";
+import { useActiveWorkspace } from "@/hooks/use-active-workspace";
 import { getAgentAvatarMeta } from "@/lib/agent-avatar";
 
 // ─── Auto-resize textarea hook ────────────────────────────────────────────────
@@ -370,20 +374,7 @@ function NewChatDialog({
 
   const handleCreate = () => {
     if (!selectedId) return;
-    // Build a unique session key: agent:<agentId>:<uuid-short>
-    // crypto.randomUUID() requires a secure context (HTTPS); fall back to
-    // Math.random-based generation when running over plain HTTP.
-    const generateUid = () => {
-      if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-        return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
-      }
-      // Fallback: generate a 12-char hex string
-      return Array.from({ length: 12 }, () =>
-        Math.floor(Math.random() * 16).toString(16)
-      ).join("");
-    };
-    const uid = generateUid();
-    const newKey = `agent:${selectedId}:chat-${uid}`;
+    const newKey = `agent:${selectedId}:new-${Date.now()}`;
     onCreated(newKey);
     onOpenChange(false);
   };
@@ -671,7 +662,7 @@ function ChatHeader({
                           {`Session ${sessionNumber}`}
                         </div>
                         <div className="text-[10px] text-muted-foreground opacity-70">
-                          ({formatTime(s.updatedAt)} ago)
+                          ({formatTime(s.updatedAt ? new Date(s.updatedAt).getTime() : null)} ago)
                         </div>
                       </div>
                     </SelectItem>
@@ -701,9 +692,13 @@ function ChatHeader({
 function MessageBubble({
   msg,
 }: {
-  msg: { id: string; role: "user" | "assistant"; content: string; status?: string };
+  msg: ChatMessage;
 }) {
   const isUser = msg.role === "user";
+  const toolCalls = msg.metadata?.toolCalls ?? [];
+  const hasToolCalls = toolCalls.length > 0;
+  const hasContent = msg.content.trim().length > 0;
+
   return (
     <div className={cn("flex gap-3", isUser ? "justify-end" : "justify-start")}>
       {/* Assistant avatar */}
@@ -713,82 +708,95 @@ function MessageBubble({
         </div>
       )}
 
-      <div
-        className={cn(
-          "max-w-[75%] rounded-2xl px-4 py-3 text-sm leading-relaxed",
-          isUser
-            ? "bg-primary text-primary-foreground rounded-br-sm"
-            : "bg-secondary/50 text-foreground border border-border rounded-bl-sm"
-        )}
-      >
-        {!isUser ? (
-          <>
-            {msg.content === "" && msg.status === "thinking" ? (
-              <ThinkingLoader />
-            ) : (
-              <>
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={{
-                    p: ({ children }) => {
-                      if (typeof children === "string") {
-                        const trimmed = children.trim();
-                        if (trimmed.startsWith("MEDIA:") || trimmed.startsWith("FILE:")) {
-                          const filePath = trimmed.slice(trimmed.indexOf(":") + 1).trim();
-                          const fileName = filePath.split("/").pop() || "download";
-                          return (
-                            <div className="my-2 p-3 rounded-lg border border-border bg-background/50 flex items-center justify-between gap-3">
-                              <div className="flex items-center gap-2 overflow-hidden">
-                                <Paperclip className="w-4 h-4 text-muted-foreground shrink-0" />
-                                <span className="text-xs font-mono truncate">{fileName}</span>
-                              </div>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-8 gap-2 shrink-0"
-                                asChild
-                              >
-                                <a href={`/api/containers/download?path=${encodeURIComponent(filePath)}`} target="_blank" rel="noopener noreferrer">
-                                  Download
-                                </a>
-                              </Button>
-                            </div>
-                          );
-                        }
-                      }
-                      return <p className="mb-2 last:mb-0">{children}</p>;
-                    },
-                    ul: ({ children }) => <ul className="mb-2 list-disc pl-5">{children}</ul>,
-                    ol: ({ children }) => <ol className="mb-2 list-decimal pl-5">{children}</ol>,
-                    li: ({ children }) => <li className="mb-1">{children}</li>,
-                    a: ({ children, href }) => (
-                      <a href={href} className="text-primary underline underline-offset-2 hover:opacity-80">
-                        {children}
-                      </a>
-                    ),
-                    code: ({ children }) => (
-                      <code className="bg-muted px-1 py-0.5 rounded text-xs font-mono">{children}</code>
-                    ),
-                    blockquote: ({ children }) => (
-                      <blockquote className="border-l-4 border-border pl-4 mb-2 italic text-muted-foreground">
-                        {children}
-                      </blockquote>
-                    ),
-                  }}
-                >
-                  {msg.content}
-                </ReactMarkdown>
-                {msg.status === "thinking" && <ThinkingLoader />}
-              </>
-            )}
-            {msg.status === "error" && (
-              <p className="text-xs text-destructive mt-1">⚠ Error occurred</p>
-            )}
-          </>
-        ) : (
+      {isUser ? (
+        <div className="max-w-[75%] rounded-2xl px-4 py-3 text-sm leading-relaxed bg-primary text-primary-foreground rounded-br-sm">
           <p>{msg.content}</p>
-        )}
-      </div>
+        </div>
+      ) : (
+        <div className="max-w-[75%] space-y-2">
+          {/* Empty thinking state — no content, no tool calls */}
+          {!hasContent && !hasToolCalls && msg.status === "thinking" && (
+            <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed bg-secondary/50 text-foreground border border-border rounded-bl-sm">
+              <ThinkingLoader />
+            </div>
+          )}
+
+          {/* Tool calls accordion */}
+          {hasToolCalls && (
+            <ToolCallDisplay
+              toolCalls={toolCalls.map((tc) => ({
+                ...tc,
+                type: (tc.type as 'tool' | 'agent') || 'tool',
+                status: tc.status === 'thinking' ? 'running' : (tc.status as 'running' | 'done' | 'pending_approval' | 'approved' | 'rejected') || 'done',
+              }))}
+              messageId={msg.id}
+            />
+          )}
+
+          {/* Text content */}
+          {hasContent && (
+            <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed bg-secondary/50 text-foreground border border-border rounded-bl-sm">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  p: ({ children }) => {
+                    if (typeof children === "string") {
+                      const trimmed = children.trim();
+                      if (trimmed.startsWith("MEDIA:") || trimmed.startsWith("FILE:")) {
+                        const filePath = trimmed.slice(trimmed.indexOf(":") + 1).trim();
+                        const fileName = filePath.split("/").pop() || "download";
+                        return (
+                          <div className="my-2 p-3 rounded-lg border border-border bg-background/50 flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2 overflow-hidden">
+                              <Paperclip className="w-4 h-4 text-muted-foreground shrink-0" />
+                              <span className="text-xs font-mono truncate">{fileName}</span>
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-8 gap-2 shrink-0"
+                              asChild
+                            >
+                              <a href={`/api/containers/download?path=${encodeURIComponent(filePath)}`} target="_blank" rel="noopener noreferrer">
+                                Download
+                              </a>
+                            </Button>
+                          </div>
+                        );
+                      }
+                    }
+                    return <p className="mb-2 last:mb-0">{children}</p>;
+                  },
+                  ul: ({ children }) => <ul className="mb-2 list-disc pl-5">{children}</ul>,
+                  ol: ({ children }) => <ol className="mb-2 list-decimal pl-5">{children}</ol>,
+                  li: ({ children }) => <li className="mb-1">{children}</li>,
+                  a: ({ children, href }) => (
+                    <a href={href} className="text-primary underline underline-offset-2 hover:opacity-80">
+                      {children}
+                    </a>
+                  ),
+                  code: ({ children }) => (
+                    <code className="bg-muted px-1 py-0.5 rounded text-xs font-mono">{children}</code>
+                  ),
+                  blockquote: ({ children }) => (
+                    <blockquote className="border-l-4 border-border pl-4 mb-2 italic text-muted-foreground">
+                      {children}
+                    </blockquote>
+                  ),
+                }}
+              >
+                {msg.content}
+              </ReactMarkdown>
+              {msg.status === "thinking" && <ThinkingLoader />}
+            </div>
+          )}
+
+          {/* Error indicator */}
+          {msg.status === "error" && (
+            <p className="text-xs text-destructive mt-1">Error occurred</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -826,7 +834,7 @@ export function ChatComponent({
 
   // When agentId or sessions change, ensure we are on a session for this agent
   useEffect(() => {
-    if (!currentAgentId || sessions.length === 0) return;
+    if (!currentAgentId) return;
 
     // Check if currentSessionKey belongs to currentAgentId
     if (parseAgentIdFromKey(currentSessionKey) !== currentAgentId.toLowerCase()) {
@@ -835,21 +843,8 @@ export function ChatComponent({
       if (match) {
         setCurrentSessionKey(match.key);
       } else {
-        // No session found for this agent — open a new empty session for this agent
-        if (currentAgentId.toLowerCase() === agentsData?.defaultId?.toLowerCase()) {
-          const hasMain = sessions.some((s) => s.key === "main");
-          if (hasMain) {
-            setCurrentSessionKey("main");
-            return;
-          }
-        }
-        const generateUid = () => {
-          if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-            return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
-          }
-          return Array.from({ length: 12 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
-        };
-        const newKey = `agent:${currentAgentId}:chat-${generateUid()}`;
+        // No session found — create a new session key (will be created in backend on first message)
+        const newKey = `agent:${currentAgentId}:new-${Date.now()}`;
         setCurrentSessionKey(newKey);
       }
     }
@@ -858,16 +853,70 @@ export function ChatComponent({
   // Sessions filtered for the current agent
   const agentSessions = useMemo(() => {
     if (!currentAgentId) return [];
-    return sessions.filter((s) => parseAgentIdFromKey(s.key) === currentAgentId.toLowerCase() || (currentAgentId.toLowerCase() === agentsData?.defaultId?.toLowerCase() && s.key === "main"));
-  }, [sessions, currentAgentId, agentsData]);
+    return sessions.filter((s) => parseAgentIdFromKey(s.key) === currentAgentId.toLowerCase());
+  }, [sessions, currentAgentId]);
 
   const currentSession = sessions.find((s) => s.key === currentSessionKey);
   const currentAgent = agentMap.get(currentAgentId.toLowerCase());
   const readOnly = currentSession ? isAgentToAgent(currentSession) : false;
 
+  // ── Chat hook (must be declared before browser polling) ──
   const [value, setValue] = useState("");
   const [sendCount, setSendCount] = useState(0);
-  const { messages, sendMessage, isLoading, historyLoaded } = useChatWs(currentSessionKey);
+  const { messages, sendMessage, isLoading, historyLoaded, sessionId: chatSessionId } = useChatWs(currentSessionKey);
+
+  // ── Browser preview state ──
+  const { workspace } = useActiveWorkspace();
+  const [browserSession, setBrowserSession] = useState<{ sessionId: string; wsUrl: string } | null>(null);
+
+  // Detect browser tool calls in messages to trigger immediate panel open
+  const hasBrowserToolCall = useMemo(() => {
+    const browserToolNames = ['browser_agent', 'browser_navigate', 'browser_click', 'browser_type', 'browser_scroll', 'browser_screenshot', 'browser_extract'];
+    return messages.some((m) =>
+      m.metadata?.toolCalls?.some((tc) =>
+        browserToolNames.some((name) => tc.name?.toLowerCase().includes(name.replace('_', ''))) ||
+        tc.name?.toLowerCase().includes('browser')
+      )
+    );
+  }, [messages]);
+
+  // Poll for active browser session — polls faster when browser tool calls are detected
+  useEffect(() => {
+    if (!chatSessionId || !workspace?.id) {
+      setBrowserSession(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const data = await getBrowserSession(workspace.id, chatSessionId);
+        if (!cancelled) {
+          if (data) {
+            // Use the frontend-configured WS URL (not the internal docker one)
+            setBrowserSession({
+              sessionId: data.sessionId,
+              wsUrl: `${BROWSER_WS_URL}/ws/${data.sessionId}`,
+            });
+          } else {
+            setBrowserSession(null);
+          }
+        }
+      } catch {
+        if (!cancelled) setBrowserSession(null);
+      }
+    };
+
+    poll();
+    // Poll faster (every 1s) when browser tools are actively detected, otherwise every 3s
+    const interval = setInterval(poll, hasBrowserToolCall ? 1000 : 3000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [chatSessionId, workspace?.id, hasBrowserToolCall]);
   const { textareaRef, adjustHeight } = useAutoResizeTextarea({ minHeight: 52, maxHeight: 200 });
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastScrolledAssistantIdRef = useRef<string | null>(null);
@@ -953,8 +1002,10 @@ export function ChatComponent({
         onNewChat={() => setIsNewChatDialogOpen(true)}
       />
 
-      {/* ── Main chat area ── */}
-      <div className="flex flex-col flex-1 min-w-0 h-full">
+      {/* ── Main chat + browser preview ── */}
+      <div className="flex flex-1 min-w-0 h-full overflow-hidden">
+      {/* ── Chat column ── */}
+      <div className={cn("flex flex-col min-w-0 h-full", browserSession ? "flex-1" : "flex-1")}>
         {/* Header */}
         <ChatHeader
           session={currentSession}
@@ -963,13 +1014,7 @@ export function ChatComponent({
           sessions={agentSessions}
           onSessionChange={(key) => setCurrentSessionKey(key)}
           onCreateSession={() => {
-            const generateUid = () => {
-              if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-                return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
-              }
-              return Array.from({ length: 12 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
-            };
-            const newKey = `agent:${currentAgentId}:chat-${generateUid()}`;
+            const newKey = `agent:${currentAgentId}:new-${Date.now()}`;
             setCurrentSessionKey(newKey);
           }}
         />
@@ -995,13 +1040,6 @@ export function ChatComponent({
           {visibleMessages.map((msg) => (
             <MessageBubble key={msg.id} msg={msg} />
           ))}
-
-          {/* Browser activity button / dialog */}
-          <InlineBrowserPreview
-            isAgentWorking={isLoading}
-            streamingContent={lastAssistantContent}
-            sendCount={sendCount}
-          />
 
           <div ref={bottomRef} />
         </div>
@@ -1051,6 +1089,18 @@ export function ChatComponent({
             </div>
           </div>
         )}
+      </div>
+
+      {/* ── Browser preview panel ── */}
+      {browserSession && (
+        <div className="w-[480px] shrink-0 border-l border-border h-full bg-muted/20">
+          <BrowserPreview
+            wsUrl={browserSession.wsUrl}
+            sessionId={browserSession.sessionId}
+            onClose={() => setBrowserSession(null)}
+          />
+        </div>
+      )}
       </div>
     </div>
     </>

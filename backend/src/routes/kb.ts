@@ -13,6 +13,10 @@ const updateKBSchema = z.object({
     description: z.string().optional(),
 });
 
+const chunkContentSchema = z.object({
+    content: z.string().min(10, "Content must be at least 10 characters"),
+});
+
 export async function kbRoutes(fastify: FastifyInstance) {
     // Auth
     fastify.addHook("onRequest", async (request) => {
@@ -113,5 +117,50 @@ export async function kbRoutes(fastify: FastifyInstance) {
         const { kbId, id } = request.params as { kbId: string; id: string };
         await kbService.deleteDocument(id, kbId, workspaceId);
         return reply.status(204).send();
+    });
+
+    // GET /kb/:kbId/documents/:documentId/chunks
+    fastify.get("/kb/:kbId/documents/:documentId/chunks", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { documentId } = request.params as { kbId: string; documentId: string };
+        const chunks = await kbService.getChunksByDocument(documentId, workspaceId);
+        return { data: chunks };
+    });
+
+    // GET /kb/:kbId/chunks
+    fastify.get("/kb/:kbId/chunks", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { kbId } = request.params as { kbId: string };
+        const chunks = await kbService.getChunksByKB(kbId, workspaceId);
+        return { data: chunks };
+    });
+
+    // PUT /kb/chunks/:chunkId
+    fastify.put("/kb/chunks/:chunkId", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { chunkId } = request.params as { chunkId: string };
+        const body = chunkContentSchema.parse(request.body);
+        const chunk = await kbService.updateChunk(chunkId, workspaceId, body.content);
+        return { data: chunk };
+    });
+
+    // DELETE /kb/chunks/:chunkId
+    fastify.delete("/kb/chunks/:chunkId", async (request, reply) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { chunkId } = request.params as { chunkId: string };
+        await kbService.deleteChunk(chunkId, workspaceId);
+        return reply.status(204).send();
+    });
+
+    // POST /kb/:kbId/documents/:documentId/chunks
+    fastify.post("/kb/:kbId/documents/:documentId/chunks", async (request, reply) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { kbId, documentId } = request.params as { kbId: string; documentId: string };
+        const body = chunkContentSchema.parse(request.body);
+        const chunk = await kbService.addManualChunk(
+            { kbId, documentId, content: body.content },
+            workspaceId
+        );
+        return reply.status(201).send({ data: chunk });
     });
 }

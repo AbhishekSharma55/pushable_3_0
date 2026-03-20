@@ -1,4 +1,4 @@
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, asc, inArray } from "drizzle-orm";
 import { db } from "../db/client.ts";
 import {
     knowledgeBases,
@@ -41,6 +41,19 @@ export const kbRepository = {
             .from(knowledgeBases)
             .where(eq(knowledgeBases.workspaceId, workspaceId))
             .orderBy(knowledgeBases.createdAt);
+    },
+
+    async findKBsByIds(ids: string[], workspaceId: string) {
+        if (ids.length === 0) return [];
+        return db
+            .select()
+            .from(knowledgeBases)
+            .where(
+                and(
+                    inArray(knowledgeBases.id, ids),
+                    eq(knowledgeBases.workspaceId, workspaceId)
+                )
+            );
     },
 
     async updateKB(
@@ -215,5 +228,160 @@ export const kbRepository = {
                 )
             );
         return Number(result[0]?.count ?? 0);
+    },
+
+    async findChunksByDocument(documentId: string, workspaceId: string) {
+        return db
+            .select({
+                id: kbChunks.id,
+                workspaceId: kbChunks.workspaceId,
+                kbId: kbChunks.kbId,
+                documentId: kbChunks.documentId,
+                content: kbChunks.content,
+                metadata: kbChunks.metadata,
+                createdAt: kbChunks.createdAt,
+            })
+            .from(kbChunks)
+            .where(
+                and(
+                    eq(kbChunks.documentId, documentId),
+                    eq(kbChunks.workspaceId, workspaceId)
+                )
+            )
+            .orderBy(asc(kbChunks.createdAt));
+    },
+
+    async findChunksByKB(kbId: string, workspaceId: string) {
+        return db
+            .select({
+                id: kbChunks.id,
+                workspaceId: kbChunks.workspaceId,
+                kbId: kbChunks.kbId,
+                documentId: kbChunks.documentId,
+                content: kbChunks.content,
+                metadata: kbChunks.metadata,
+                createdAt: kbChunks.createdAt,
+            })
+            .from(kbChunks)
+            .where(
+                and(
+                    eq(kbChunks.kbId, kbId),
+                    eq(kbChunks.workspaceId, workspaceId)
+                )
+            )
+            .orderBy(asc(kbChunks.documentId), asc(kbChunks.createdAt));
+    },
+
+    async findChunkById(id: string, workspaceId: string) {
+        const result = await db
+            .select({
+                id: kbChunks.id,
+                workspaceId: kbChunks.workspaceId,
+                kbId: kbChunks.kbId,
+                documentId: kbChunks.documentId,
+                content: kbChunks.content,
+                metadata: kbChunks.metadata,
+                createdAt: kbChunks.createdAt,
+            })
+            .from(kbChunks)
+            .where(
+                and(
+                    eq(kbChunks.id, id),
+                    eq(kbChunks.workspaceId, workspaceId)
+                )
+            )
+            .limit(1);
+        return result[0] ?? null;
+    },
+
+    async updateChunk(id: string, workspaceId: string, content: string) {
+        const result = await db
+            .update(kbChunks)
+            .set({ content })
+            .where(
+                and(
+                    eq(kbChunks.id, id),
+                    eq(kbChunks.workspaceId, workspaceId)
+                )
+            )
+            .returning({
+                id: kbChunks.id,
+                workspaceId: kbChunks.workspaceId,
+                kbId: kbChunks.kbId,
+                documentId: kbChunks.documentId,
+                content: kbChunks.content,
+                metadata: kbChunks.metadata,
+                createdAt: kbChunks.createdAt,
+            });
+        return result[0] ?? null;
+    },
+
+    async deleteChunk(id: string, workspaceId: string) {
+        await db
+            .delete(kbChunks)
+            .where(
+                and(
+                    eq(kbChunks.id, id),
+                    eq(kbChunks.workspaceId, workspaceId)
+                )
+            );
+    },
+
+    async insertManualChunk(data: {
+        workspaceId: string;
+        kbId: string;
+        documentId: string;
+        content: string;
+        embedding: number[];
+        metadata: Record<string, unknown>;
+    }) {
+        const result = await db
+            .insert(kbChunks)
+            .values(data)
+            .returning({
+                id: kbChunks.id,
+                workspaceId: kbChunks.workspaceId,
+                kbId: kbChunks.kbId,
+                documentId: kbChunks.documentId,
+                content: kbChunks.content,
+                metadata: kbChunks.metadata,
+                createdAt: kbChunks.createdAt,
+            });
+        return result[0];
+    },
+
+    async updateChunkEmbedding(id: string, embedding: number[]) {
+        await db
+            .update(kbChunks)
+            .set({ embedding })
+            .where(eq(kbChunks.id, id));
+    },
+
+    async findDocumentById(id: string, workspaceId: string) {
+        const result = await db
+            .select()
+            .from(kbDocuments)
+            .where(
+                and(
+                    eq(kbDocuments.id, id),
+                    eq(kbDocuments.workspaceId, workspaceId)
+                )
+            )
+            .limit(1);
+        return result[0] ?? null;
+    },
+
+    async updateDocumentChunkCount(id: string, workspaceId: string, delta: number) {
+        await db
+            .update(kbDocuments)
+            .set({
+                chunkCount: sql`${kbDocuments.chunkCount} + ${delta}`,
+            })
+            .where(
+                and(
+                    eq(kbDocuments.id, id),
+                    eq(kbDocuments.workspaceId, workspaceId)
+                )
+            );
     },
 };

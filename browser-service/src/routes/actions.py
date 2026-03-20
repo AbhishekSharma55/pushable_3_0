@@ -62,6 +62,16 @@ class KeyboardRequest(ActionRequest):
     key: str
 
 
+class ClickElementRequest(ActionRequest):
+    index: int
+
+
+class TypeElementRequest(ActionRequest):
+    index: int
+    text: str
+    clearFirst: bool = False
+
+
 def _ok(result=None):
     return {"success": True, "result": result, "error": None}
 
@@ -320,3 +330,48 @@ async def solve_captcha(req: ActionRequest):
         return _err(str(e))
     except Exception as e:
         return _err(f"CAPTCHA solve failed: {e}")
+
+
+# ── Index-based element interaction (DOM-aware) ───────────────────────
+
+
+@router.post("/get_interactive_elements")
+async def get_interactive_elements(req: ActionRequest):
+    """Extract all interactive elements from the page with index numbers."""
+    try:
+        page_state = await browser_manager.get_interactive_elements(req.sessionId)
+        return _ok(page_state)
+    except KeyError as e:
+        return _err(str(e))
+    except Exception as e:
+        return _err(f"Element extraction failed: {e}")
+
+
+@router.post("/click_element")
+async def click_element(req: ClickElementRequest):
+    """Click an element by its index number."""
+    try:
+        result = await browser_manager.click_element(req.sessionId, req.index)
+        if "error" in result:
+            return _err(result["error"])
+        return _ok(result)
+    except KeyError as e:
+        return _err(str(e))
+    except Exception as e:
+        return _err(f"Click element failed: {e}")
+
+
+@router.post("/type_element")
+async def type_element(req: TypeElementRequest):
+    """Focus an element by index and type text into it."""
+    try:
+        result = await browser_manager.type_element(
+            req.sessionId, req.index, req.text, req.clearFirst
+        )
+        if "error" in result:
+            return _err(result["error"])
+        return _ok(result)
+    except KeyError as e:
+        return _err(str(e))
+    except Exception as e:
+        return _err(f"Type element failed: {e}")

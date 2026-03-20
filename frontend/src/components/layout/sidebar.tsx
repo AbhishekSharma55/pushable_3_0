@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
@@ -9,8 +9,6 @@ import {
     BookOpen,
     Zap,
     Wrench,
-    CheckSquare,
-    GitBranch,
     Clock,
     CreditCard,
     Radio,
@@ -19,11 +17,13 @@ import {
     Blocks,
     Globe,
     PlugZap,
-    KeyRound,
+    LogOut,
+    User,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
+import { getCreditBalance } from '@/lib/api/credits';
 import { Button } from '@/components/ui/button';
 import {
     DropdownMenu,
@@ -42,8 +42,10 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { WORKSPACES_KEY, ACTIVE_WORKSPACE_KEY } from '@/lib/constants';
 import { createWorkspace } from '@/lib/api/workspaces';
+import { getUser, removeToken, removeUser } from '@/lib/auth';
 import type { Workspace } from '@/types';
 
 const navItems = [
@@ -52,12 +54,9 @@ const navItems = [
     {label: 'Integrations', href: '/integrations', icon: Blocks },
     { label: 'Browser', href: '/browser-profiles', icon: Globe },
     { label: 'Extension', href: '/extension-settings', icon: PlugZap },
-    { label: 'Secrets', href: '/secrets', icon: KeyRound },
     { label: 'Knowledge Base', href: '/kb', icon: BookOpen },
     { label: 'Skills', href: '/skills', icon: Zap },
     { label: 'Tools', href: '/tools', icon: Wrench },
-    { label: 'Tasks', href: '/tasks', icon: CheckSquare },
-    { label: 'Workflows', href: '/workflows', icon: GitBranch },
     { label: 'Schedules', href: '/schedules', icon: Clock },
     { label: 'Credits', href: '/credits', icon: CreditCard },
     { label: 'Channels', href: '/channels', icon: Radio },
@@ -97,6 +96,41 @@ export function Sidebar() {
     const [activeWorkspace, setActiveWorkspace] = useState<Workspace | null>(
         getActiveWorkspace
     );
+    const [creditBalance, setCreditBalance] = useState<number | null>(null);
+    const user = getUser();
+
+    const handleLogout = () => {
+        removeToken();
+        removeUser();
+        localStorage.removeItem(WORKSPACES_KEY);
+        localStorage.removeItem(ACTIVE_WORKSPACE_KEY);
+        router.push('/login');
+    };
+
+    const initials = user?.name
+        ? user.name
+            .split(' ')
+            .map((n) => n[0])
+            .join('')
+            .toUpperCase()
+            .slice(0, 2)
+        : '?';
+
+    // Fetch credit balance
+    useEffect(() => {
+        const ws = getActiveWorkspace();
+        if (!ws) return;
+        getCreditBalance(ws.id)
+            .then((bal) => setCreditBalance(bal.availableCredits))
+            .catch(() => {});
+        // Refresh every 30 seconds
+        const interval = setInterval(() => {
+            getCreditBalance(ws.id)
+                .then((bal) => setCreditBalance(bal.availableCredits))
+                .catch(() => {});
+        }, 30000);
+        return () => clearInterval(interval);
+    }, []);
 
     const switchWorkspace = (ws: Workspace) => {
         localStorage.setItem(ACTIVE_WORKSPACE_KEY, JSON.stringify(ws));
@@ -196,6 +230,65 @@ export function Sidebar() {
                         );
                     })}
                 </nav>
+
+                {/* Credit Balance Widget */}
+                {creditBalance !== null && (
+                    <div className="border-t border-border/50 p-3">
+                        <Link
+                            href="/credits"
+                            className={cn(
+                                'flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-accent',
+                                creditBalance < 50
+                                    ? 'text-red-500'
+                                    : creditBalance < 200
+                                        ? 'text-amber-500'
+                                        : 'text-muted-foreground'
+                            )}
+                        >
+                            <Zap className="h-4 w-4" />
+                            <span className="font-medium">
+                                {creditBalance.toLocaleString()} credits
+                            </span>
+                        </Link>
+                    </div>
+                )}
+
+                {/* User Menu */}
+                <div className="border-t border-border/50 p-3">
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button
+                                id="user-menu"
+                                variant="ghost"
+                                className="w-full justify-start gap-2 px-3"
+                            >
+                                <Avatar className="h-7 w-7">
+                                    <AvatarFallback className="bg-primary/10 text-primary text-xs font-medium">
+                                        {initials}
+                                    </AvatarFallback>
+                                </Avatar>
+                                <span className="truncate text-sm font-medium">
+                                    {user?.name || 'User'}
+                                </span>
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start" side="top" className="w-48">
+                            <DropdownMenuItem disabled className="cursor-default opacity-50">
+                                <User className="mr-2 h-4 w-4" />
+                                Profile
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                                id="logout-button"
+                                onClick={handleLogout}
+                                className="cursor-pointer text-destructive focus:text-destructive"
+                            >
+                                <LogOut className="mr-2 h-4 w-4" />
+                                Log out
+                            </DropdownMenuItem>
+                        </DropdownMenuContent>
+                    </DropdownMenu>
+                </div>
             </aside>
 
             {/* Create workspace dialog */}

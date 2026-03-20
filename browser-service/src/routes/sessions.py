@@ -15,6 +15,7 @@ class CreateSessionRequest(BaseModel):
     workspaceId: str
     profileId: str
     headless: bool = True
+    proxyUrl: Optional[str] = None
 
 
 class CreateSessionResponse(BaseModel):
@@ -31,6 +32,7 @@ async def create_session(req: CreateSessionRequest):
             workspace_id=req.workspaceId,
             profile_id=req.profileId,
             headless=req.headless,
+            proxy_url=req.proxyUrl,
         )
         port = os.getenv("PORT", "8080")
         ws_url = f"ws://localhost:{port}/ws/{req.sessionId}"

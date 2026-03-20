@@ -19,6 +19,7 @@ export const tools = pgTable("tools", {
     type: toolTypeEnum("type").notNull(),
     config: jsonb("config").default({}).notNull(),
     isGlobal: boolean("is_global").default(false).notNull(),
+    requiresApproval: boolean("requires_approval").default(false).notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

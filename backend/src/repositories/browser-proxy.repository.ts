@@ -1,4 +1,4 @@
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { db } from "../db/client.ts";
 import { browserProxies } from "../db/schema/index.ts";
 
@@ -98,7 +98,7 @@ export const browserProxyRepository = {
         return result[0] ?? null;
     },
 
-    /** Pick the best active proxy for a workspace — prefers tested/successful ones first */
+    /** Pick the best active proxy for a workspace — prefers tested/successful, then untested, never failed */
     async findFirstActiveProxy(workspaceId: string) {
         const result = await db
             .select()
@@ -110,7 +110,8 @@ export const browserProxyRepository = {
                 )
             )
             .orderBy(
-                desc(browserProxies.lastTestStatus), // 'success' > 'failed' > 'untested' alphabetically desc
+                // success=0 (best), untested=1, failed=2 (worst)
+                sql`CASE ${browserProxies.lastTestStatus} WHEN 'success' THEN 0 WHEN 'untested' THEN 1 ELSE 2 END`,
                 browserProxies.createdAt
             )
             .limit(1);

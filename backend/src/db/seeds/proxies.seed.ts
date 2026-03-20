@@ -26,16 +26,6 @@ const DEFAULT_PROXIES: ProxySeed[] = [
         city: "Mumbai",
     },
     {
-        label: "India - Geonix 2",
-        host: "res.geonix.com",
-        port: 10001,
-        username: "633273d8fc72a767",
-        password: "SC7ov4DO",
-        protocol: "http",
-        country: "IN",
-        city: "Mumbai",
-    },
-    {
         label: "India - Geonix 3",
         host: "res.geonix.com",
         port: 10002,

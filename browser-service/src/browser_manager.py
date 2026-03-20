@@ -98,17 +98,8 @@ class BrowserManager:
                 # Still usable — the agent will navigate on its own
             await asyncio.sleep(0.3)
 
-            # Inject Capsolver API key into extension config via localStorage
-            if CAPSOLVER_EXTENSION_ENABLED and CAPSOLVER_API_KEY:
-                try:
-                    await page.evaluate(f"""() => {{
-                        try {{
-                            localStorage.setItem('capsolver_api_key', {repr(CAPSOLVER_API_KEY)});
-                            window.__capsolver_api_key = {repr(CAPSOLVER_API_KEY)};
-                        }} catch(e) {{}}
-                    }}""")
-                except Exception as e:
-                    logger.warning("Failed to inject Capsolver API key: %s", e)
+            # Capsolver extension config is injected via assets/config.js at startup
+            # (see captcha/extension.py — _inject_api_key)
 
         except Exception:
             await pw.stop()

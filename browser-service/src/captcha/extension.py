@@ -22,6 +22,10 @@ async def download_capsolver_extension() -> bool:
     manifest = EXTENSION_DIR / "manifest.json"
     if manifest.exists():
         logger.info("Capsolver extension already present at %s", EXTENSION_DIR)
+        # Always re-inject API key and config on startup (in case env changed)
+        api_key = os.getenv("CAPSOLVER_API_KEY", "")
+        if api_key:
+            _inject_api_key(api_key)
         return True
 
     logger.info("Downloading Capsolver Firefox extension...")
@@ -83,13 +87,27 @@ def _inject_api_key(api_key: str) -> None:
             break
 
     try:
-        # Create/overwrite a simple config that the extension reads
+        # Create/overwrite config with API key and auto-solve enabled for all captcha types
         config_js = EXTENSION_DIR / "assets" / "config.js"
         config_js.parent.mkdir(parents=True, exist_ok=True)
         config_js.write_text(
-            f'window.capsolver_config = {{ apiKey: "{api_key}" }};\n'
+            "window.capsolver_config = {\n"
+            f'  apiKey: "{api_key}",\n'
+            "  useCapsolver: true,\n"
+            "  manualSolving: false,\n"
+            "  enabledForRecaptcha: true,\n"
+            "  enabledForRecaptchaV3: true,\n"
+            "  enabledForHCaptcha: true,\n"
+            "  enabledForCloudflare: true,\n"
+            "  enabledForAwsCaptcha: true,\n"
+            "  enabledForDataDome: true,\n"
+            "  enabledForImageToText: true,\n"
+            "  enabledForGeetestV4: true,\n"
+            "  enabledForBlacklistControl: false,\n"
+            "  blackUrlList: []\n"
+            "};\n"
         )
-        logger.info("Injected Capsolver API key into extension config")
+        logger.info("Injected Capsolver API key and auto-solve config into extension")
     except Exception as e:
         logger.warning("Failed to inject API key into extension: %s", e)
 

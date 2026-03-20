@@ -24,7 +24,25 @@ import { calculateCreditCost, deductCredits } from "./credit-engine.ts";
 function sanitizeBrowserResponse(text: string): string {
     let cleaned = text;
 
-    // Remove lines that look like page state element listings:
+    // ── 1. Remove [Current Page State] header line (catches everything on same line) ──
+    cleaned = cleaned.replace(
+        /^\s*\[Current Page State\].*$/gm,
+        ""
+    );
+
+    // ── 2. Remove page state metadata lines ──
+    cleaned = cleaned.replace(/^\s*Page:\s+.+$/gm, "");
+    cleaned = cleaned.replace(/^\s*URL:\s+https?:\/\/.+$/gm, "");
+    cleaned = cleaned.replace(/^\s*Scroll:\s+\d+.*$/gm, "");
+
+    // ── 3. Remove "Interactive elements (N):" header + anything on the same line ──
+    // (The LLM sometimes puts element listings on the same line as the header)
+    cleaned = cleaned.replace(
+        /^\s*Interactive elements\s*\(\d+\)\s*:?.*$/gm,
+        ""
+    );
+
+    // ── 4. Remove lines that start with indexed element listings ──
     //   [0] <tag ...> "label"
     //   [12] <input type="text" name="q"> "Search"
     cleaned = cleaned.replace(
@@ -32,36 +50,34 @@ function sanitizeBrowserResponse(text: string): string {
         ""
     );
 
-    // Remove page state headers that may have been echoed
+    // ── 5. Remove inline indexed element refs anywhere in text ──
+    //   Catches: [0] <a href="..."> "Facebook" [1] <input type="text"> "Search"
+    //   even when they appear mid-line (not at line start)
     cleaned = cleaned.replace(
-        /^\s*\[Current Page State\].*$/gm,
-        ""
-    );
-    cleaned = cleaned.replace(
-        /^\s*Interactive elements\s*\(\d+\)\s*:?\s*$/gm,
-        ""
-    );
-    cleaned = cleaned.replace(
-        /^\s*Page:\s+.+$/gm,
-        ""
-    );
-    cleaned = cleaned.replace(
-        /^\s*URL:\s+https?:\/\/.+$/gm,
-        ""
-    );
-    cleaned = cleaned.replace(
-        /^\s*Scroll:\s+\d+.*$/gm,
+        /\[?\d+\]?\s*<[a-z][a-z0-9]*\b[^>]*>\s*(?:"[^"]*")?/gi,
         ""
     );
 
-    // Remove raw HTML blocks (anything with multiple HTML tags on consecutive lines)
+    // ── 6. Remove inline HTML void elements common in page state ──
+    //   <a href="...">, <input type="...">, <button>, <img src="...">, etc.
+    cleaned = cleaned.replace(
+        /<(?:a|input|button|select|textarea|form|iframe|img)\b[^>]*>/gi,
+        ""
+    );
+
+    // ── 7. Remove raw HTML blocks (paired open/close tags) ──
     cleaned = cleaned.replace(
         /(<[a-z][a-z0-9]*[\s>][\s\S]*?<\/[a-z][a-z0-9]*>)/gi,
         ""
     );
 
-    // Collapse excessive blank lines left by removals
+    // ── 8. Remove page state artifacts ──
+    cleaned = cleaned.replace(/\.{0,3}\s*\(additional\s+search\s+results?\)/gi, "");
+
+    // ── 9. Collapse excessive whitespace left by removals ──
     cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+    // Collapse runs of spaces (from inline removals) but preserve single spaces
+    cleaned = cleaned.replace(/ {2,}/g, " ");
 
     return cleaned.trim();
 }
@@ -263,10 +279,16 @@ export async function buildBrowserAgentTool(
                                     : "";
 
                         if (hasToolCalls && textContent) {
-                            onEvent({
-                                type: "thinking",
-                                content: textContent,
-                            });
+                            // Sanitize before emitting — the LLM often echoes
+                            // page state in its intermediate thinking text
+                            const sanitized =
+                                sanitizeBrowserResponse(textContent);
+                            if (sanitized) {
+                                onEvent({
+                                    type: "thinking",
+                                    content: sanitized,
+                                });
+                            }
                         }
                     }
 

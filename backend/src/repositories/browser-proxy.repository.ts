@@ -98,6 +98,23 @@ export const browserProxyRepository = {
         return result[0] ?? null;
     },
 
+    /** All active proxies for a workspace, sorted by health (success first, failed last) */
+    async findActiveProxies(workspaceId: string) {
+        return db
+            .select()
+            .from(browserProxies)
+            .where(
+                and(
+                    eq(browserProxies.workspaceId, workspaceId),
+                    eq(browserProxies.isActive, true)
+                )
+            )
+            .orderBy(
+                sql`CASE ${browserProxies.lastTestStatus} WHEN 'success' THEN 0 WHEN 'untested' THEN 1 ELSE 2 END`,
+                browserProxies.createdAt
+            );
+    },
+
     /** Pick the best active proxy for a workspace — prefers tested/successful, then untested, never failed */
     async findFirstActiveProxy(workspaceId: string) {
         const result = await db

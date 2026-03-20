@@ -17,66 +17,112 @@ import { buildBrowserAgentPrompt } from "./browser-agent-prompt.ts";
 import { logger } from "./logger.ts";
 import { calculateCreditCost, deductCredits } from "./credit-engine.ts";
 
+// ── Page state detection helpers ─────────────────────────────────────────────
+
+/** Returns true if a line looks like the START of a page state block. */
+function isPageStateStart(line: string): boolean {
+    return (
+        line.includes("[Current Page State]") ||
+        /^Interactive elements\s*\(\d+\)/i.test(line)
+    );
+}
+
+/** Returns true if a line looks like it belongs to a page state block. */
+function isPageStateLine(line: string): boolean {
+    if (!line) return true; // blank lines inside a block are consumed
+    return (
+        /^Page:\s/i.test(line) ||
+        /^URL:\s/i.test(line) ||
+        /^Scroll:\s/i.test(line) ||
+        /Interactive elements\s*\(/i.test(line) ||
+        /\[\d+\]\s*</.test(line) ||
+        /<[a-z][a-z0-9]*\b[^>]*>/i.test(line) ||
+        /^https?:\/\//.test(line) ||
+        /pages?\s+(above|below)/i.test(line) ||
+        /\(additional\s+search\s+results?\)/i.test(line) ||
+        // Long URL fragments / encoded parameter strings (no spaces)
+        /^[A-Za-z0-9_\-=&%+\/.]{40,}$/.test(line) ||
+        // Orphaned quoted labels left after tag removal
+        /^\s*"[^"]*"\s*$/.test(line) ||
+        // Lines starting with element index like "[0]" or "0]"
+        /^\s*\[?\d+\]\s/.test(line) ||
+        // Orphaned value= attributes
+        /^\s*value="[^"]*"/.test(line)
+    );
+}
+
+/**
+ * Remove entire blocks of page state data using line-by-line scanning.
+ * Much more robust than regex for multi-line blocks with varied formatting.
+ */
+function stripPageStateBlocks(text: string): string {
+    const lines = text.split("\n");
+    const result: string[] = [];
+    let inBlock = false;
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+
+        if (isPageStateStart(trimmed)) {
+            inBlock = true;
+            continue;
+        }
+
+        if (inBlock) {
+            if (isPageStateLine(trimmed)) continue;
+            // First line that doesn't look like page state → exit block
+            inBlock = false;
+        }
+
+        result.push(line);
+    }
+
+    return result.join("\n");
+}
+
 /**
  * Sanitize the browser agent's final response to strip any leaked
  * DOM/HTML/page-state content that shouldn't be shown to the user.
+ *
+ * Uses a two-phase approach:
+ *   Phase 1 — line scanning removes entire page state blocks
+ *   Phase 2 — inline regex strips any remaining HTML / element fragments
  */
 function sanitizeBrowserResponse(text: string): string {
-    let cleaned = text;
+    // ── Phase 1: block-level removal via line scanning ──
+    let cleaned = stripPageStateBlocks(text);
 
-    // ── 1. Remove [Current Page State] header line (catches everything on same line) ──
-    cleaned = cleaned.replace(
-        /^\s*\[Current Page State\].*$/gm,
-        ""
-    );
+    // ── Phase 2: inline pattern cleanup for any remaining fragments ──
 
-    // ── 2. Remove page state metadata lines ──
-    cleaned = cleaned.replace(/^\s*Page:\s+.+$/gm, "");
-    cleaned = cleaned.replace(/^\s*URL:\s+https?:\/\/.+$/gm, "");
-    cleaned = cleaned.replace(/^\s*Scroll:\s+\d+.*$/gm, "");
-
-    // ── 3. Remove "Interactive elements (N):" header + anything on the same line ──
-    // (The LLM sometimes puts element listings on the same line as the header)
-    cleaned = cleaned.replace(
-        /^\s*Interactive elements\s*\(\d+\)\s*:?.*$/gm,
-        ""
-    );
-
-    // ── 4. Remove lines that start with indexed element listings ──
-    //   [0] <tag ...> "label"
-    //   [12] <input type="text" name="q"> "Search"
-    cleaned = cleaned.replace(
-        /^\s*\[?\d+\]?\s*<[a-z][a-z0-9]*[^>]*>.*$/gm,
-        ""
-    );
-
-    // ── 5. Remove inline indexed element refs anywhere in text ──
-    //   Catches: [0] <a href="..."> "Facebook" [1] <input type="text"> "Search"
-    //   even when they appear mid-line (not at line start)
+    // Indexed element refs: [0] <a href="..."> "label"
     cleaned = cleaned.replace(
         /\[?\d+\]?\s*<[a-z][a-z0-9]*\b[^>]*>\s*(?:"[^"]*")?/gi,
         ""
     );
 
-    // ── 6. Remove inline HTML void elements common in page state ──
-    //   <a href="...">, <input type="...">, <button>, <img src="...">, etc.
+    // Inline HTML void elements (including div/span from page state)
     cleaned = cleaned.replace(
-        /<(?:a|input|button|select|textarea|form|iframe|img)\b[^>]*>/gi,
+        /<(?:a|input|button|select|textarea|form|iframe|img|div|span)\b[^>]*>/gi,
         ""
     );
 
-    // ── 7. Remove raw HTML blocks (paired open/close tags) ──
+    // Paired HTML tags: <tag>...</tag>
     cleaned = cleaned.replace(
         /(<[a-z][a-z0-9]*[\s>][\s\S]*?<\/[a-z][a-z0-9]*>)/gi,
         ""
     );
 
-    // ── 8. Remove page state artifacts ──
-    cleaned = cleaned.replace(/\.{0,3}\s*\(additional\s+search\s+results?\)/gi, "");
+    // Page state artifacts
+    cleaned = cleaned.replace(
+        /\.{0,3}\s*\(additional\s+search\s+results?\)/gi,
+        ""
+    );
 
-    // ── 9. Collapse excessive whitespace left by removals ──
+    // Orphaned value="..." attributes
+    cleaned = cleaned.replace(/\bvalue="[^"]*"/gi, "");
+
+    // ── Phase 3: whitespace cleanup ──
     cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
-    // Collapse runs of spaces (from inline removals) but preserve single spaces
     cleaned = cleaned.replace(/ {2,}/g, " ");
 
     return cleaned.trim();
@@ -230,8 +276,11 @@ export async function buildBrowserAgentTool(
                     );
 
                     // ── Auto-inject current page state ──
-                    // Fetch interactive elements before every LLM decision
-                    let pageStateMsg: HumanMessage | null = null;
+                    // Fetch interactive elements before every LLM decision.
+                    // Page state is appended to the SYSTEM message (not a
+                    // HumanMessage) so the LLM treats it as internal context
+                    // and is far less likely to echo it in its response.
+                    let pageStateSuffix = "";
                     try {
                         const pageState = await getPageState();
                         if (
@@ -239,9 +288,8 @@ export async function buildBrowserAgentTool(
                             !pageState.startsWith("Error") &&
                             !pageState.startsWith("Browser action failed")
                         ) {
-                            pageStateMsg = new HumanMessage(
-                                `[Current Page State]\n${pageState}`
-                            );
+                            pageStateSuffix =
+                                `\n\n## Current Page State (internal — NEVER include in your response)\n${pageState}`;
                         }
                     } catch (err) {
                         logger.warn(
@@ -250,11 +298,11 @@ export async function buildBrowserAgentTool(
                         );
                     }
 
-                    // Build messages: system + page state + conversation
-                    const systemMsg = new SystemMessage(systemPrompt);
-                    const messages = pageStateMsg
-                        ? [systemMsg, pageStateMsg, ...state.messages]
-                        : [systemMsg, ...state.messages];
+                    // Build messages: system (with page state) + conversation
+                    const systemMsg = new SystemMessage(
+                        systemPrompt + pageStateSuffix
+                    );
+                    const messages = [systemMsg, ...state.messages];
 
                     const response = await llmWithTools.invoke(messages);
 

@@ -51,13 +51,15 @@ export FRONTEND_URL="${FRONTEND_URL:-http://localhost:3000}"
 export NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://localhost:4000}"
 export NEXT_PUBLIC_BROWSER_WS_URL="${NEXT_PUBLIC_BROWSER_WS_URL:-ws://localhost:8080}"
 export FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+export PUBLIC_FRONTEND_PORT="${PUBLIC_FRONTEND_PORT:-3001}"
+export ADMIN_PANEL_PORT="${ADMIN_PANEL_PORT:-3002}"
 export BACKEND_PORT="${BACKEND_PORT:-4000}"
 export BROWSER_SERVICE_PORT="${BROWSER_SERVICE_PORT:-8080}"
 
 # ─── Check port conflicts ───
 echo -e "${CYAN}Checking ports...${NC}"
-PORTS=("$FRONTEND_PORT" "$BACKEND_PORT" "$BROWSER_SERVICE_PORT")
-NAMES=("Frontend" "Backend" "Browser Service")
+PORTS=("$FRONTEND_PORT" "$PUBLIC_FRONTEND_PORT" "$ADMIN_PANEL_PORT" "$BACKEND_PORT" "$BROWSER_SERVICE_PORT")
+NAMES=("Frontend" "Public Frontend" "Admin Panel" "Backend" "Browser Service")
 for i in "${!PORTS[@]}"; do
     port="${PORTS[$i]}"
     name="${NAMES[$i]}"
@@ -77,6 +79,8 @@ echo -e "${GREEN}Ports available${NC}"
 echo ""
 echo -e "${CYAN}Configuration:${NC}"
 echo "  Frontend:        http://localhost:${FRONTEND_PORT}"
+echo "  Public Frontend: http://localhost:${PUBLIC_FRONTEND_PORT}"
+echo "  Admin Panel:     http://localhost:${ADMIN_PANEL_PORT}"
 echo "  Backend:         http://localhost:${BACKEND_PORT}"
 echo "  Browser Service: http://localhost:${BROWSER_SERVICE_PORT}"
 echo "  Database:        ${POSTGRES_DB} (${POSTGRES_USER}@postgres)"
@@ -158,11 +162,37 @@ for i in $(seq 1 60); do
     sleep 1
 done
 
+# Wait for public-frontend
+for i in $(seq 1 60); do
+    if curl -sf "http://localhost:${PUBLIC_FRONTEND_PORT}" &>/dev/null; then
+        echo -e "  ${GREEN}Public Frontend ready${NC}"
+        break
+    fi
+    if [ "$i" -eq 60 ]; then
+        echo -e "  ${YELLOW}Public Frontend still starting (check logs)${NC}"
+    fi
+    sleep 1
+done
+
+# Wait for admin-panel
+for i in $(seq 1 60); do
+    if curl -sf "http://localhost:${ADMIN_PANEL_PORT}" &>/dev/null; then
+        echo -e "  ${GREEN}Admin Panel ready${NC}"
+        break
+    fi
+    if [ "$i" -eq 60 ]; then
+        echo -e "  ${YELLOW}Admin Panel still starting (check logs)${NC}"
+    fi
+    sleep 1
+done
+
 echo ""
 echo -e "${GREEN}╔═══════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║       Pushable AI is running!             ║${NC}"
 echo -e "${GREEN}╠═══════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║  Frontend:  http://localhost:${FRONTEND_PORT}          ║${NC}"
+echo -e "${GREEN}║  Public:    http://localhost:${PUBLIC_FRONTEND_PORT}          ║${NC}"
+echo -e "${GREEN}║  Admin:     http://localhost:${ADMIN_PANEL_PORT}          ║${NC}"
 echo -e "${GREEN}║  Backend:   http://localhost:${BACKEND_PORT}          ║${NC}"
 echo -e "${GREEN}║  Browser:   http://localhost:${BROWSER_SERVICE_PORT}          ║${NC}"
 echo -e "${GREEN}╚═══════════════════════════════════════════╝${NC}"

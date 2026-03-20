@@ -104,6 +104,20 @@ services:
     depends_on:
       - backend
 
+  admin-panel:
+    build:
+      context: ./admin-panel
+      dockerfile: Dockerfile.prod
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+    restart: unless-stopped
+    ports:
+      - "${ADMIN_PANEL_PORT:-3002}:3002"
+    environment:
+      NODE_ENV: production
+    depends_on:
+      - backend
+
 volumes:
   pgdata:
   redisdata:

@@ -31,6 +31,8 @@ import { channelManager } from "./channels/channel-manager.ts";
 import { seedModels } from "./db/seeds/models.seed.ts";
 import { modelRoutes } from "./routes/models.ts";
 import { creditRoutes } from "./routes/credits.ts";
+import { blogRoutes } from "./routes/blogs.ts";
+import { contactRoutes } from "./routes/contact.ts";
 import { browserService } from "./services/browser.service.ts";
 
 const app = Fastify({ logger: false });
@@ -95,6 +97,8 @@ await app.register(browserProxyRoutes, { prefix: "/api" });
 await app.register(channelRoutes, { prefix: "/api" });
 await app.register(modelRoutes, { prefix: "/api" });
 await app.register(creditRoutes, { prefix: "/api" });
+await app.register(blogRoutes, { prefix: "/api" });
+await app.register(contactRoutes, { prefix: "/api" });
 
 // Webhook routes — NO auth, external platforms call these
 await app.register(webhookRoutes);

@@ -110,13 +110,15 @@ services:
     build: ./public-frontend
     restart: unless-stopped
     ports:
-      - "3002:3001"
+      - "3003:3001"
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+      API_URL: http://backend:4000
     depends_on:
       - backend
     volumes:
       - ./public-frontend/src:/app/src
+      - ./public-frontend/next.config.ts:/app/next.config.ts
 
   admin-panel:
     build: ./admin-panel

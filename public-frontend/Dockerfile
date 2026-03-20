@@ -11,4 +11,4 @@ COPY . .
 
 EXPOSE 3001
 
-CMD ["pnpm", "run", "dev", "--port", "3001"]
+CMD ["pnpm", "run", "dev", "--port", "3001", "--hostname", "0.0.0.0"]

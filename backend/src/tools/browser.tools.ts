@@ -4,6 +4,8 @@ import { browserRepository } from "../repositories/browser.repository.ts";
 import { browserClient } from "../lib/browser-client.ts";
 import { browserService } from "../services/browser.service.ts";
 import { agentRepository } from "../repositories/agent.repository.ts";
+import { browserProxyRepository } from "../repositories/browser-proxy.repository.ts";
+import { browserProxyService } from "../services/browser-proxy.service.ts";
 import { logger } from "../lib/logger.ts";
 
 /**
@@ -15,6 +17,57 @@ export interface BrowserToolsResult {
     tools: DynamicStructuredTool[];
     /** Fetch current interactive elements + page state as text for LLM */
     getPageState: () => Promise<string>;
+}
+
+/**
+ * Test a proxy and return its ID if healthy, otherwise try others.
+ * Returns null only if no working proxy is found.
+ */
+async function pickHealthyProxy(
+    preferredProxyId: string | null,
+    workspaceId: string,
+    agentId: string
+): Promise<string | null> {
+    // Get all active proxies for this workspace
+    const allProxies = await browserProxyRepository.findActiveProxies(workspaceId);
+    if (allProxies.length === 0) {
+        logger.warn({ agentId, workspaceId }, "No active proxies available");
+        return null;
+    }
+
+    // Build ordered list: preferred first, then the rest
+    const ordered = preferredProxyId
+        ? [
+              ...allProxies.filter((p) => p.id === preferredProxyId),
+              ...allProxies.filter((p) => p.id !== preferredProxyId),
+          ]
+        : allProxies;
+
+    // Try each proxy until one works
+    for (const proxy of ordered) {
+        try {
+            const result = await browserProxyService.testProxy(proxy.id, workspaceId);
+            if (result.success) {
+                logger.info(
+                    { proxyId: proxy.id, label: proxy.label, ip: result.ip, agentId },
+                    "Proxy health check passed"
+                );
+                return proxy.id;
+            }
+            logger.warn(
+                { proxyId: proxy.id, label: proxy.label, error: result.error, agentId },
+                "Proxy health check failed, trying next"
+            );
+        } catch (error) {
+            logger.warn(
+                { proxyId: proxy.id, label: proxy.label, error, agentId },
+                "Proxy health check error, trying next"
+            );
+        }
+    }
+
+    logger.error({ agentId, workspaceId, triedCount: ordered.length }, "All proxies failed health check");
+    return null;
 }
 
 export async function buildBrowserTools(
@@ -98,17 +151,22 @@ export async function buildBrowserTools(
     // Create new session if we don't have one
     if (!sessionId) {
         try {
-            const proxyId = agent?.browserProxyId;
+            const validProxyId = await pickHealthyProxy(
+                agent?.browserProxyId ?? null,
+                workspaceId,
+                agentId
+            );
+
             const result = await browserService.startSession(
                 profile.id,
                 workspaceId,
                 agentId,
-                proxyId ?? undefined,
+                validProxyId ?? undefined,
                 chatSessionId
             );
             sessionId = result.sessionId;
             logger.info(
-                { sessionId, chatSessionId },
+                { sessionId, chatSessionId, proxyId: validProxyId },
                 "Created new browser session for chat"
             );
         } catch (error) {

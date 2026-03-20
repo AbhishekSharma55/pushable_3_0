@@ -90,20 +90,16 @@ class BrowserManager:
             height = int(os.getenv("SCREENSHOT_HEIGHT", "1080"))
             await page.set_viewport_size({"width": width, "height": height})
             # Navigate to Google so the browser is ready with a useful default
-            await page.goto("https://www.google.com")
+            # Use a timeout and catch errors so proxy issues don't kill session creation
+            try:
+                await page.goto("https://www.google.com", timeout=15000)
+            except Exception as nav_err:
+                logger.warning("Initial navigation failed for session %s (proxy may be slow): %s", session_id, nav_err)
+                # Still usable — the agent will navigate on its own
             await asyncio.sleep(0.3)
 
-            # Inject Capsolver API key into extension config via localStorage
-            if CAPSOLVER_EXTENSION_ENABLED and CAPSOLVER_API_KEY:
-                try:
-                    await page.evaluate(f"""() => {{
-                        try {{
-                            localStorage.setItem('capsolver_api_key', {repr(CAPSOLVER_API_KEY)});
-                            window.__capsolver_api_key = {repr(CAPSOLVER_API_KEY)};
-                        }} catch(e) {{}}
-                    }}""")
-                except Exception as e:
-                    logger.warning("Failed to inject Capsolver API key: %s", e)
+            # Capsolver extension config is injected via assets/config.js at startup
+            # (see captcha/extension.py — _inject_api_key)
 
         except Exception:
             await pw.stop()

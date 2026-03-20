@@ -1,4 +1,6 @@
 import os
+import logging
+import traceback
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -6,6 +8,8 @@ from typing import Optional
 
 from ..browser_manager import browser_manager
 from ..session_store import session_store
+
+logger = logging.getLogger("sessions")
 
 router = APIRouter(prefix="/api/browser", tags=["sessions"])
 
@@ -44,6 +48,7 @@ async def create_session(req: CreateSessionRequest):
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
+        logger.error("Failed to create session %s: %s\n%s", req.sessionId, e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to create session: {e}")
 
 

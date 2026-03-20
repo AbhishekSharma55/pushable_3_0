@@ -27,6 +27,7 @@ import { initScheduler } from "./lib/scheduler.ts";
 import { scheduleQueue } from "./lib/queue.ts";
 import { channelManager } from "./channels/channel-manager.ts";
 import { seedModels } from "./db/seeds/models.seed.ts";
+import { seedProxies } from "./db/seeds/proxies.seed.ts";
 import { modelRoutes } from "./routes/models.ts";
 import { creditRoutes } from "./routes/credits.ts";
 import { browserService } from "./services/browser.service.ts";
@@ -105,6 +106,7 @@ console.log("Stale browser sessions cleaned up");
 // Run DB migrations, seed models, start workers/scheduler
 await runMigrations();
 await seedModels();
+await seedProxies();
 startWorkers();
 await initScheduler();
 await channelManager.initializeAllActive();

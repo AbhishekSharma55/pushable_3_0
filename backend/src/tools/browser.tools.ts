@@ -4,6 +4,7 @@ import { browserRepository } from "../repositories/browser.repository.ts";
 import { browserClient } from "../lib/browser-client.ts";
 import { browserService } from "../services/browser.service.ts";
 import { agentRepository } from "../repositories/agent.repository.ts";
+import { browserProxyRepository } from "../repositories/browser-proxy.repository.ts";
 import { logger } from "../lib/logger.ts";
 
 /**
@@ -98,7 +99,19 @@ export async function buildBrowserTools(
     // Create new session if we don't have one
     if (!sessionId) {
         try {
-            const proxyId = agent?.browserProxyId;
+            // Use agent's configured proxy, or auto-select the best available one
+            let proxyId = agent?.browserProxyId;
+            if (!proxyId) {
+                const autoProxy = await browserProxyRepository.findFirstActiveProxy(workspaceId);
+                if (autoProxy) {
+                    proxyId = autoProxy.id;
+                    logger.info(
+                        { proxyId: autoProxy.id, label: autoProxy.label, agentId },
+                        "Auto-selected proxy for agent (no proxy configured)"
+                    );
+                }
+            }
+
             const result = await browserService.startSession(
                 profile.id,
                 workspaceId,
@@ -108,7 +121,7 @@ export async function buildBrowserTools(
             );
             sessionId = result.sessionId;
             logger.info(
-                { sessionId, chatSessionId },
+                { sessionId, chatSessionId, proxyId },
                 "Created new browser session for chat"
             );
         } catch (error) {

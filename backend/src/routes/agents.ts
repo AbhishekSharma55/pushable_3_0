@@ -15,6 +15,7 @@ const updateAgentSchema = z.object({
     systemPrompt: z.string().optional(),
     model: z.string().optional(),
     temperature: z.number().min(0).max(2).optional(),
+    browserProxyId: z.string().uuid().nullable().optional(),
 });
 
 const systemPermissionsSchema = z.object({

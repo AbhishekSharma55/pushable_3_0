@@ -23,6 +23,8 @@ import {
     Eye,
     Monitor,
     Square,
+    Globe,
+    Play,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -48,7 +50,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { CreateAgentSheet } from '@/components/agents/create-agent-sheet';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
-import { getAgents, deleteAgent } from '@/lib/api/agents';
+import { getAgents, deleteAgent, updateAgent } from '@/lib/api/agents';
 import { getSessions, createSession, getMessages } from '@/lib/api/sessions';
 import { API_URL } from '@/lib/constants';
 import { getToken } from '@/lib/auth';
@@ -56,13 +58,21 @@ import { parseArtifact } from '@/lib/artifact-parser';
 import type { Artifact } from '@/lib/artifact-parser';
 import { ArtifactPanel, FileIcon } from '@/components/artifact';
 import { downloadArtifact } from '@/lib/artifact-download';
-import { getProfiles, startSession as startBrowserSession, endSession as endBrowserSession } from '@/lib/api/browser';
+import { getProfiles, startSession as startBrowserSession, endSession as endBrowserSession, updateProfile, getProxies, getSessions as getBrowserSessions } from '@/lib/api/browser';
 import { getBrowserSession } from '@/lib/api/sessions';
 import { BrowserPreview } from '@/components/browser/browser-preview';
 import { BROWSER_WS_URL } from '@/lib/constants';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { Agent, Session, Message, BrowserProfile } from '@/types';
+import type { Agent, Session, Message, BrowserProfile, BrowserProxy, BrowserSession } from '@/types';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
+import { Label } from '@/components/ui/label';
 import { ToolCallDisplay } from '@/components/chat/tool-call-display';
 import { ApprovalCard } from '@/components/chat/approval-card';
 
@@ -141,6 +151,11 @@ export default function AgentsPage() {
     const [browserSessionId, setBrowserSessionId] = useState<string | null>(null);
     const [startingBrowser, setStartingBrowser] = useState(false);
     const [showBrowserPreview, setShowBrowserPreview] = useState(false);
+
+    // Browser settings state
+    const [proxies, setProxies] = useState<BrowserProxy[]>([]);
+    const [activeBrowserSession, setActiveBrowserSession] = useState<BrowserSession | null>(null);
+    const [savingBrowserSettings, setSavingBrowserSettings] = useState(false);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -281,19 +296,39 @@ export default function AgentsPage() {
         }
     };
 
-    // Fetch browser profile for selected agent
+    // Fetch browser profile, proxies, and active session for selected agent
     useEffect(() => {
         if (!workspace || !selectedAgent) {
             setBrowserProfile(null);
+            setProxies([]);
+            setActiveBrowserSession(null);
             return;
         }
+        // Fetch profiles
         getProfiles(workspace.id)
             .then((profiles) => {
                 const assigned = profiles.find(
                     (p) => p.assignedAgentId === selectedAgent.id && p.status === 'active'
                 );
                 setBrowserProfile(assigned || null);
+                // Find active session for this profile
+                if (assigned) {
+                    getBrowserSessions(workspace.id)
+                        .then((sessions) => {
+                            const active = sessions.find(
+                                (s) => s.profileId === assigned.id && s.status === 'active'
+                            );
+                            setActiveBrowserSession(active || null);
+                        })
+                        .catch(() => {});
+                } else {
+                    setActiveBrowserSession(null);
+                }
             })
+            .catch(() => {});
+        // Fetch proxies
+        getProxies(workspace.id)
+            .then(setProxies)
             .catch(() => {});
     }, [workspace, selectedAgent]);
 
@@ -371,6 +406,89 @@ export default function AgentsPage() {
         setBrowserWsUrl(null);
         setBrowserSessionId(null);
         setShowBrowserPreview(false);
+    };
+
+    // ── Browser settings handlers ─────────────────────────────────────────────
+
+    const handleChangeFingerprint = async (os: string) => {
+        if (!workspace || !selectedAgent) return;
+        setSavingBrowserSettings(true);
+        try {
+            if (browserProfile) {
+                await updateProfile(workspace.id, browserProfile.id, { os: os as 'windows' | 'macos' | 'linux' });
+                setBrowserProfile({ ...browserProfile, os });
+            }
+            toast.success('Fingerprint updated');
+        } catch {
+            toast.error('Failed to update fingerprint');
+        } finally {
+            setSavingBrowserSettings(false);
+        }
+    };
+
+    const handleChangeProxy = async (proxyId: string) => {
+        if (!workspace || !selectedAgent) return;
+        setSavingBrowserSettings(true);
+        try {
+            const value = proxyId === '__auto__' ? null : proxyId;
+            const updated = await updateAgent(workspace.id, selectedAgent.id, { browserProxyId: value });
+            setSelectedAgent(updated);
+            // Update the agent in list too
+            setAgents((prev) => prev.map((a) => a.id === updated.id ? updated : a));
+            toast.success(value ? 'Proxy updated' : 'Proxy set to auto-select');
+        } catch {
+            toast.error('Failed to update proxy');
+        } finally {
+            setSavingBrowserSettings(false);
+        }
+    };
+
+    const handleStartBrowserSession = async () => {
+        if (!workspace || !selectedAgent) return;
+        setStartingBrowser(true);
+        try {
+            // Ensure browser profile exists
+            let profile = browserProfile;
+            if (!profile) {
+                const profiles = await getProfiles(workspace.id);
+                profile = profiles.find((p) => p.assignedAgentId === selectedAgent.id && p.status === 'active') || null;
+            }
+            if (!profile) {
+                toast.error('No browser profile found. Send a message first to auto-create one.');
+                return;
+            }
+            const { sessionId, wsUrl } = await startBrowserSession(
+                workspace.id,
+                profile.id,
+                selectedAgent.id,
+                selectedAgent.browserProxyId || undefined
+            );
+            setBrowserSessionId(sessionId);
+            setBrowserWsUrl(wsUrl);
+            setShowBrowserPreview(true);
+            setActiveBrowserSession({ id: sessionId, workspaceId: workspace.id, profileId: profile.id, agentId: selectedAgent.id, status: 'active', createdAt: new Date().toISOString(), closedAt: null });
+            setViewMode('chat');
+        } catch {
+            toast.error('Failed to start browser session');
+        } finally {
+            setStartingBrowser(false);
+        }
+    };
+
+    const handleEndBrowserSession = async () => {
+        if (!workspace) return;
+        const sessId = browserSessionId || activeBrowserSession?.id;
+        if (!sessId) return;
+        try {
+            await endBrowserSession(workspace.id, sessId);
+        } catch {
+            // ignore
+        }
+        setBrowserWsUrl(null);
+        setBrowserSessionId(null);
+        setShowBrowserPreview(false);
+        setActiveBrowserSession(null);
+        toast.success('Browser session ended');
     };
 
     // ── SSE reader helper ─────────────────────────────────────────────────────
@@ -936,6 +1054,12 @@ export default function AgentsPage() {
                                                     wsUrl={browserWsUrl}
                                                     sessionId={browserSessionId}
                                                     onClose={() => setShowBrowserPreview(false)}
+                                                    proxied={!!(selectedAgent?.browserProxyId || proxies.length > 0)}
+                                                    proxyLabel={
+                                                        selectedAgent?.browserProxyId
+                                                            ? proxies.find((p) => p.id === selectedAgent.browserProxyId)?.label
+                                                            : proxies.length > 0 ? 'Auto-proxied' : undefined
+                                                    }
                                                 />
                                             </div>
                                         )}
@@ -970,6 +1094,126 @@ export default function AgentsPage() {
                                             </p>
                                         </div>
                                     </div>
+
+                                    {/* ── Browser Settings ── */}
+                                    <div className="rounded-lg border border-border bg-card p-5 space-y-5">
+                                        <div className="flex items-center gap-2">
+                                            <Globe className="h-4 w-4 text-sky-600" />
+                                            <h3 className="text-sm font-semibold">Browser Settings</h3>
+                                        </div>
+
+                                        {/* Fingerprint (OS) */}
+                                        <div className="space-y-2">
+                                            <Label className="text-sm font-medium">Fingerprint</Label>
+                                            <Select
+                                                value={browserProfile?.os || 'windows'}
+                                                onValueChange={handleChangeFingerprint}
+                                                disabled={savingBrowserSettings}
+                                            >
+                                                <SelectTrigger className="w-full">
+                                                    <SelectValue />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    <SelectItem value="windows">Windows</SelectItem>
+                                                    <SelectItem value="macos">macOS</SelectItem>
+                                                    <SelectItem value="linux">Linux</SelectItem>
+                                                </SelectContent>
+                                            </Select>
+                                            <p className="text-xs text-muted-foreground">
+                                                OS fingerprint used by this agent&apos;s browser profile
+                                            </p>
+                                        </div>
+
+                                        {/* Proxy */}
+                                        <div className="space-y-2">
+                                            <Label className="text-sm font-medium">Proxy</Label>
+                                            <Select
+                                                value={selectedAgent.browserProxyId || '__auto__'}
+                                                onValueChange={handleChangeProxy}
+                                                disabled={savingBrowserSettings}
+                                            >
+                                                <SelectTrigger className="w-full">
+                                                    <SelectValue />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    <SelectItem value="__auto__">
+                                                        <div className="flex items-center gap-2">
+                                                            <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                                                            <span>Auto-select nearest proxy</span>
+                                                        </div>
+                                                    </SelectItem>
+                                                    {proxies.filter((p) => p.isActive).map((proxy) => (
+                                                        <SelectItem key={proxy.id} value={proxy.id}>
+                                                            <div className="flex items-center gap-2">
+                                                                {proxy.country && (
+                                                                    <span className="text-sm">
+                                                                        {String.fromCodePoint(
+                                                                            ...proxy.country.toUpperCase().split('').map((c) => 0x1f1e6 + c.charCodeAt(0) - 65)
+                                                                        )}
+                                                                    </span>
+                                                                )}
+                                                                <span>{proxy.label}</span>
+                                                                <span className="text-muted-foreground font-mono text-xs">
+                                                                    {proxy.host}:{proxy.port}
+                                                                </span>
+                                                            </div>
+                                                        </SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                            <p className="text-xs text-muted-foreground">
+                                                {proxies.filter((p) => p.isActive).length === 0
+                                                    ? 'No proxies available. Add proxies from the admin panel.'
+                                                    : 'Choose a proxy location or let the system auto-select the nearest one'}
+                                            </p>
+                                        </div>
+
+                                        {/* Start / End Session */}
+                                        <div className="space-y-2">
+                                            <Label className="text-sm font-medium">Browser Session</Label>
+                                            <div className="flex items-center gap-3">
+                                                {(browserSessionId || activeBrowserSession) ? (
+                                                    <>
+                                                        <div className="flex items-center gap-2">
+                                                            <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                                                            <span className="text-sm text-muted-foreground">Session active</span>
+                                                        </div>
+                                                        <Button
+                                                            variant="outline"
+                                                            size="sm"
+                                                            className="gap-1.5 text-red-600 hover:text-red-700"
+                                                            onClick={handleEndBrowserSession}
+                                                        >
+                                                            <Square className="h-3.5 w-3.5" />
+                                                            End Session
+                                                        </Button>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <div className="flex items-center gap-2">
+                                                            <div className="h-2 w-2 rounded-full bg-muted-foreground/40" />
+                                                            <span className="text-sm text-muted-foreground">No active session</span>
+                                                        </div>
+                                                        <Button
+                                                            variant="outline"
+                                                            size="sm"
+                                                            className="gap-1.5"
+                                                            onClick={handleStartBrowserSession}
+                                                            disabled={startingBrowser}
+                                                        >
+                                                            {startingBrowser ? (
+                                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                            ) : (
+                                                                <Play className="h-3.5 w-3.5" />
+                                                            )}
+                                                            Start Session
+                                                        </Button>
+                                                    </>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+
                                     <div className="grid grid-cols-2 gap-4">
                                         <div className="rounded-lg bg-muted/50 border border-border p-4">
                                             <p className="text-xs font-medium text-muted-foreground mb-1">Created</p>

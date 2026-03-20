@@ -34,6 +34,7 @@ export const agentService = {
             systemPrompt: string;
             model: string;
             temperature: number;
+            browserProxyId: string | null;
         }>
     ) {
         const agent = await agentRepository.findById(id, workspaceId);

@@ -1,17 +1,23 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { X, Loader2, WifiOff, Monitor, Mouse, Keyboard } from 'lucide-react';
+import { X, Loader2, WifiOff, Monitor, Mouse, Keyboard, Shield } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { useBrowserInteraction } from '@/hooks/use-browser-interaction';
 
 interface BrowserPreviewProps {
     wsUrl: string;
     sessionId: string;
     onClose: () => void;
+    proxied?: boolean;
+    proxyLabel?: string;
 }
 
-export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProps) {
+const MAX_RECONNECT_ATTEMPTS = 10;
+const RECONNECT_BASE_DELAY = 1000; // 1s, doubles each attempt up to 8s
+
+export function BrowserPreview({ wsUrl, sessionId, onClose, proxied, proxyLabel }: BrowserPreviewProps) {
     const imgRef = useRef<HTMLImageElement>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const mountedRef = useRef(true);
@@ -19,6 +25,7 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
     const reconnectCount = useRef(0);
     const reconnectTimer = useRef<NodeJS.Timeout | undefined>(undefined);
     const canvasRef = useRef<HTMLDivElement>(null);
+    const lastFrameTime = useRef(0);
 
     const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'server-restarted'>('connecting');
     const [frameCount, setFrameCount] = useState(0);
@@ -56,11 +63,31 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
             }
             setStatus('connected');
             reconnectCount.current = 0;
+            lastFrameTime.current = Date.now();
         };
 
         ws.onmessage = (event) => {
             if (!mountedRef.current) return;
+
+            // Handle text messages (ping/pong)
+            if (typeof event.data === 'string') {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'ping') {
+                        // Respond with pong to keep connection alive
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: 'pong' }));
+                        }
+                    }
+                } catch {
+                    // ignore
+                }
+                return;
+            }
+
             if (!(event.data instanceof ArrayBuffer)) return;
+
+            lastFrameTime.current = Date.now();
 
             if (prevUrlRef.current) {
                 URL.revokeObjectURL(prevUrlRef.current);
@@ -80,23 +107,36 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
         ws.onclose = (event) => {
             if (!mountedRef.current) return;
 
+            // Code 1006 = abnormal closure (server process died)
             if (event.code === 1006) {
                 setStatus('server-restarted');
                 return;
             }
 
+            // Code 4004 = session not found (server says session doesn't exist)
+            if (event.code === 4004) {
+                setStatus('server-restarted');
+                return;
+            }
+
+            // Code 1000 = normal closure (session explicitly ended)
             if (event.code === 1000) {
                 setStatus('disconnected');
                 return;
             }
 
+            // For other codes, attempt reconnection with exponential backoff
             setStatus('disconnected');
-            if (reconnectCount.current < 3) {
+            if (reconnectCount.current < MAX_RECONNECT_ATTEMPTS) {
+                const delay = Math.min(
+                    RECONNECT_BASE_DELAY * Math.pow(2, reconnectCount.current),
+                    8000
+                );
                 reconnectTimer.current = setTimeout(() => {
                     if (!mountedRef.current) return;
                     reconnectCount.current++;
                     connect();
-                }, 2000);
+                }, delay);
             }
         };
 
@@ -122,6 +162,20 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
             }
         };
     }, [connect]);
+
+    // Stale frame detection: if no frames for 15s while "connected", try reconnecting
+    useEffect(() => {
+        if (status !== 'connected') return;
+        const interval = setInterval(() => {
+            if (!mountedRef.current || status !== 'connected') return;
+            const elapsed = Date.now() - lastFrameTime.current;
+            if (elapsed > 15000 && wsRef.current) {
+                // Connection is likely stale — force reconnect
+                wsRef.current.close();
+            }
+        }, 5000);
+        return () => clearInterval(interval);
+    }, [status]);
 
     const handleReconnect = () => {
         reconnectCount.current = 0;
@@ -152,6 +206,12 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
                             <Keyboard className="h-3 w-3" />
                             Active
                         </span>
+                    )}
+                    {proxied && (
+                        <Badge variant="outline" className="text-[10px] px-1.5 py-0 bg-violet-500/10 text-violet-600 border-violet-500/20 ml-1.5">
+                            <Shield className="h-2.5 w-2.5 mr-0.5" />
+                            {proxyLabel || 'Proxied'}
+                        </Badge>
                     )}
                 </div>
                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onClose}>
@@ -218,7 +278,10 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
                     <div className="absolute inset-0 flex items-center justify-center bg-background/80 z-30">
                         <div className="flex flex-col items-center gap-3">
                             <WifiOff className="h-6 w-6 text-muted-foreground" />
-                            <span className="text-sm font-medium">Browser service restarted. Please start a new session.</span>
+                            <span className="text-sm font-medium">Browser session ended. Start a new one from Settings.</span>
+                            <Button variant="outline" size="sm" onClick={handleReconnect}>
+                                Try Reconnect
+                            </Button>
                         </div>
                     </div>
                 )}
@@ -228,13 +291,13 @@ export function BrowserPreview({ wsUrl, sessionId, onClose }: BrowserPreviewProp
                         <div className="flex flex-col items-center gap-3">
                             <WifiOff className="h-6 w-6 text-muted-foreground" />
                             <span className="text-sm text-muted-foreground">
-                                {reconnectCount.current >= 3 ? 'Could not reconnect. Start a new session.' : 'Connection lost. Reconnecting...'}
+                                {reconnectCount.current >= MAX_RECONNECT_ATTEMPTS
+                                    ? 'Could not reconnect. Start a new session.'
+                                    : `Connection lost. Reconnecting... (attempt ${reconnectCount.current}/${MAX_RECONNECT_ATTEMPTS})`}
                             </span>
-                            {reconnectCount.current >= 3 ? null : (
-                                <Button variant="outline" size="sm" onClick={handleReconnect}>
-                                    Reconnect
-                                </Button>
-                            )}
+                            <Button variant="outline" size="sm" onClick={handleReconnect}>
+                                Reconnect
+                            </Button>
                         </div>
                     </div>
                 )}

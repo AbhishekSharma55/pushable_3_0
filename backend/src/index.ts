@@ -19,6 +19,8 @@ import { skillRoutes } from "./routes/skills.ts";
 import { scheduleRoutes } from "./routes/schedules.ts";
 import { integrationRoutes } from "./routes/integrations.ts";
 import { browserRoutes } from "./routes/browser.ts";
+import { internalRoutes } from "./routes/internal.ts";
+import { vaultRoutes } from "./routes/vault.ts";
 import { browserProxyRoutes } from "./routes/browser-proxies.ts";
 import { channelRoutes } from "./routes/channels.ts";
 import { webhookRoutes } from "./routes/webhooks.ts";
@@ -30,6 +32,8 @@ import { seedModels } from "./db/seeds/models.seed.ts";
 import { seedProxies } from "./db/seeds/proxies.seed.ts";
 import { modelRoutes } from "./routes/models.ts";
 import { creditRoutes } from "./routes/credits.ts";
+import { blogRoutes } from "./routes/blogs.ts";
+import { contactRoutes } from "./routes/contact.ts";
 import { browserService } from "./services/browser.service.ts";
 
 const app = Fastify({ logger: false });
@@ -88,10 +92,14 @@ await app.register(skillRoutes, { prefix: "/api" });
 await app.register(scheduleRoutes, { prefix: "/api" });
 await app.register(integrationRoutes, { prefix: "/api" });
 await app.register(browserRoutes, { prefix: "/api" });
+await app.register(vaultRoutes, { prefix: "/api" });
+await app.register(internalRoutes, { prefix: "/api/internal" });
 await app.register(browserProxyRoutes, { prefix: "/api" });
 await app.register(channelRoutes, { prefix: "/api" });
 await app.register(modelRoutes, { prefix: "/api" });
 await app.register(creditRoutes, { prefix: "/api" });
+await app.register(blogRoutes, { prefix: "/api" });
+await app.register(contactRoutes, { prefix: "/api" });
 
 // Webhook routes — NO auth, external platforms call these
 await app.register(webhookRoutes);

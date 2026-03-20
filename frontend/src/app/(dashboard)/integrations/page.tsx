@@ -12,6 +12,7 @@ import {
     Sparkles,
     Pencil,
     Shield,
+    Lock,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -50,6 +51,8 @@ import {
     updateToolPermissions,
 } from '@/lib/api/integrations';
 import type { ToolkitAction, ToolPermissions } from '@/lib/api/integrations';
+import { getVaultStatus, connectVault, disconnectVault } from '@/lib/api/vault';
+import type { VaultStatus } from '@/lib/api/vault';
 import type { Integration, Toolkit } from '@/types';
 
 const TOOLKIT_PAGE_SIZE = 20;
@@ -94,6 +97,15 @@ export default function IntegrationsPage() {
     const [savingPerms, setSavingPerms] = useState(false);
     const [actionSearch, setActionSearch] = useState('');
 
+    // Bitwarden state
+    const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
+    const [bitwardenDialogOpen, setBitwardenDialogOpen] = useState(false);
+    const [bitwardenEmail, setBitwardenEmail] = useState('');
+    const [bitwardenPassword, setBitwardenPassword] = useState('');
+    const [bitwardenCode, setBitwardenCode] = useState('');
+    const [bitwardenCodeRequired, setBitwardenCodeRequired] = useState(false);
+    const [bitwardenConnecting, setBitwardenConnecting] = useState(false);
+
     // Infinite scroll sentinel ref
     const sentinelRef = useRef<HTMLDivElement>(null);
 
@@ -101,11 +113,13 @@ export default function IntegrationsPage() {
         if (!workspace) return;
         try {
             setLoadingIntegrations(true);
-            const [data, tkResult] = await Promise.all([
+            const [data, tkResult, vaultData] = await Promise.all([
                 getIntegrations(workspace.id),
                 getToolkits({ limit: 200 }),
+                getVaultStatus(workspace.id).catch(() => null),
             ]);
             setIntegrations(data);
+            if (vaultData) setVaultStatus(vaultData);
             const map: Record<string, string> = {};
             for (const tk of tkResult.items) {
                 if (tk.logo) map[tk.slug] = tk.logo;
@@ -356,6 +370,65 @@ export default function IntegrationsPage() {
         }
     };
 
+    const handleSelectBitwarden = () => {
+        console.log('🔐 Bitwarden button clicked');
+        setBitwardenDialogOpen(true);
+        console.log('🔐 Set bitwardenDialogOpen to true');
+        setAddDialogOpen(false);
+        console.log('🔐 Set addDialogOpen to false');
+        setBitwardenEmail('');
+        setBitwardenPassword('');
+        setBitwardenCode('');
+        setBitwardenCodeRequired(false);
+        console.log('🔐 Reset Bitwarden form state');
+    };
+
+    const handleConnectBitwarden = async () => {
+        if (!workspace) return;
+        if (!bitwardenEmail.trim()) {
+            toast.error('Email is required');
+            return;
+        }
+        if (!bitwardenPassword.trim()) {
+            toast.error('Master password is required');
+            return;
+        }
+
+        try {
+            setBitwardenConnecting(true);
+            await connectVault(workspace.id, {
+                provider: 'bitwarden',
+                email: bitwardenEmail.trim(),
+                masterPassword: bitwardenPassword.trim(),
+                verificationCode: bitwardenCodeRequired ? bitwardenCode.trim() : undefined,
+            });
+            toast.success('Bitwarden vault connected!');
+            setBitwardenDialogOpen(false);
+            fetchIntegrations();
+        } catch (error: unknown) {
+            const msg = error instanceof Error ? error.message : 'Failed to connect vault';
+            if (msg.includes('DEVICE_VERIFICATION_REQUIRED') || msg.includes('Device verification required')) {
+                setBitwardenCodeRequired(true);
+                toast.info('Verification code sent to your email. Enter it to continue.');
+            } else {
+                toast.error(msg);
+            }
+        } finally {
+            setBitwardenConnecting(false);
+        }
+    };
+
+    const handleDisconnectBitwarden = async () => {
+        if (!workspace) return;
+        try {
+            await disconnectVault(workspace.id);
+            toast.success('Bitwarden disconnected');
+            fetchIntegrations();
+        } catch {
+            toast.error('Failed to disconnect Bitwarden');
+        }
+    };
+
     const statusBadge = (status: Integration['status']) => {
         switch (status) {
             case 'active':
@@ -412,7 +485,7 @@ export default function IntegrationsPage() {
                         </div>
                     ))}
                 </div>
-            ) : integrations.length === 0 ? (
+            ) : integrations.length === 0 && !vaultStatus?.connected ? (
                 <div className="flex flex-col items-center justify-center h-[calc(100vh-280px)] text-center gap-4">
                     <div className="h-16 w-16 rounded-2xl bg-gradient-to-br from-violet-500/10 to-purple-500/10 flex items-center justify-center">
                         <Sparkles className="h-8 w-8 text-muted-foreground/50" />
@@ -432,6 +505,61 @@ export default function IntegrationsPage() {
                 </div>
             ) : (
                 <div className="space-y-2">
+                    {vaultStatus?.connected && (
+                        <div
+                            key="bitwarden"
+                            className="rounded-lg border border-border/60 bg-card px-4 py-4 flex items-center justify-between"
+                        >
+                            <div className="flex items-center gap-3">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted flex-shrink-0">
+                                    <Lock className="h-5 w-5 text-blue-600" />
+                                </div>
+                                <div>
+                                    <p className="text-sm font-semibold">Bitwarden</p>
+                                    <p className="text-xs text-muted-foreground mt-0.5">
+                                        {vaultStatus.email}
+                                    </p>
+                                    <div className="flex items-center gap-2 mt-1">
+                                        <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                            bitwarden
+                                        </Badge>
+                                        <Badge
+                                            variant="outline"
+                                            className={`text-[10px] px-1.5 py-0 ${statusBadge(vaultStatus.status as Integration['status'])}`}
+                                        >
+                                            {vaultStatus.status}
+                                        </Badge>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <AlertDialog>
+                                    <AlertDialogTrigger asChild>
+                                        <button className="p-1.5 rounded-md hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors">
+                                            <Trash2 className="h-4 w-4" />
+                                        </button>
+                                    </AlertDialogTrigger>
+                                    <AlertDialogContent>
+                                        <AlertDialogHeader>
+                                            <AlertDialogTitle>Disconnect Bitwarden</AlertDialogTitle>
+                                            <AlertDialogDescription>
+                                                Are you sure you want to disconnect your Bitwarden vault? This will remove stored credentials and cannot be undone.
+                                            </AlertDialogDescription>
+                                        </AlertDialogHeader>
+                                        <AlertDialogFooter>
+                                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                            <AlertDialogAction
+                                                onClick={handleDisconnectBitwarden}
+                                                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                            >
+                                                Disconnect
+                                            </AlertDialogAction>
+                                        </AlertDialogFooter>
+                                    </AlertDialogContent>
+                                </AlertDialog>
+                            </div>
+                        </div>
+                    )}
                     {integrations.map((integration) => {
                         const logo = getIntegrationLogo(integration);
                         const displayLabel = integration.connectionLabel || integration.name;
@@ -556,6 +684,32 @@ export default function IntegrationsPage() {
                             </div>
                         ) : (
                             <div className="grid grid-cols-2 gap-3 py-2">
+                                {/* Bitwarden card */}
+                                <button
+                                    type="button"
+                                    className="rounded-lg border border-border/60 bg-card p-3 flex items-start gap-3 text-left hover:bg-accent transition-colors cursor-pointer"
+                                    onClick={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        handleSelectBitwarden();
+                                    }}
+                                >
+                                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted flex-shrink-0">
+                                        <Lock className="h-4 w-4 text-blue-600" />
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-2">
+                                            <p className="text-sm font-medium">Bitwarden</p>
+                                            {vaultStatus?.connected && (
+                                                <CheckCircle className="h-3.5 w-3.5 text-emerald-600 flex-shrink-0" />
+                                            )}
+                                        </div>
+                                        <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">
+                                            Connect your Bitwarden password vault so agents can securely fetch credentials during tasks.
+                                        </p>
+                                    </div>
+                                </button>
+
                                 {toolkits.map((toolkit) => {
                                     const alreadyConnected = integrations.some(
                                         (i) => i.composioToolkitSlug === toolkit.slug && i.status === 'active'
@@ -714,6 +868,85 @@ export default function IntegrationsPage() {
                         <Button onClick={handleSaveEdit} disabled={saving || editLabel.trim().length < 2}>
                             {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
                             Save
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Bitwarden Connection Dialog */}
+            <Dialog open={bitwardenDialogOpen} onOpenChange={setBitwardenDialogOpen}>
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Connect Bitwarden Vault</DialogTitle>
+                        <DialogDescription>
+                            Enter your Bitwarden email and master password to connect your vault.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4 py-4">
+                        <div>
+                            <label className="text-sm font-medium mb-1.5 block">
+                                Email <span className="text-red-500">*</span>
+                            </label>
+                            <Input
+                                type="email"
+                                value={bitwardenEmail}
+                                onChange={(e) => setBitwardenEmail(e.target.value)}
+                                placeholder="your@email.com"
+                                disabled={bitwardenConnecting}
+                            />
+                        </div>
+                        <div>
+                            <label className="text-sm font-medium mb-1.5 block">
+                                Master Password <span className="text-red-500">*</span>
+                            </label>
+                            <Input
+                                type="password"
+                                value={bitwardenPassword}
+                                onChange={(e) => setBitwardenPassword(e.target.value)}
+                                placeholder="Your master password"
+                                disabled={bitwardenConnecting}
+                            />
+                            <p className="text-xs text-muted-foreground mt-1.5">
+                                Your master password is used once to derive a vault key and is never stored.
+                            </p>
+                        </div>
+                        {bitwardenCodeRequired && (
+                            <div>
+                                <label className="text-sm font-medium mb-1.5 block">
+                                    Verification Code <span className="text-red-500">*</span>
+                                </label>
+                                <Input
+                                    value={bitwardenCode}
+                                    onChange={(e) => setBitwardenCode(e.target.value)}
+                                    placeholder="Enter the code from your email"
+                                    disabled={bitwardenConnecting}
+                                />
+                                <p className="text-xs text-muted-foreground mt-1.5">
+                                    Check your email for a verification code from Bitwarden.
+                                </p>
+                            </div>
+                        )}
+                    </div>
+                    <DialogFooter>
+                        <Button
+                            variant="outline"
+                            onClick={() => {
+                                setBitwardenDialogOpen(false);
+                                setAddDialogOpen(true);
+                            }}
+                            disabled={bitwardenConnecting}
+                        >
+                            Back
+                        </Button>
+                        <Button
+                            onClick={handleConnectBitwarden}
+                            disabled={bitwardenConnecting || !bitwardenEmail.trim() || !bitwardenPassword.trim() || (bitwardenCodeRequired && !bitwardenCode.trim())}
+                            className="gap-1.5"
+                        >
+                            {bitwardenConnecting ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : null}
+                            Connect Vault
                         </Button>
                     </DialogFooter>
                 </DialogContent>

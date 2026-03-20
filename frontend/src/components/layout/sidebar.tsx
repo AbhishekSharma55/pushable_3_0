@@ -15,6 +15,8 @@ import {
     ChevronDown,
     Plus,
     Blocks,
+    Globe,
+    PlugZap,
     LogOut,
     User,
 } from 'lucide-react';
@@ -50,6 +52,7 @@ const navItems = [
     { label: 'Dashboard', href: '/', icon: LayoutDashboard },
     { label: 'Agents', href: '/agents', icon: Bot },
     {label: 'Integrations', href: '/integrations', icon: Blocks },
+    { label: 'Extension', href: '/extension-settings', icon: PlugZap },
     { label: 'Knowledge Base', href: '/kb', icon: BookOpen },
     { label: 'Skills', href: '/skills', icon: Zap },
     { label: 'Tools', href: '/tools', icon: Wrench },

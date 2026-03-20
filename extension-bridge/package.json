@@ -1,0 +1,24 @@
+{
+  "name": "extension-bridge",
+  "version": "1.0.0",
+  "description": "Standalone WebSocket bridge to connect Chrome Browser Agent extension for real browser automation",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "test": "tsx test-bridge.ts"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.1.32",
+    "dotenv": "^17.3.1",
+    "ws": "^8.18.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@types/ws": "^8.18.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

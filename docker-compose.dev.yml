@@ -44,6 +44,10 @@ services:
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       BROWSER_SERVICE_URL: http://browser-service:8080
+      BRIDGE_API_KEY: ""
+      EXTENSION_BRIDGE_URL: ws://extension-bridge:3001
+      BW_DEVICE_ID: "b661b739-3e2c-4517-9ec0-63cb10842b84"
+      BW_DATA_ROOT: /data/bw-sessions
       GATEWAY: ${GATEWAY:-}
       CLAUDE_ACCESS_TOKEN: ${CLAUDE_ACCESS_TOKEN:-}
       CLAUDE_REFRESH_TOKEN: ${CLAUDE_REFRESH_TOKEN:-}
@@ -54,6 +58,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend/src:/app/src
+      - bw-data:/data/bw-sessions
 
   browser-service:
     build:
@@ -90,17 +95,30 @@ services:
     volumes:
       - ./frontend/src:/app/src
 
-  public-frontend:
-    build: ./public-frontend
+  extension-bridge:
+    build: ./extension-bridge
     restart: unless-stopped
     ports:
       - "3001:3001"
     environment:
+      BRIDGE_PORT: "3001"
+      BRIDGE_API_KEY: ""
+    volumes:
+      - ./extension-bridge/src:/app/src
+
+  public-frontend:
+    build: ./public-frontend
+    restart: unless-stopped
+    ports:
+      - "3003:3001"
+    environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+      API_URL: http://backend:4000
     depends_on:
       - backend
     volumes:
       - ./public-frontend/src:/app/src
+      - ./public-frontend/next.config.ts:/app/next.config.ts
 
   admin-panel:
     build: ./admin-panel
@@ -119,3 +137,5 @@ services:
 volumes:
   pgdata:
   redisdata:
+  bw-data:
+

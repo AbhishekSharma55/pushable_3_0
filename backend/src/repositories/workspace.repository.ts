@@ -7,7 +7,7 @@ import {
 } from "../db/schema/index.ts";
 
 export const workspaceRepository = {
-    async create(data: { name: string; slug: string; ownerId: string }) {
+    async create(data: { name: string; slug: string; ownerId: string; extensionApiKey?: string }) {
         const result = await db.insert(workspaces).values(data).returning();
         return result[0];
     },
@@ -65,5 +65,23 @@ export const workspaceRepository = {
 
     async createCredits(workspaceId: string) {
         await db.insert(credits).values({ workspaceId });
+    },
+
+    async updateExtensionApiKey(workspaceId: string, apiKey: string) {
+        const result = await db
+            .update(workspaces)
+            .set({ extensionApiKey: apiKey, updatedAt: new Date() })
+            .where(eq(workspaces.id, workspaceId))
+            .returning();
+        return result[0] ?? null;
+    },
+
+    async findByExtensionApiKey(apiKey: string) {
+        const result = await db
+            .select()
+            .from(workspaces)
+            .where(eq(workspaces.extensionApiKey, apiKey))
+            .limit(1);
+        return result[0] ?? null;
     },
 };

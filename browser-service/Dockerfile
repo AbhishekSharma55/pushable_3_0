@@ -27,7 +27,6 @@ RUN python -m playwright install firefox
 
 # Copy browser-service source
 COPY browser-service/src ./src
-COPY browser-service/.env.example ./.env.example
 
 EXPOSE 8080
 

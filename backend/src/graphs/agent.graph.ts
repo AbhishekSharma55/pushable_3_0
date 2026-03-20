@@ -20,6 +20,8 @@ import { integrationRepository } from "../repositories/integration.repository.ts
 import { getComposioClient } from "../lib/composio.ts";
 import { logger } from "../lib/logger.ts";
 import { buildBrowserAgentTool, type BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
+import { buildExtensionBrowserTools } from "../lib/extension-bridge-client.ts";
+import { buildVaultTools } from "../tools/vault.tools.ts";
 import { buildSystemTools } from "../tools/system.tools.ts";
 import { buildMemoryTools } from "../tools/memory.tools.ts";
 import { buildPlanningTools, type Todo } from "../tools/planning.tools.ts";
@@ -455,7 +457,29 @@ export async function createAgentGraph(
         }
     }
 
-    // --- 6. Fetch skill metadata for prompt builder ---
+    // --- 6. Extension browser tools (real Chrome via extension) ---
+    try {
+        const extTools = buildExtensionBrowserTools();
+        langchainTools.push(...extTools);
+    } catch (error) {
+        logger.warn(
+            { error, agentId },
+            "Failed to load extension browser tools, proceeding without them"
+        );
+    }
+
+    // --- 6b. Vault tools (Bitwarden credential access) ---
+    try {
+        const vaultTools = await buildVaultTools(workspaceId);
+        langchainTools.push(...vaultTools);
+    } catch (error) {
+        logger.warn(
+            { error, agentId },
+            "Failed to load vault tools, proceeding without them"
+        );
+    }
+
+    // --- 6c. Fetch skill metadata for prompt builder ---
     const permittedSkills = await skillRepository.findByIds(
         allowedSkillIds,
         workspaceId

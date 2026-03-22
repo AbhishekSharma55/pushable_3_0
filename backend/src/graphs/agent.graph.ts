@@ -1,5 +1,5 @@
 import { StateGraph, Annotation, MessagesAnnotation, interrupt } from "@langchain/langgraph";
-import { createLLM, refreshClaudeToken } from "../lib/gateway.ts";
+import { createLLM } from "../lib/gateway.ts";
 import { SystemMessage, AIMessage, HumanMessage, RemoveMessage, ToolMessage } from "@langchain/core/messages";
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
@@ -156,7 +156,7 @@ export async function createAgentGraph(
     const modelMultiplier = resolvedModel.multiplier;
 
     const agentTemperature = agent.temperature ?? 0.7;
-    const { llm, isClaudeDirect, useStandardApiKey, recreate: recreateLLM } = createLLM({
+    const { llm, isClaudeDirect, recreate: recreateLLM } = createLLM({
         modelId,
         temperature: agentTemperature,
     });
@@ -928,24 +928,7 @@ You can remember important information about users across conversations using th
             response = await llmWithTools.invoke([systemMsg, ...state.messages]);
         } catch (error: unknown) {
             logger.error({ error, isClaudeDirect, modelId }, "LLM invocation error details");
-            const status = (error as { status?: number })?.status;
-            const errType = (error as { error?: { type?: string } })?.error?.type;
-            if (
-                isClaudeDirect &&
-                !useStandardApiKey &&
-                (status === 401 || errType === "authentication_error")
-            ) {
-                logger.warn("Claude token expired during LLM call, refreshing and retrying…");
-                await refreshClaudeToken();
-                const freshLlm = recreateLLM();
-                const freshLlmWithTools =
-                    langchainTools.length > 0
-                        ? freshLlm.bindTools(langchainTools)
-                        : freshLlm;
-                response = await freshLlmWithTools.invoke([systemMsg, ...state.messages]);
-            } else {
-                throw error;
-            }
+            throw error;
         }
 
         // --- Deduct credits AFTER successful LLM response (fire-and-forget) ---

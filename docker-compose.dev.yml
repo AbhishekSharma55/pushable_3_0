@@ -52,9 +52,6 @@ services:
       BW_DATA_ROOT: /data/bw-sessions
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_CLI_PROXY_URL: ${CLAUDE_CLI_PROXY_URL:-}
-      GATEWAY: ${GATEWAY:-}
-      CLAUDE_ACCESS_TOKEN: ${CLAUDE_ACCESS_TOKEN:-}
-      CLAUDE_REFRESH_TOKEN: ${CLAUDE_REFRESH_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy

@@ -30,6 +30,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile.prod
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -44,9 +46,8 @@ services:
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       BROWSER_SERVICE_URL: http://browser-service:8080
-      GATEWAY: ${GATEWAY:-}
-      CLAUDE_ACCESS_TOKEN: ${CLAUDE_ACCESS_TOKEN:-}
-      CLAUDE_REFRESH_TOKEN: ${CLAUDE_REFRESH_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_CLI_PROXY_URL: ${CLAUDE_CLI_PROXY_URL:-}
       NODE_ENV: production
     depends_on:
       postgres:

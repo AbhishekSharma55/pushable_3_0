@@ -257,6 +257,7 @@ export interface LLMModel {
     isFeatured: boolean;
     available: boolean;
     requiredPlan: string;
+    directApiEnabled?: boolean;
     creditCostPerMessage: number;
 }
 

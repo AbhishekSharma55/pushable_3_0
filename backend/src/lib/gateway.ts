@@ -1,34 +1,58 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { ChatAnthropic } from "@langchain/anthropic";
+import Anthropic from "@anthropic-ai/sdk";
 import { logger } from "./logger.ts";
 
-// ── In-memory token (refreshable) ──────────────────────────────
+// ── In-memory token (refreshable, used for OAuth flow) ─────────
 let currentAccessToken = process.env.CLAUDE_ACCESS_TOKEN || "";
 
 // ── Detection helpers ──────────────────────────────────────────
 
+/** Returns the Anthropic API key if set (standard key, no refresh needed). */
+export function getAnthropicApiKey(): string | undefined {
+    return process.env.ANTHROPIC_API_KEY;
+}
+
+/** True if we should route Anthropic models directly (API key, OAuth, or CLI proxy). */
 export function isClaudeGateway(): boolean {
-    return process.env.GATEWAY?.toUpperCase() === "CLAUDE";
+    return !!(
+        process.env.ANTHROPIC_API_KEY ||
+        process.env.CLAUDE_CLI_PROXY_URL ||
+        process.env.GATEWAY?.toUpperCase() === "CLAUDE"
+    );
 }
 
 export function isAnthropicModel(modelId: string): boolean {
     return modelId.startsWith("anthropic/");
 }
 
-/** Strip the `anthropic/` prefix so the ID works with the Anthropic API. */
+/** Strip the `anthropic/` prefix and normalize dots to hyphens for the Anthropic API. */
 export function toClaudeModelId(modelId: string): string {
-    return modelId.startsWith("anthropic/")
+    const stripped = modelId.startsWith("anthropic/")
         ? modelId.slice("anthropic/".length)
         : modelId;
+    // OpenRouter uses dots (claude-sonnet-4.6), Anthropic API uses hyphens (claude-sonnet-4-6)
+    return stripped.replace(/\./g, "-");
+}
+
+/** True when using an OAuth access token (sk-ant-oat01-…) rather than a standard API key. */
+function isOAuthToken(key: string): boolean {
+    return key.startsWith("sk-ant-oat");
 }
 
 export function getClaudeAccessToken(): string {
     return currentAccessToken;
 }
 
-// ── Token refresh ──────────────────────────────────────────────
+// ── Token refresh (only needed for OAuth flow, NOT for ANTHROPIC_API_KEY) ──
 
 export async function refreshClaudeToken(): Promise<string> {
+    // Standard API key never needs refresh
+    const apiKey = getAnthropicApiKey();
+    if (apiKey && !isOAuthToken(apiKey)) {
+        return apiKey;
+    }
+
     const refreshToken = process.env.CLAUDE_REFRESH_TOKEN;
     if (!refreshToken) {
         throw new Error("CLAUDE_REFRESH_TOKEN is not set");
@@ -42,7 +66,7 @@ export async function refreshClaudeToken(): Promise<string> {
     });
 
     const res = await fetch(
-        "https://console.anthropic.com/v1/oauth/token",
+        "https://platform.claude.com/v1/oauth/token",
         {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -94,27 +118,89 @@ export function createLLM(options: CreateLLMOptions) {
         isClaudeGateway() && isAnthropicModel(modelId);
 
     if (useClaudeDirect) {
-        if (!currentAccessToken) {
+        const apiKey = getAnthropicApiKey();
+        const cliProxyUrl = process.env.CLAUDE_CLI_PROXY_URL;
+        const effectiveKey = apiKey || currentAccessToken;
+
+        // ── CLI Proxy (Claude Code subscription via host proxy) ──
+        if (cliProxyUrl && isAnthropicModel(modelId)) {
+            logger.info(
+                { modelId, claudeModel: toClaudeModelId(modelId), proxyUrl: cliProxyUrl },
+                "Using Claude CLI proxy gateway"
+            );
+
+            const build = () =>
+                new ChatAnthropic({
+                    model: toClaudeModelId(modelId),
+                    temperature,
+                    streaming,
+                    maxRetries,
+                    anthropicApiKey: "cli-proxy",
+                    anthropicApiUrl: cliProxyUrl,
+                });
+
+            return {
+                llm: build(),
+                isClaudeDirect: true,
+                useStandardApiKey: true,
+                recreate: build,
+            };
+        }
+
+        if (!effectiveKey) {
             throw new Error(
-                "GATEWAY is set to CLAUDE but CLAUDE_ACCESS_TOKEN is missing"
+                "Anthropic model requested but neither ANTHROPIC_API_KEY, CLAUDE_CLI_PROXY_URL, nor CLAUDE_ACCESS_TOKEN is set"
             );
         }
 
+        const useOAuth = isOAuthToken(effectiveKey);
+
         logger.info(
-            { modelId, claudeModel: toClaudeModelId(modelId) },
+            {
+                modelId,
+                claudeModel: toClaudeModelId(modelId),
+                authMethod: useOAuth ? "oauth-token" : "api-key",
+            },
             "Using Claude gateway (direct Anthropic API)"
         );
 
-        const build = () =>
-            new ChatAnthropic({
+        const build = () => {
+            if (useOAuth) {
+                // OAuth tokens — only works for Haiku via public API
+                return new ChatAnthropic({
+                    model: toClaudeModelId(modelId),
+                    temperature,
+                    streaming,
+                    maxRetries,
+                    clientOptions: {
+                        defaultHeaders: {
+                            "anthropic-beta": "oauth-2025-04-20",
+                        },
+                    },
+                    createClient: (opts) =>
+                        new Anthropic({
+                            ...opts,
+                            apiKey: null as unknown as string,
+                            authToken: currentAccessToken,
+                        }),
+                });
+            }
+            // Standard API key (sk-ant-api03-…) uses x-api-key header
+            return new ChatAnthropic({
                 model: toClaudeModelId(modelId),
                 temperature,
                 streaming,
                 maxRetries,
-                anthropicApiKey: currentAccessToken,
+                anthropicApiKey: effectiveKey,
             });
+        };
 
-        return { llm: build(), isClaudeDirect: true, recreate: build };
+        return {
+            llm: build(),
+            isClaudeDirect: true,
+            useStandardApiKey: !useOAuth,
+            recreate: build,
+        };
     }
 
     // ── OpenRouter (default) ───────────────────────────────────
@@ -147,7 +233,7 @@ export function createLLM(options: CreateLLMOptions) {
                 : { apiKey: process.env.OPENAI_API_KEY },
         });
 
-    return { llm: build(), isClaudeDirect: false, recreate: build };
+    return { llm: build(), isClaudeDirect: false, useStandardApiKey: false, recreate: build };
 }
 
 // ── Raw Anthropic Messages API call (for utility functions) ────
@@ -166,7 +252,7 @@ export async function claudeChat(
     } = {}
 ): Promise<string> {
     const {
-        model = "claude-haiku-4-5-20251001",
+        model = "claude-haiku-4-5",
         temperature = 0,
         max_tokens = 1024,
     } = options;
@@ -183,20 +269,31 @@ export async function claudeChat(
         };
         if (systemMsg) body.system = systemMsg.content;
 
+        // OAuth tokens use Bearer auth + beta header, standard API keys use x-api-key
+        const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+        };
+        if (isOAuthToken(token)) {
+            headers["Authorization"] = `Bearer ${token}`;
+            headers["anthropic-beta"] = "oauth-2025-04-20";
+        } else {
+            headers["x-api-key"] = token;
+        }
+
         return fetch("https://api.anthropic.com/v1/messages", {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "x-api-key": token,
-                "anthropic-version": "2023-06-01",
-            },
+            headers,
             body: JSON.stringify(body),
         });
     };
 
-    let res = await makeRequest(currentAccessToken);
+    const apiKey = getAnthropicApiKey();
+    const token = apiKey || currentAccessToken;
 
-    // Retry once on 401
+    let res = await makeRequest(token);
+
+    // Retry once on 401 (token expired)
     if (res.status === 401) {
         logger.warn("Claude token expired during utility call, refreshing…");
         const newToken = await refreshClaudeToken();

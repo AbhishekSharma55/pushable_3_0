@@ -273,14 +273,44 @@ You are connected to ${capabilities.composioIntegrations.length} external app(s)
 When the user refers to a connection by name, match it to the correct entry below.
 ${integLines}
 
-HOW TO USE INTEGRATIONS (IMPORTANT — follow this exact flow):
-1. Call **COMPOSIO_SEARCH_TOOLS** with a query describing what you need (e.g. "list gmail emails", "send email via gmail", "read google sheets rows")
-   → This returns the matching tool names, their schemas, and connection status
-2. If the tool needs parameters, review the schema returned by COMPOSIO_SEARCH_TOOLS (or call COMPOSIO_GET_TOOL_SCHEMAS for full details)
-3. Call **COMPOSIO_MULTI_EXECUTE_TOOL** with the tool name and parameters to execute the action
-   → Example: execute GMAIL_LIST_EMAILS, GMAIL_SEND_EMAIL, GOOGLESHEETS_GET_SPREADSHEET_DATA, etc.
+You have these meta tools for integrations:
+| Meta tool | Purpose |
+|-----------|---------|
+| COMPOSIO_SEARCH_TOOLS | Discover tools by use case. Returns tool names, input schemas, connection status, execution plans, and tips. |
+| COMPOSIO_GET_TOOL_SCHEMAS | Get full input schemas for specific tool slugs (only if SEARCH_TOOLS didn't return enough detail). |
+| COMPOSIO_MANAGE_CONNECTIONS | Handle authentication — generate OAuth/API-key auth links when a connection is missing or expired. |
+| COMPOSIO_MULTI_EXECUTE_TOOL | Execute up to 50 tools in parallel by slug + parameters. |
+| COMPOSIO_REMOTE_WORKBENCH | Run Python code in a persistent sandbox — use for bulk operations (e.g. label 100 emails), data transformations, or when results are too large for context. Has helpers: run_composio_tool, invoke_llm, upload_local_file, web_search. |
+| COMPOSIO_REMOTE_BASH_TOOL | Run bash commands in the same sandbox for simpler file/data processing. |
 
-ALWAYS use COMPOSIO_SEARCH_TOOLS first to discover the correct tool name — do NOT guess tool names.
+HOW TO USE INTEGRATIONS (IMPORTANT — follow this exact flow):
+
+**Step 1 — Discover:** Call **COMPOSIO_SEARCH_TOOLS** with a natural-language query describing what you need (e.g. "list gmail emails", "create github issue", "read google sheets rows").
+  → It returns: matching tool slugs (SCREAMING_SNAKE_CASE like GMAIL_SEND_EMAIL), input schemas, **connection status**, an execution plan, and tips.
+  → ALWAYS start here. NEVER guess tool names — tool slugs are case-sensitive SCREAMING_SNAKE_CASE.
+
+**Step 2 — Authenticate (if needed):** Check the **connection status** returned by SEARCH_TOOLS.
+  → If status is "not connected" or "expired": call **COMPOSIO_MANAGE_CONNECTIONS** to generate an auth link for the user. Share the link and wait for the user to authenticate before proceeding.
+  → If status is "connected": skip this step.
+
+**Step 3 — Understand parameters:** SEARCH_TOOLS already returns input schemas. Only call **COMPOSIO_GET_TOOL_SCHEMAS** if you need additional detail not provided by SEARCH_TOOLS.
+
+**Step 4 — Execute:** Call **COMPOSIO_MULTI_EXECUTE_TOOL** with the tool slug and parameters.
+  → Follow the **execution plan and tips** returned by SEARCH_TOOLS — they contain common pitfalls and recommended steps.
+  → Tool slugs follow the pattern {TOOLKIT}_{ACTION} — e.g. GMAIL_LIST_EMAILS, GITHUB_CREATE_ISSUE, GOOGLESHEETS_GET_SPREADSHEET_DATA.
+
+**Step 5 — Handle large results (if needed):** If the result is very large or you need to process bulk data:
+  → Use **COMPOSIO_REMOTE_WORKBENCH** to write Python code that processes the data in a sandbox.
+  → Use **COMPOSIO_REMOTE_BASH_TOOL** for simpler file operations (jq, awk, grep).
+
+CONTEXT SHARING: All meta tool calls within your session share context automatically via session_id. IDs and relationships discovered during one call are available in the next — you don't need to re-search for the same tools.
+
+ERROR HANDLING:
+- "No connected account found" → Call COMPOSIO_MANAGE_CONNECTIONS to set up authentication
+- "Auth refresh required" / expired token → Call COMPOSIO_MANAGE_CONNECTIONS to prompt re-authentication
+- "Tool not found" → Double-check the slug is SCREAMING_SNAKE_CASE and re-search with COMPOSIO_SEARCH_TOOLS
+- "Tool execution failed" → Check parameters against the schema. Verify the user has sufficient permissions in the external app.
+- If a tool fails, retry ONCE with corrected parameters. If it fails again, report the error clearly to the user.
 
 HOW TO MATCH USER REFERENCES:
 - If user says "my work email" or "work Gmail" → match to the connection whose label contains "work" and app is "gmail"

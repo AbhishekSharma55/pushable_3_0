@@ -51,7 +51,7 @@ import {
 import { CreateAgentSheet } from '@/components/agents/create-agent-sheet';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
 import { getAgents, deleteAgent, updateAgent } from '@/lib/api/agents';
-import { getSessions, createSession, getMessages } from '@/lib/api/sessions';
+import { getSessions, createSession, getMessages, deleteSession } from '@/lib/api/sessions';
 import { API_URL } from '@/lib/constants';
 import { getToken } from '@/lib/auth';
 import { parseArtifact } from '@/lib/artifact-parser';
@@ -64,7 +64,8 @@ import { BrowserPreview } from '@/components/browser/browser-preview';
 import { BROWSER_WS_URL } from '@/lib/constants';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { Agent, Session, Message, BrowserProfile, BrowserProxy, BrowserSession } from '@/types';
+import type { Agent, Session, Message, BrowserProfile, BrowserProxy, BrowserSession, LLMModel } from '@/types';
+import { getAllModels } from '@/lib/api/models';
 import {
     Select,
     SelectContent,
@@ -151,11 +152,19 @@ export default function AgentsPage() {
     const [browserSessionId, setBrowserSessionId] = useState<string | null>(null);
     const [startingBrowser, setStartingBrowser] = useState(false);
     const [showBrowserPreview, setShowBrowserPreview] = useState(false);
+    const browserDismissedRef = useRef(false);
 
     // Browser settings state
     const [proxies, setProxies] = useState<BrowserProxy[]>([]);
     const [activeBrowserSession, setActiveBrowserSession] = useState<BrowserSession | null>(null);
     const [savingBrowserSettings, setSavingBrowserSettings] = useState(false);
+
+    // Session deletion state
+    const [sessionToDelete, setSessionToDelete] = useState<Session | null>(null);
+    const [deletingSession, setDeletingSession] = useState(false);
+
+    // Models (for direct API indicator)
+    const [llmModels, setLlmModels] = useState<LLMModel[]>([]);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -184,6 +193,12 @@ export default function AgentsPage() {
     }, [workspace]); // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => { fetchAgents(); }, [fetchAgents]);
+
+    // Fetch models for direct API indicator
+    useEffect(() => {
+        if (!workspace) return;
+        getAllModels(workspace.id).then(setLlmModels).catch(() => {});
+    }, [workspace]);
 
     // Fetch sessions when agent changes — auto-open last session
     useEffect(() => {
@@ -315,6 +330,26 @@ export default function AgentsPage() {
         }
     };
 
+    const handleDeleteSession = async () => {
+        if (!workspace || !selectedAgent || !sessionToDelete) return;
+        try {
+            setDeletingSession(true);
+            await deleteSession(workspace.id, selectedAgent.id, sessionToDelete.id);
+            setSessions((prev) => prev.filter((s) => s.id !== sessionToDelete.id));
+            if (activeSession?.id === sessionToDelete.id) {
+                setActiveSession(null);
+                setMessages([]);
+                updateParams({ session: null });
+            }
+            toast.success('Session deleted');
+        } catch {
+            toast.error('Failed to delete session');
+        } finally {
+            setDeletingSession(false);
+            setSessionToDelete(null);
+        }
+    };
+
     // Fetch browser profile, proxies, and active session for selected agent
     useEffect(() => {
         if (!workspace || !selectedAgent) {
@@ -356,6 +391,7 @@ export default function AgentsPage() {
         setBrowserWsUrl(null);
         setBrowserSessionId(null);
         setShowBrowserPreview(false);
+        browserDismissedRef.current = false;
     }, [selectedAgent]);
 
     // Auto-open browser panel when agent uses browser tools
@@ -363,6 +399,8 @@ export default function AgentsPage() {
         if (!workspace || !activeSession) return;
         // Already showing browser — no need to poll
         if (showBrowserPreview && browserWsUrl) return;
+        // User manually hid the browser — don't re-open
+        if (browserDismissedRef.current) return;
 
         // Check if any message has browser-related tool calls
         const hasBrowserTool = messages.some((m) =>
@@ -403,11 +441,13 @@ export default function AgentsPage() {
             const { sessionId, wsUrl } = await startBrowserSession(
                 workspace.id,
                 browserProfile.id,
-                selectedAgent.id
+                selectedAgent.id,
+                selectedAgent.browserProxyId || undefined
             );
             setBrowserSessionId(sessionId);
             setBrowserWsUrl(wsUrl);
             setShowBrowserPreview(true);
+            browserDismissedRef.current = false;
         } catch {
             toast.error('Failed to start browser session');
         } finally {
@@ -911,10 +951,37 @@ export default function AgentsPage() {
                                                         <DropdownMenuItem key={s.id} className={`text-xs ${activeSession?.id === s.id ? 'bg-accent' : ''}`} onClick={() => { setActiveSession(s); updateParams({ session: s.id }); }}>
                                                             <span className="flex-1 truncate">{s.title}</span>
                                                             <span className="text-muted-foreground ml-2">{new Date(s.createdAt).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}</span>
+                                                            <button
+                                                                className="ml-1 p-0.5 rounded hover:bg-destructive/10 hover:text-destructive transition-colors"
+                                                                onClick={(e) => { e.stopPropagation(); setSessionToDelete(s); }}
+                                                            >
+                                                                <Trash2 className="h-3 w-3" />
+                                                            </button>
                                                         </DropdownMenuItem>
                                                     ))}
                                                 </DropdownMenuContent>
                                             </DropdownMenu>
+                                            <AlertDialog open={!!sessionToDelete} onOpenChange={(open) => { if (!open) setSessionToDelete(null); }}>
+                                                <AlertDialogContent>
+                                                    <AlertDialogHeader>
+                                                        <AlertDialogTitle>Delete Session</AlertDialogTitle>
+                                                        <AlertDialogDescription>
+                                                            Are you sure you want to delete &quot;{sessionToDelete?.title}&quot;? This action cannot be undone and all messages in this session will be permanently deleted.
+                                                        </AlertDialogDescription>
+                                                    </AlertDialogHeader>
+                                                    <AlertDialogFooter>
+                                                        <AlertDialogCancel disabled={deletingSession}>Cancel</AlertDialogCancel>
+                                                        <AlertDialogAction
+                                                            onClick={handleDeleteSession}
+                                                            disabled={deletingSession}
+                                                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                                        >
+                                                            {deletingSession ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}
+                                                            Delete
+                                                        </AlertDialogAction>
+                                                    </AlertDialogFooter>
+                                                </AlertDialogContent>
+                                            </AlertDialog>
                                             <Button size="sm" variant="outline" className="gap-1.5 text-xs h-8" onClick={handleNewSession}><Plus className="h-3.5 w-3.5" />New Chat</Button>
                                             {browserProfile && (
                                                 <>
@@ -924,7 +991,11 @@ export default function AgentsPage() {
                                                                 size="sm"
                                                                 variant="outline"
                                                                 className="gap-1.5 text-xs h-8"
-                                                                onClick={() => setShowBrowserPreview(!showBrowserPreview)}
+                                                                onClick={() => {
+                                                                    const next = !showBrowserPreview;
+                                                                    setShowBrowserPreview(next);
+                                                                    browserDismissedRef.current = !next;
+                                                                }}
                                                             >
                                                                 <Monitor className="h-3.5 w-3.5" />
                                                                 {showBrowserPreview ? 'Hide' : 'Show'} Browser
@@ -1132,6 +1203,9 @@ export default function AgentsPage() {
                                         <h3 className="text-sm font-medium text-muted-foreground mb-2">Model</h3>
                                         <div className="flex items-center gap-3">
                                             <Badge variant="outline" className="text-xs"><Cpu className="h-3 w-3 mr-1" />{selectedAgent.model}</Badge>
+                                            {llmModels.find(m => m.modelId === selectedAgent.model)?.directApiEnabled && (
+                                                <Badge variant="outline" className="text-xs bg-emerald-500/10 text-emerald-600 border-emerald-500/20">Direct API</Badge>
+                                            )}
                                             <Badge variant="outline" className="text-xs bg-muted/50"><Thermometer className="h-3 w-3 mr-1" />{selectedAgent.temperature}</Badge>
                                         </div>
                                     </div>

@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useMemo } from 'react';
-import { Lock, Sparkles, Zap, Brain, Code } from 'lucide-react';
+import { Lock, Sparkles, Zap, Brain, Code, Cable } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { getAllModels } from '@/lib/api/models';
@@ -81,10 +81,16 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
             {grouped.map(({ provider, models: providerModels }) => (
                 <div key={provider}>
                     {/* Provider header */}
-                    <div className="sticky top-0 z-10 bg-muted/80 backdrop-blur-sm px-3 py-1.5 border-b border-border/40">
+                    <div className="sticky top-0 z-10 bg-muted/80 backdrop-blur-sm px-3 py-1.5 border-b border-border/40 flex items-center gap-2">
                         <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                             {provider}
                         </span>
+                        {providerModels[0]?.directApiEnabled && (
+                            <Badge variant="outline" className="text-[9px] px-1 py-0 bg-emerald-500/10 text-emerald-600 border-emerald-500/20">
+                                <Cable className="h-2.5 w-2.5 mr-0.5" />
+                                Direct API
+                            </Badge>
+                        )}
                     </div>
 
                     {/* Models */}
@@ -150,6 +156,15 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
                                             >
                                                 <tag.icon className="h-2.5 w-2.5 mr-0.5" />
                                                 {tag.label}
+                                            </Badge>
+                                        )}
+                                        {model.directApiEnabled && (
+                                            <Badge
+                                                variant="outline"
+                                                className="text-[9px] px-1 py-0 bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
+                                            >
+                                                <Cable className="h-2.5 w-2.5 mr-0.5" />
+                                                Direct API
                                             </Badge>
                                         )}
                                     </div>

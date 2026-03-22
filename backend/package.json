@@ -18,6 +18,7 @@
   "license": "ISC",
   "packageManager": "pnpm@10.26.2",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
     "@composio/core": "^0.6.5",
     "@composio/langchain": "^0.6.5",
     "@fastify/cors": "^11.2.0",

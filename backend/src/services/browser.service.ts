@@ -82,6 +82,13 @@ export const browserService = {
             const proxy = await browserProxyRepository.findProxyById(proxyId, workspaceId);
             if (!proxy) throw new NotFoundError("Proxy not found");
             proxyUrl = formatProxyUrl(proxy);
+        } else {
+            // Auto-select first active proxy when none specified
+            const autoProxy = await browserProxyRepository.findFirstActiveProxy(workspaceId);
+            if (autoProxy) {
+                proxyUrl = formatProxyUrl(autoProxy);
+                logger.info({ proxyId: autoProxy.id, label: autoProxy.label }, "Auto-selected proxy for session");
+            }
         }
 
         const session = await browserRepository.createSession({

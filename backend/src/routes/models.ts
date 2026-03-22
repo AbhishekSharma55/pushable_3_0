@@ -6,10 +6,10 @@ import { UnauthorizedError } from "../lib/errors.ts";
 import { isPlanSufficient, BASE_CREDIT_COSTS } from "../lib/credit-engine.ts";
 import { isClaudeGateway } from "../lib/gateway.ts";
 
-// For now, workspace plan is always "pro" (no subscription system yet).
+// For now, workspace plan is always "scale" (no subscription system yet).
 // Replace this when plan system is implemented.
 function getWorkspacePlan(_workspaceId: string): string {
-    return "pro";
+    return "scale";
 }
 
 export async function modelRoutes(fastify: FastifyInstance) {

@@ -76,6 +76,8 @@ Restart=always
 RestartSec=5
 Environment=CLAUDE_PROXY_PORT=$PROXY_PORT
 Environment=HOME=$HOME
+Environment=PATH=$(echo $PATH)
+Environment=CLAUDE_BIN=$(which claude)
 
 [Install]
 WantedBy=multi-user.target

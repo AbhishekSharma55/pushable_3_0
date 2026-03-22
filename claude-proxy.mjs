@@ -12,10 +12,21 @@
  */
 
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 const PORT = parseInt(process.env.CLAUDE_PROXY_PORT || "4006", 10);
+
+// Resolve full path to `claude` binary so it works under systemd
+const CLAUDE_BIN = process.env.CLAUDE_BIN || (() => {
+    try {
+        return execSync("which claude", { encoding: "utf-8" }).trim();
+    } catch {
+        return "claude"; // fallback, hope it's in PATH
+    }
+})();
+
+console.log(`Claude binary: ${CLAUDE_BIN}`);
 
 /**
  * Flatten Anthropic Messages API messages into a text prompt for the CLI.
@@ -73,9 +84,9 @@ function runClaude(model, systemPrompt, prompt, stream) {
             args.push("--system-prompt", systemPrompt);
         }
 
-        const child = spawn("claude", args, {
+        const child = spawn(CLAUDE_BIN, args, {
             stdio: ["pipe", "pipe", "pipe"],
-            env: { ...process.env },
+            env: { ...process.env, PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin" },
         });
 
         let stdout = "";

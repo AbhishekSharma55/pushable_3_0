@@ -6,6 +6,8 @@ import {
 } from '@/app/actions/configuration'
 import { ConfigurationClient } from '@/components/configuration/configuration-client'
 
+export const dynamic = 'force-dynamic'
+
 export default async function SettingsPage() {
   const [models, envConfig, proxies, profiles, sessions, agentDefaults, integrations, systemSettings, workspaces] = await Promise.all([
     getLLMModels(),

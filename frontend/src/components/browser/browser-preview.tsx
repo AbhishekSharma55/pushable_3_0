@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { X, Loader2, WifiOff, Monitor, Mouse, Keyboard, Shield } from 'lucide-react';
+import { X, Loader2, WifiOff, Monitor, Mouse, Keyboard, Shield, Maximize2, Minimize2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useBrowserInteraction } from '@/hooks/use-browser-interaction';
@@ -29,6 +29,7 @@ export function BrowserPreview({ wsUrl, sessionId, onClose, proxied, proxyLabel 
 
     const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'server-restarted'>('connecting');
     const [frameCount, setFrameCount] = useState(0);
+    const [isFullscreen, setIsFullscreen] = useState(false);
 
     // ── Interactive browser control ──
     const { isFocused, cursorPos, containerProps: interactionProps } = useBrowserInteraction({
@@ -163,6 +164,16 @@ export function BrowserPreview({ wsUrl, sessionId, onClose, proxied, proxyLabel 
         };
     }, [connect]);
 
+    // Exit fullscreen on Escape
+    useEffect(() => {
+        if (!isFullscreen) return;
+        const handleKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape' && !isFocused) setIsFullscreen(false);
+        };
+        window.addEventListener('keydown', handleKey);
+        return () => window.removeEventListener('keydown', handleKey);
+    }, [isFullscreen, isFocused]);
+
     // Stale frame detection: if no frames for 15s while "connected", try reconnecting
     useEffect(() => {
         if (status !== 'connected') return;
@@ -183,7 +194,11 @@ export function BrowserPreview({ wsUrl, sessionId, onClose, proxied, proxyLabel 
     };
 
     return (
-        <div className="rounded-lg border border-border bg-card overflow-hidden">
+        <div className={
+            isFullscreen
+                ? 'fixed inset-0 z-50 bg-card flex flex-col'
+                : 'rounded-lg border border-border bg-card overflow-hidden'
+        }>
             {/* Header */}
             <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-muted/30">
                 <div className="flex items-center gap-2">
@@ -214,16 +229,21 @@ export function BrowserPreview({ wsUrl, sessionId, onClose, proxied, proxyLabel 
                         </Badge>
                     )}
                 </div>
-                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onClose}>
-                    <X className="h-4 w-4" />
-                </Button>
+                <div className="flex items-center gap-1">
+                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setIsFullscreen((f) => !f)} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+                        {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                    </Button>
+                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setIsFullscreen(false); onClose(); }}>
+                        <X className="h-4 w-4" />
+                    </Button>
+                </div>
             </div>
 
             {/* Interactive preview area */}
             <div
                 ref={canvasRef}
                 {...interactionProps}
-                className="relative bg-neutral-900 aspect-[16/10]"
+                className={`relative bg-neutral-900 ${isFullscreen ? 'flex-1' : 'aspect-[16/10]'}`}
                 style={{ outline: 'none', cursor: isFocused ? 'none' : 'default' }}
             >
                 <img

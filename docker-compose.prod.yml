@@ -116,6 +116,9 @@ services:
       - "${ADMIN_PANEL_PORT:-3002}:3002"
     environment:
       NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-abhishek0003}@postgres:5432/${POSTGRES_DB:-pushable_ai}
+      AUTH_SECRET: ${AUTH_SECRET:-pushable-admin-secret-key-change-in-prod}
+      ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-false}
     depends_on:
       - backend
 

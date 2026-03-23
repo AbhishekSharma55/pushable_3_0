@@ -369,7 +369,7 @@ async function runCommand(cmd, tabId) {
     case 'clickPoint':      return execWrap(tabId, domClickPoint, [cmd.x, cmd.y]);
     case 'type':            return execWrap(tabId, domType,     [cmd.selector, cmd.text]);
     case 'typeChar':        return execWrap(tabId, domTypeChar, [cmd.selector, cmd.text, cmd.delay ?? 80]);
-    case 'keyPress':        return execWrap(tabId, domKeyPress, [cmd.key]);
+    case 'keyPress':        return cmdKeyPress(tabId, cmd.key);
     case 'select':          return execWrap(tabId, domSelect,   [cmd.selector, cmd.value]);
     case 'hover':           return execWrap(tabId, domHover,    [cmd.selector]);
     case 'scroll':          return execWrap(tabId, domScroll,   [cmd.selector, cmd.x ?? 0, cmd.y ?? 0]);
@@ -535,6 +535,66 @@ async function cmdEvaluate(tabId, script) {
     return frame?.result ?? { success: false, error: 'No result' };
   } catch (e) {
     return { success: false, error: String(e.message || e) };
+  }
+}
+
+// ─── Key Press via Debugger API (sends trusted events) ──────────────────────
+
+const KEY_DEFINITIONS = {
+  Enter:      { key: 'Enter',      code: 'Enter',      keyCode: 13, windowsVirtualKeyCode: 13 },
+  Tab:        { key: 'Tab',        code: 'Tab',        keyCode: 9,  windowsVirtualKeyCode: 9 },
+  Escape:     { key: 'Escape',     code: 'Escape',     keyCode: 27, windowsVirtualKeyCode: 27 },
+  Backspace:  { key: 'Backspace',  code: 'Backspace',  keyCode: 8,  windowsVirtualKeyCode: 8 },
+  Delete:     { key: 'Delete',     code: 'Delete',     keyCode: 46, windowsVirtualKeyCode: 46 },
+  Space:      { key: ' ',          code: 'Space',      keyCode: 32, windowsVirtualKeyCode: 32 },
+  ArrowDown:  { key: 'ArrowDown',  code: 'ArrowDown',  keyCode: 40, windowsVirtualKeyCode: 40 },
+  ArrowUp:    { key: 'ArrowUp',    code: 'ArrowUp',    keyCode: 38, windowsVirtualKeyCode: 38 },
+  ArrowLeft:  { key: 'ArrowLeft',  code: 'ArrowLeft',  keyCode: 37, windowsVirtualKeyCode: 37 },
+  ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, windowsVirtualKeyCode: 39 },
+};
+
+async function cmdKeyPress(tabId, key) {
+  const def = KEY_DEFINITIONS[key] || { key: key, code: key, keyCode: 0, windowsVirtualKeyCode: 0 };
+
+  try {
+    // Attach debugger to the tab
+    await chrome.debugger.attach({ tabId }, '1.3');
+
+    // Send keyDown event (trusted — sites like YouTube, Google, Facebook treat these as real)
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: def.key,
+      code: def.code,
+      windowsVirtualKeyCode: def.windowsVirtualKeyCode,
+      nativeVirtualKeyCode: def.windowsVirtualKeyCode,
+    });
+
+    // Small delay between down and up
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Send keyUp event
+    await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: def.key,
+      code: def.code,
+      windowsVirtualKeyCode: def.windowsVirtualKeyCode,
+      nativeVirtualKeyCode: def.windowsVirtualKeyCode,
+    });
+
+    // Detach debugger
+    await chrome.debugger.detach({ tabId });
+
+    return { success: true };
+  } catch (e) {
+    // Detach debugger on error
+    try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+
+    // Fallback: use DOM-level events if debugger fails (e.g., chrome:// pages)
+    try {
+      return await execWrap(tabId, domKeyPress, [key]);
+    } catch (_) {
+      return { success: false, error: String(e.message || e) };
+    }
   }
 }
 

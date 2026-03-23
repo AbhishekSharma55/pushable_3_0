@@ -61,9 +61,13 @@ function sanitizeMessagesForProvider(messages: BaseMessage[]): BaseMessage[] {
     const toolCallIds = new Set<string>();
     const toolResponseIds = new Set<string>();
 
+    // Check for tool_calls using property access (not instanceof) to handle
+    // both AIMessage and AIMessageChunk — LangGraph stores AIMessageChunk
+    // in state when using streaming LLMs.
     for (const msg of messages) {
-        if (msg instanceof AIMessage && msg.tool_calls?.length) {
-            for (const tc of msg.tool_calls) {
+        const msgToolCalls = (msg as AIMessage).tool_calls;
+        if (msgToolCalls?.length && msg._getType() === "ai") {
+            for (const tc of msgToolCalls) {
                 if (tc.id) toolCallIds.add(tc.id);
             }
         }
@@ -96,8 +100,9 @@ function sanitizeMessagesForProvider(messages: BaseMessage[]): BaseMessage[] {
             continue;
         }
 
-        if (msg instanceof AIMessage && msg.tool_calls?.length) {
-            const validCalls = msg.tool_calls.filter(tc => !tc.id || !orphanedCalls.has(tc.id));
+        const msgToolCalls = (msg as AIMessage).tool_calls;
+        if (msgToolCalls?.length && msg._getType() === "ai") {
+            const validCalls = msgToolCalls.filter(tc => !tc.id || !orphanedCalls.has(tc.id));
             if (validCalls.length === 0) {
                 const text = typeof msg.content === "string"
                     ? msg.content
@@ -112,7 +117,7 @@ function sanitizeMessagesForProvider(messages: BaseMessage[]): BaseMessage[] {
                 }
                 continue;
             }
-            if (validCalls.length < msg.tool_calls.length) {
+            if (validCalls.length < msgToolCalls.length) {
                 result.push(new AIMessage({
                     content: msg.content,
                     tool_calls: validCalls,
@@ -1010,14 +1015,35 @@ You can remember important information about users across conversations using th
         const systemMsg = new SystemMessage(systemPromptParts.join("\n\n"));
         let response;
         try {
+            const sanitizedMessages = sanitizeMessagesForProvider(state.messages);
             logger.info({
                 messageCount: state.messages.length,
+                sanitizedMessageCount: sanitizedMessages.length,
                 systemPromptLength: systemPromptParts.join("\n\n").length,
                 toolCount: langchainTools.length,
                 isClaudeDirect,
+                modelId,
+                lastMessageType: state.messages[state.messages.length - 1]?.constructor?.name,
             }, "Invoking LLM");
-            const sanitizedMessages = sanitizeMessagesForProvider(state.messages);
             response = await llmWithTools.invoke([systemMsg, ...sanitizedMessages]);
+
+            // Debug: log what the model returned
+            const aiResponse = response as AIMessage;
+            const responseToolCalls = aiResponse.tool_calls ?? [];
+            const responseContent = typeof aiResponse.content === "string"
+                ? aiResponse.content
+                : Array.isArray(aiResponse.content)
+                    ? (aiResponse.content as Array<{ type: string; text?: string }>)
+                        .filter(b => b.type === "text")
+                        .map(b => b.text ?? "")
+                        .join("")
+                    : "";
+            logger.info({
+                responseContentLength: responseContent.length,
+                responseContentPreview: responseContent.slice(0, 200),
+                responseToolCallCount: responseToolCalls.length,
+                responseToolCallNames: responseToolCalls.map(tc => tc.name),
+            }, "LLM response received");
         } catch (error: unknown) {
             logger.error({ error, isClaudeDirect, modelId }, "LLM invocation error details");
             throw error;
@@ -1102,12 +1128,24 @@ You can remember important information about users across conversations using th
             (lastMessage as AIMessage).tool_calls &&
             (lastMessage as AIMessage).tool_calls!.length > 0
         ) {
+            logger.info({
+                route: "tools",
+                toolCallCount: (lastMessage as AIMessage).tool_calls!.length,
+                toolCallNames: (lastMessage as AIMessage).tool_calls!.map(tc => tc.name),
+                messageCount: state.messages.length,
+            }, "shouldContinue → tools");
             return "tools";
         }
         // Check if conversation is long enough to warrant summarization
         if (state.messages.length > SUMMARIZE_THRESHOLD) {
+            logger.info({ route: "summarize", messageCount: state.messages.length }, "shouldContinue → summarize");
             return "summarize_conversation";
         }
+        logger.info({
+            route: "__end__",
+            messageCount: state.messages.length,
+            lastMessageType: lastMessage?.constructor?.name,
+        }, "shouldContinue → __end__");
         return "__end__";
     };
 
@@ -1122,6 +1160,12 @@ You can remember important information about users across conversations using th
         currentTodos = state.todos || [];
         const lastMessage = state.messages[state.messages.length - 1] as AIMessage;
         const toolCalls = lastMessage.tool_calls ?? [];
+
+        logger.info({
+            toolCallCount: toolCalls.length,
+            toolCallNames: toolCalls.map(tc => tc.name),
+            messageCount: state.messages.length,
+        }, "Tool node executing");
 
         const results: ToolMessage[] = [];
         for (const tc of toolCalls) {
@@ -1164,14 +1208,22 @@ You can remember important information about users across conversations using th
 
             try {
                 const result = await tool.invoke(tc.args);
+                const resultContent = typeof result === "string" ? result : JSON.stringify(result);
+                logger.info({
+                    toolName: tc.name,
+                    resultLength: resultContent.length,
+                    resultPreview: resultContent.slice(0, 300),
+                }, "Tool executed successfully");
                 results.push(new ToolMessage({
-                    content: typeof result === "string" ? result : JSON.stringify(result),
+                    content: resultContent,
                     tool_call_id: tc.id!,
                     name: tc.name,
                 }));
             } catch (error) {
+                const errMsg = `Error: ${error instanceof Error ? error.message : "Unknown error"}`;
+                logger.error({ toolName: tc.name, error: errMsg }, "Tool execution failed");
                 results.push(new ToolMessage({
-                    content: `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+                    content: errMsg,
                     tool_call_id: tc.id!,
                     name: tc.name,
                 }));

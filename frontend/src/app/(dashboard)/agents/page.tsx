@@ -1157,7 +1157,31 @@ export default function AgentsPage() {
                                                                                 <>
                                                                                     {cleanMessage && (
                                                                                         <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:my-2 prose-code:text-xs prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-muted prose-pre:p-3 prose-pre:rounded-lg">
-                                                                                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                                                            <ReactMarkdown
+                                                                                                remarkPlugins={[remarkGfm]}
+                                                                                                components={{
+                                                                                                    table: ({ children }) => (
+                                                                                                        <div className="my-3 w-full overflow-x-auto rounded-lg border border-border not-prose">
+                                                                                                            <table className="w-full border-collapse text-sm">{children}</table>
+                                                                                                        </div>
+                                                                                                    ),
+                                                                                                    thead: ({ children }) => (
+                                                                                                        <thead className="bg-muted/70">{children}</thead>
+                                                                                                    ),
+                                                                                                    tbody: ({ children }) => (
+                                                                                                        <tbody className="divide-y divide-border">{children}</tbody>
+                                                                                                    ),
+                                                                                                    tr: ({ children }) => (
+                                                                                                        <tr className="hover:bg-muted/40 transition-colors">{children}</tr>
+                                                                                                    ),
+                                                                                                    th: ({ children }) => (
+                                                                                                        <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider border-b border-border">{children}</th>
+                                                                                                    ),
+                                                                                                    td: ({ children }) => (
+                                                                                                        <td className="px-3 py-2 text-sm">{children}</td>
+                                                                                                    ),
+                                                                                                }}
+                                                                                            >
                                                                                                 {cleanMessage}
                                                                                             </ReactMarkdown>
                                                                                         </div>

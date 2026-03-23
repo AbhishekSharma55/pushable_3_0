@@ -778,10 +778,33 @@ function MessageBubble({
                   code: ({ children }) => (
                     <code className="bg-muted px-1 py-0.5 rounded text-xs font-mono">{children}</code>
                   ),
+                  pre: ({ children }) => (
+                    <pre className="bg-muted p-3 rounded-lg text-xs font-mono overflow-x-auto mb-2">{children}</pre>
+                  ),
                   blockquote: ({ children }) => (
                     <blockquote className="border-l-4 border-border pl-4 mb-2 italic text-muted-foreground">
                       {children}
                     </blockquote>
+                  ),
+                  table: ({ children }) => (
+                    <div className="my-3 w-full overflow-x-auto rounded-lg border border-border">
+                      <table className="w-full border-collapse text-sm">{children}</table>
+                    </div>
+                  ),
+                  thead: ({ children }) => (
+                    <thead className="bg-muted/70">{children}</thead>
+                  ),
+                  tbody: ({ children }) => (
+                    <tbody className="divide-y divide-border">{children}</tbody>
+                  ),
+                  tr: ({ children }) => (
+                    <tr className="hover:bg-muted/40 transition-colors">{children}</tr>
+                  ),
+                  th: ({ children }) => (
+                    <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider border-b border-border">{children}</th>
+                  ),
+                  td: ({ children }) => (
+                    <td className="px-3 py-2 text-sm">{children}</td>
                   ),
                 }}
               >

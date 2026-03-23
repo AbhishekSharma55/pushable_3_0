@@ -48,6 +48,7 @@ services:
       BROWSER_SERVICE_URL: http://browser-service:8080
       BRIDGE_API_KEY: ""
       EXTENSION_BRIDGE_URL: ws://extension-bridge:3001
+      EXTENSION_BRIDGE_PUBLIC_URL: ${EXTENSION_BRIDGE_PUBLIC_URL:-ws://localhost:3004}
       BW_DEVICE_ID: "b661b739-3e2c-4517-9ec0-63cb10842b84"
       BW_DATA_ROOT: /data/bw-sessions
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}

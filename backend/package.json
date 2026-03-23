@@ -32,6 +32,7 @@
     "@langchain/openai": "^1.2.13",
     "@slack/bolt": "^4.6.0",
     "@slack/web-api": "^7.15.0",
+    "archiver": "^7.0.1",
     "bcryptjs": "^3.0.3",
     "bullmq": "^5.71.0",
     "cron-parser": "^5.5.0",
@@ -56,6 +57,7 @@
     }
   },
   "devDependencies": {
+    "@types/archiver": "^7.0.0",
     "@types/bcryptjs": "^3.0.0",
     "@types/node": "^25.5.0",
     "@types/nodemailer": "^7.0.11",

@@ -45,7 +45,9 @@ export default function PricingSection() {
             </div>
             <div className="pcred">100 credits / month</div>
             <a
-              href="#"
+              href={`${process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000"}/register`}
+              target="_blank"
+              rel="noopener noreferrer"
               className="btn btn-ghost"
               style={{
                 width: "100%",
@@ -86,7 +88,9 @@ export default function PricingSection() {
             </div>
             <div className="pcred">2,000 credits + rollover</div>
             <a
-              href="#"
+              href={`${process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000"}/register`}
+              target="_blank"
+              rel="noopener noreferrer"
               className="btn btn-green btn-lg"
               style={{
                 width: "100%",
@@ -133,7 +137,9 @@ export default function PricingSection() {
             </div>
             <div className="pcred">Unlimited credits</div>
             <a
-              href="#"
+              href={`${process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000"}/login`}
+              target="_blank"
+              rel="noopener noreferrer"
               className="btn btn-ghost"
               style={{
                 width: "100%",

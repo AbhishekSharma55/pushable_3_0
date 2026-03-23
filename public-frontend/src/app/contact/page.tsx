@@ -64,11 +64,11 @@ export default function ContactPage() {
       </div>
 
       {/* Social */}
-      <div className="social-row rev">
+      {/* <div className="social-row rev">
         <a href="#">Twitter</a>
         <a href="#">LinkedIn</a>
         <a href="#">GitHub</a>
-      </div>
+      </div> */}
 
       {/* FAQ Link */}
       <div

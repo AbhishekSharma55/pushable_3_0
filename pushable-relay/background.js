@@ -544,7 +544,20 @@ function domClick(selector) {
   const el = document.querySelector(selector);
   if (!el) return { success: false, error: 'Element not found: ' + selector };
   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  el.click();
+
+  // Simulate full mouse event sequence for framework compatibility
+  const rect = el.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window };
+
+  el.dispatchEvent(new PointerEvent('pointerdown', opts));
+  el.dispatchEvent(new MouseEvent('mousedown', opts));
+  el.focus();
+  el.dispatchEvent(new PointerEvent('pointerup', opts));
+  el.dispatchEvent(new MouseEvent('mouseup', opts));
+  el.dispatchEvent(new MouseEvent('click', opts));
+
   return new Promise((r) => setTimeout(() => r({ success: true }), 300));
 }
 
@@ -571,29 +584,63 @@ function domType(selector, text) {
   const el = document.querySelector(selector);
   if (!el) return { success: false, error: 'Element not found: ' + selector };
   el.focus();
-  el.value = '';
-  el.value = text;
-  // Fire all common framework events
-  ['input', 'change', 'keyup'].forEach((ev) =>
-    el.dispatchEvent(new Event(ev, { bubbles: true }))
-  );
-  return new Promise((r) => setTimeout(() => r({ success: true }), 100));
+  el.click();
+
+  // Reset React/Vue internal value tracker so frameworks detect the change
+  const tracker = el._valueTracker;
+  if (tracker) tracker.setValue('');
+
+  // Use native setter to bypass framework interception (handle both input and textarea)
+  const proto = Object.getPrototypeOf(el);
+  const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+    || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+  if (nativeSetter) {
+    nativeSetter.call(el, text);
+  } else {
+    el.value = text;
+  }
+
+  // Fire InputEvent (not generic Event) — React and modern frameworks listen for this
+  el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return new Promise((r) => setTimeout(() => r({ success: true }), 150));
 }
 
 function domTypeChar(selector, text, delay) {
   const el = document.querySelector(selector);
   if (!el) return { success: false, error: 'Element not found: ' + selector };
   el.focus();
-  el.value = '';
+  el.click();
+
+  // Reset React/Vue internal value tracker
+  const tracker = el._valueTracker;
+  if (tracker) tracker.setValue('');
+
+  // Get native setter for framework compatibility
+  const nativeSetter = Object.getOwnPropertyDescriptor(
+    Object.getPrototypeOf(el), 'value'
+  )?.set || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+
+  if (nativeSetter) { nativeSetter.call(el, ''); } else { el.value = ''; }
+
   return new Promise((resolve) => {
     let i = 0;
     function next() {
       if (i >= text.length) { setTimeout(() => resolve({ success: true }), 100); return; }
       const c = text[i++];
-      el.value += c;
-      ['keydown', 'keypress', 'input', 'keyup'].forEach((ev) =>
-        el.dispatchEvent(new KeyboardEvent(ev, { key: c, bubbles: true }))
-      );
+      const newVal = text.substring(0, i);
+
+      // Reset tracker before each character so React detects each change
+      const t = el._valueTracker;
+      if (t) t.setValue(text.substring(0, i - 1));
+
+      if (nativeSetter) { nativeSetter.call(el, newVal); } else { el.value = newVal; }
+
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: c, bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keypress', { key: c, bubbles: true }));
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: c }));
+      el.dispatchEvent(new KeyboardEvent('keyup', { key: c, bubbles: true }));
       setTimeout(next, delay);
     }
     next();
@@ -603,24 +650,50 @@ function domTypeChar(selector, text, delay) {
 function domKeyPress(key) {
   const el = document.activeElement || document.body;
   const keyMap = {
-    Enter: 'Enter', Tab: 'Tab', Escape: 'Escape',
-    ArrowDown: 'ArrowDown', ArrowUp: 'ArrowUp',
-    ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight',
-    Backspace: 'Backspace', Space: ' ', Delete: 'Delete',
+    Enter: { key: 'Enter', code: 'Enter', keyCode: 13 },
+    Tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
+    Escape: { key: 'Escape', code: 'Escape', keyCode: 27 },
+    ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+    ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+    ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
+    ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+    Backspace: { key: 'Backspace', code: 'Backspace', keyCode: 8 },
+    Space: { key: ' ', code: 'Space', keyCode: 32 },
+    Delete: { key: 'Delete', code: 'Delete', keyCode: 46 },
   };
-  const k = keyMap[key] ?? key;
-  ['keydown', 'keypress', 'keyup'].forEach((ev) =>
-    el.dispatchEvent(new KeyboardEvent(ev, { key: k, code: key, bubbles: true }))
-  );
+  const mapped = keyMap[key] || { key: key, code: key, keyCode: 0 };
+  const opts = { key: mapped.key, code: mapped.code, keyCode: mapped.keyCode, which: mapped.keyCode, bubbles: true, cancelable: true };
+
+  el.dispatchEvent(new KeyboardEvent('keydown', opts));
+  el.dispatchEvent(new KeyboardEvent('keypress', opts));
+  el.dispatchEvent(new KeyboardEvent('keyup', opts));
+
+  // For Enter: also submit the parent form if inside one
+  if (key === 'Enter') {
+    const form = el.closest('form');
+    if (form) {
+      const submitBtn = form.querySelector('button[type="submit"], input[type="submit"]');
+      if (submitBtn) { submitBtn.click(); }
+      else { form.requestSubmit ? form.requestSubmit() : form.submit(); }
+    }
+  }
+
   return { success: true };
 }
 
 function domSelect(selector, value) {
   const el = document.querySelector(selector);
   if (!el) return { success: false, error: 'Element not found: ' + selector };
-  el.value = value;
-  el.dispatchEvent(new Event('change', { bubbles: true }));
+
+  // Reset React tracker
+  const tracker = el._valueTracker;
+  if (tracker) tracker.setValue('');
+
+  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+  if (nativeSetter) { nativeSetter.call(el, value); } else { el.value = value; }
+
   el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
   return { success: true };
 }
 
@@ -628,9 +701,14 @@ function domHover(selector) {
   const el = document.querySelector(selector);
   if (!el) return { success: false, error: 'Element not found: ' + selector };
   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-  el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-  return { success: true };
+  const rect = el.getBoundingClientRect();
+  const opts = { bubbles: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+  el.dispatchEvent(new PointerEvent('pointerover', opts));
+  el.dispatchEvent(new MouseEvent('mouseover', opts));
+  el.dispatchEvent(new PointerEvent('pointerenter', { ...opts, bubbles: false }));
+  el.dispatchEvent(new MouseEvent('mouseenter', { ...opts, bubbles: false }));
+  el.dispatchEvent(new MouseEvent('mousemove', opts));
+  return new Promise((r) => setTimeout(() => r({ success: true }), 200));
 }
 
 function domScroll(selector, x, y) {
@@ -660,13 +738,31 @@ function domGetPageInfo() {
   if (!body) return { success: false, error: 'No document body' };
 
   function sel(el) {
+    // Try unique selectors first
     if (el.id) return '#' + CSS.escape(el.id);
-    if (el.name) return el.tagName.toLowerCase() + '[name="' + CSS.escape(el.name) + '"]';
     if (el.getAttribute('data-testid')) return '[data-testid="' + CSS.escape(el.getAttribute('data-testid')) + '"]';
     if (el.getAttribute('aria-label')) return '[aria-label="' + CSS.escape(el.getAttribute('aria-label')) + '"]';
+    if (el.name) {
+      const s = el.tagName.toLowerCase() + '[name="' + CSS.escape(el.name) + '"]';
+      if (document.querySelectorAll(s).length === 1) return s;
+    }
+    if (el.placeholder) {
+      const s = el.tagName.toLowerCase() + '[placeholder="' + CSS.escape(el.placeholder) + '"]';
+      if (document.querySelectorAll(s).length === 1) return s;
+    }
     if (el.className && typeof el.className === 'string') {
       const cls = el.className.trim().split(/\s+/).slice(0, 2).map((c) => '.' + CSS.escape(c)).join('');
-      return el.tagName.toLowerCase() + cls;
+      const s = el.tagName.toLowerCase() + cls;
+      if (document.querySelectorAll(s).length === 1) return s;
+    }
+    // Fallback: nth-of-type for uniqueness
+    const parent = el.parentElement;
+    if (parent) {
+      const siblings = Array.from(parent.children).filter((c) => c.tagName === el.tagName);
+      if (siblings.length > 1) {
+        const idx = siblings.indexOf(el) + 1;
+        return el.tagName.toLowerCase() + ':nth-of-type(' + idx + ')';
+      }
     }
     return el.tagName.toLowerCase();
   }
@@ -703,10 +799,26 @@ function domGetElements() {
     if (el.id) return '#' + CSS.escape(el.id);
     if (el.getAttribute('data-testid')) return '[data-testid="' + CSS.escape(el.getAttribute('data-testid')) + '"]';
     if (el.getAttribute('aria-label')) return '[aria-label="' + CSS.escape(el.getAttribute('aria-label')) + '"]';
-    if (el.name) return el.tagName.toLowerCase() + '[name="' + CSS.escape(el.name) + '"]';
+    if (el.name) {
+      const s = el.tagName.toLowerCase() + '[name="' + CSS.escape(el.name) + '"]';
+      if (document.querySelectorAll(s).length === 1) return s;
+    }
+    if (el.placeholder) {
+      const s = el.tagName.toLowerCase() + '[placeholder="' + CSS.escape(el.placeholder) + '"]';
+      if (document.querySelectorAll(s).length === 1) return s;
+    }
     if (el.className && typeof el.className === 'string') {
       const cls = el.className.trim().split(/\s+/).slice(0, 2).map((c) => '.' + CSS.escape(c)).join('');
-      return el.tagName.toLowerCase() + cls;
+      const s = el.tagName.toLowerCase() + cls;
+      if (document.querySelectorAll(s).length === 1) return s;
+    }
+    const parent = el.parentElement;
+    if (parent) {
+      const siblings = Array.from(parent.children).filter((c) => c.tagName === el.tagName);
+      if (siblings.length > 1) {
+        const idx = siblings.indexOf(el) + 1;
+        return el.tagName.toLowerCase() + ':nth-of-type(' + idx + ')';
+      }
     }
     return el.tagName.toLowerCase();
   }

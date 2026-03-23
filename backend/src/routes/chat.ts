@@ -380,6 +380,7 @@ async function executeRun(
             {
                 configurable: { thread_id: sessionId },
                 streamMode: "messages",
+                recursionLimit: 100,
             }
         );
 
@@ -491,6 +492,7 @@ async function resumeRun(
             {
                 configurable: { thread_id: sessionId },
                 streamMode: "messages",
+                recursionLimit: 100,
             }
         );
 

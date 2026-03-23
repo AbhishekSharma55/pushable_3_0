@@ -28,10 +28,13 @@ import {
   Hash,
   Lock,
   ChevronRight,
+  ChevronDown,
   Plus,
   Check,
   History,
   Settings2,
+  Brain,
+  Sparkles,
 } from "lucide-react";
 import {
   Select,
@@ -102,6 +105,45 @@ function ThinkingLoader() {
     <TextShimmer className="font-mono text-sm" duration={1}>
       {THINKING_MESSAGES[index]}
     </TextShimmer>
+  );
+}
+
+// ─── Thinking block (collapsible reasoning display) ──────────────────────────
+
+function ThinkingBlock({ content, isStreaming }: { content: string; isStreaming?: boolean }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  if (!content) return null;
+
+  return (
+    <div className="mb-2">
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-1 group"
+      >
+        <Sparkles className="h-3 w-3" />
+        <span className="font-medium">
+          {isStreaming ? "Thinking..." : "Thought process"}
+        </span>
+        {isStreaming && (
+          <span className="inline-flex gap-0.5 ml-1">
+            <span className="h-1 w-1 rounded-full bg-muted-foreground/50 animate-bounce" style={{ animationDelay: '0ms' }} />
+            <span className="h-1 w-1 rounded-full bg-muted-foreground/50 animate-bounce" style={{ animationDelay: '150ms' }} />
+            <span className="h-1 w-1 rounded-full bg-muted-foreground/50 animate-bounce" style={{ animationDelay: '300ms' }} />
+          </span>
+        )}
+        {isOpen ? (
+          <ChevronDown className="h-3 w-3 ml-auto" />
+        ) : (
+          <ChevronRight className="h-3 w-3 ml-auto" />
+        )}
+      </button>
+      {isOpen && (
+        <div className="mt-1 rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
+          {content}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -733,6 +775,14 @@ function MessageBubble({
             />
           )}
 
+          {/* Thinking/reasoning display */}
+          {msg.metadata?.thinking && (
+            <ThinkingBlock
+              content={msg.metadata.thinking}
+              isStreaming={msg.status === 'thinking'}
+            />
+          )}
+
           {/* Text content */}
           {hasContent && (
             <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed bg-secondary/50 text-foreground border border-border rounded-bl-sm">
@@ -778,10 +828,33 @@ function MessageBubble({
                   code: ({ children }) => (
                     <code className="bg-muted px-1 py-0.5 rounded text-xs font-mono">{children}</code>
                   ),
+                  pre: ({ children }) => (
+                    <pre className="bg-muted p-3 rounded-lg text-xs font-mono overflow-x-auto mb-2">{children}</pre>
+                  ),
                   blockquote: ({ children }) => (
                     <blockquote className="border-l-4 border-border pl-4 mb-2 italic text-muted-foreground">
                       {children}
                     </blockquote>
+                  ),
+                  table: ({ children }) => (
+                    <div className="my-3 w-full overflow-x-auto rounded-lg border border-border">
+                      <table className="w-full border-collapse text-sm">{children}</table>
+                    </div>
+                  ),
+                  thead: ({ children }) => (
+                    <thead className="bg-muted/70">{children}</thead>
+                  ),
+                  tbody: ({ children }) => (
+                    <tbody className="divide-y divide-border">{children}</tbody>
+                  ),
+                  tr: ({ children }) => (
+                    <tr className="hover:bg-muted/40 transition-colors">{children}</tr>
+                  ),
+                  th: ({ children }) => (
+                    <th className="px-3 py-2 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider border-b border-border">{children}</th>
+                  ),
+                  td: ({ children }) => (
+                    <td className="px-3 py-2 text-sm">{children}</td>
                   ),
                 }}
               >

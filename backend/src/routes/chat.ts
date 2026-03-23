@@ -9,6 +9,7 @@ import { createAgentGraph } from "../graphs/agent.graph.ts";
 import { runEventBus, type SSEEvent } from "../lib/run-event-bus.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
 import { logger } from "../lib/logger.ts";
+import { stripToolCallXml } from "../lib/sanitize-llm-output.ts";
 import type { BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -286,16 +287,28 @@ async function processGraphStream(
                     lastSegmentType = "text";
                 }
 
-                runEventBus.emit(runId, {
-                    type: "content",
-                    data: { content: chunk },
-                    timestamp: Date.now(),
-                });
+                // Strip any tool-call XML that leaked into content
+                const sanitizedChunk = stripToolCallXml(chunk);
+                if (sanitizedChunk) {
+                    runEventBus.emit(runId, {
+                        type: "content",
+                        data: { content: sanitizedChunk },
+                        timestamp: Date.now(),
+                    });
+                }
             }
         }
     }
 
-    return { content: fullContent, toolCalls: allToolCalls, segments };
+    // Final sanitization pass on accumulated content before persisting
+    const cleanContent = stripToolCallXml(fullContent);
+    const cleanSegments = segments.map((seg) =>
+        seg.type === "text"
+            ? { ...seg, content: stripToolCallXml(seg.content ?? "") }
+            : seg
+    ).filter((seg) => seg.type !== "text" || (seg.content ?? "").trim());
+
+    return { content: cleanContent, toolCalls: allToolCalls, segments: cleanSegments };
 }
 
 // ─── Check for HITL interrupts ───────────────────────────────────────────────

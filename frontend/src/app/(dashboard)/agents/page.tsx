@@ -58,6 +58,35 @@ import { parseArtifact } from '@/lib/artifact-parser';
 import type { Artifact } from '@/lib/artifact-parser';
 import { ArtifactPanel, FileIcon } from '@/components/artifact';
 import { downloadArtifact } from '@/lib/artifact-download';
+
+/**
+ * Strip tool-call XML that LLMs sometimes embed in text responses.
+ * This is a frontend safety net — the backend also strips these,
+ * but defense-in-depth ensures nothing leaks to the UI.
+ */
+const TOOL_TAG_NAMES = [
+    'function_calls', 'function_call', 'tool_calls', 'tool_call',
+    'tool_use', 'antml:invoke', 'antml:function_calls', 'antml_invoke', 'invoke',
+];
+const _esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const COMPLETE_BLOCK_RE = new RegExp(TOOL_TAG_NAMES.map(t => `<${_esc(t)}[^>]*>[\\s\\S]*?<\\/${_esc(t)}>`).join('|'), 'gi');
+const ORPHANED_OPEN_RE = new RegExp(TOOL_TAG_NAMES.map(t => `<${_esc(t)}[^>]*>[\\s\\S]*$`).join('|'), 'gi');
+const STRAY_TAG_RE = new RegExp(TOOL_TAG_NAMES.map(t => `<\\/?${_esc(t)}[^>]*>`).join('|'), 'gi');
+const JSON_TOOL_ARRAY_RE = /\[\s*\{\s*"tool_name"\s*:\s*"[^"]*"[\s\S]*?\}\s*\]/g;
+const PARTIAL_TAG_END_RE = /<(?:func(?:tion)?_?c?a?l?l?s?|tool_?(?:c(?:a(?:l(?:ls?)?)?)?|u(?:se?)?)?|antml?:?(?:i(?:n(?:v(?:o(?:ke?)?)?)?)?)?)\s*$/i;
+
+function stripToolCallXml(text: string): string {
+    if (!text) return text;
+    let cleaned = text;
+    cleaned = cleaned.replace(COMPLETE_BLOCK_RE, '');
+    cleaned = cleaned.replace(ORPHANED_OPEN_RE, '');
+    cleaned = cleaned.replace(STRAY_TAG_RE, '');
+    cleaned = cleaned.replace(JSON_TOOL_ARRAY_RE, '');
+    cleaned = cleaned.replace(PARTIAL_TAG_END_RE, '');
+    cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
+    return cleaned;
+}
+
 import { getProfiles, startSession as startBrowserSession, endSession as endBrowserSession, updateProfile, getProxies, getSessions as getBrowserSessions } from '@/lib/api/browser';
 import { getBrowserSession } from '@/lib/api/sessions';
 import { BrowserPreview } from '@/components/browser/browser-preview';
@@ -1057,9 +1086,10 @@ export default function AgentsPage() {
                                                     messages.map((msg) => {
                                                         // Helper to render assistant text content
                                                         const renderAssistantText = (text: string, isStreaming?: boolean) => {
+                                                            const sanitized = stripToolCallXml(text);
                                                             const { artifact, cleanMessage } = isStreaming
-                                                                ? { artifact: null, cleanMessage: text }
-                                                                : parseArtifact(text);
+                                                                ? { artifact: null, cleanMessage: sanitized }
+                                                                : parseArtifact(sanitized);
                                                             if (!cleanMessage && !artifact && !isStreaming) return null;
                                                             return (
                                                                 <div className="flex gap-3">

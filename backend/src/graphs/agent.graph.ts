@@ -1,6 +1,6 @@
 import { StateGraph, Annotation, MessagesAnnotation, interrupt } from "@langchain/langgraph";
 import { createLLM } from "../lib/gateway.ts";
-import { SystemMessage, AIMessage, HumanMessage, RemoveMessage, ToolMessage } from "@langchain/core/messages";
+import { SystemMessage, AIMessage, HumanMessage, RemoveMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages";
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
@@ -49,8 +49,84 @@ import type {
     SystemPermissions,
 } from "../lib/system-prompt-builder.ts";
 
-const SUMMARIZE_THRESHOLD = 20; // Trigger summarization when messages exceed this count
-const KEEP_MESSAGES = 4; // Keep the last N messages after summarization
+const SUMMARIZE_THRESHOLD = 30; // Trigger summarization when messages exceed this count
+const KEEP_MESSAGES = 10; // Keep the last N messages after summarization
+
+/**
+ * Sanitize message history to ensure proper tool call/response pairing.
+ * Required for providers like Gemini that mandate tool responses immediately follow tool calls.
+ * Removes orphaned ToolMessages and strips orphaned tool_calls from AIMessages.
+ */
+function sanitizeMessagesForProvider(messages: BaseMessage[]): BaseMessage[] {
+    const toolCallIds = new Set<string>();
+    const toolResponseIds = new Set<string>();
+
+    for (const msg of messages) {
+        if (msg instanceof AIMessage && msg.tool_calls?.length) {
+            for (const tc of msg.tool_calls) {
+                if (tc.id) toolCallIds.add(tc.id);
+            }
+        }
+        if (msg instanceof ToolMessage && msg.tool_call_id) {
+            toolResponseIds.add(msg.tool_call_id);
+        }
+    }
+
+    const orphanedResponses = new Set<string>();
+    for (const id of toolResponseIds) {
+        if (!toolCallIds.has(id)) orphanedResponses.add(id);
+    }
+    const orphanedCalls = new Set<string>();
+    for (const id of toolCallIds) {
+        if (!toolResponseIds.has(id)) orphanedCalls.add(id);
+    }
+
+    if (orphanedResponses.size === 0 && orphanedCalls.size === 0) {
+        return messages;
+    }
+
+    logger.warn({
+        orphanedResponses: orphanedResponses.size,
+        orphanedCalls: orphanedCalls.size,
+    }, "Sanitizing orphaned tool call/response messages");
+
+    const result: BaseMessage[] = [];
+    for (const msg of messages) {
+        if (msg instanceof ToolMessage && msg.tool_call_id && orphanedResponses.has(msg.tool_call_id)) {
+            continue;
+        }
+
+        if (msg instanceof AIMessage && msg.tool_calls?.length) {
+            const validCalls = msg.tool_calls.filter(tc => !tc.id || !orphanedCalls.has(tc.id));
+            if (validCalls.length === 0) {
+                const text = typeof msg.content === "string"
+                    ? msg.content
+                    : Array.isArray(msg.content)
+                        ? (msg.content as Array<{ type: string; text?: string }>)
+                            .filter(b => b.type === "text")
+                            .map(b => b.text ?? "")
+                            .join("")
+                        : "";
+                if (text) {
+                    result.push(new AIMessage({ content: text, id: msg.id }));
+                }
+                continue;
+            }
+            if (validCalls.length < msg.tool_calls.length) {
+                result.push(new AIMessage({
+                    content: msg.content,
+                    tool_calls: validCalls,
+                    id: msg.id,
+                }));
+                continue;
+            }
+        }
+
+        result.push(msg);
+    }
+
+    return result;
+}
 
 const AgentState = Annotation.Root({
     ...MessagesAnnotation.spec,
@@ -76,9 +152,9 @@ async function getCheckpointer(): Promise<PostgresSaver> {
     return checkpointerInstance;
 }
 
-// For now, workspace plan is always "pro". Replace when subscription system is built.
+// For now, workspace plan is always "scale". Replace when subscription system is built.
 function getWorkspacePlan(_workspaceId: string): string {
-    return "pro";
+    return "scale";
 }
 
 /**
@@ -925,7 +1001,8 @@ You can remember important information about users across conversations using th
                 toolCount: langchainTools.length,
                 isClaudeDirect,
             }, "Invoking LLM");
-            response = await llmWithTools.invoke([systemMsg, ...state.messages]);
+            const sanitizedMessages = sanitizeMessagesForProvider(state.messages);
+            response = await llmWithTools.invoke([systemMsg, ...sanitizedMessages]);
         } catch (error: unknown) {
             logger.error({ error, isClaudeDirect, modelId }, "LLM invocation error details");
             throw error;
@@ -967,15 +1044,24 @@ You can remember important information about users across conversations using th
         }
 
         const allMessages = [
-            ...messages,
+            ...sanitizeMessagesForProvider(messages),
             new HumanMessage({ id: randomUUID(), content: summaryPrompt }),
         ];
 
         const response = await llm.invoke(allMessages);
 
-        // Keep only the last N messages, remove the rest
+        // Keep the last N messages, but walk boundary back to avoid splitting tool call/response pairs
+        let boundary = messages.length - KEEP_MESSAGES;
+        if (boundary > 0) {
+            // Walk back until we land on a HumanMessage (safe split point)
+            while (boundary > 0 && !(messages[boundary] instanceof HumanMessage)) {
+                boundary--;
+            }
+        }
+        if (boundary <= 0) boundary = 0;
+
         const deleteMessages = messages
-            .slice(0, -KEEP_MESSAGES)
+            .slice(0, boundary)
             .filter((m) => m.id)
             .map((m) => new RemoveMessage({ id: m.id! }));
 

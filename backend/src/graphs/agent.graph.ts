@@ -20,7 +20,7 @@ import { integrationRepository } from "../repositories/integration.repository.ts
 import { getComposioClient } from "../lib/composio.ts";
 import { logger } from "../lib/logger.ts";
 import { buildBrowserAgentTool, type BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
-import { buildExtensionBrowserTools } from "../lib/extension-bridge-client.ts";
+import { buildExtensionBrowserAgentTool } from "../lib/extension-browser-agent-tool.ts";
 import { buildVaultTools } from "../tools/vault.tools.ts";
 import { buildSystemTools } from "../tools/system.tools.ts";
 import { buildMemoryTools } from "../tools/memory.tools.ts";
@@ -492,27 +492,52 @@ export async function createAgentGraph(
         }
     }
 
-    // --- 4. Browser Agent (internal autonomous agent for browser tasks) ---
+    // --- 4. Browser Agent (load ONLY the selected browser type) ---
     let hasBrowser = false;
-    try {
-        const browserAgentTool = await buildBrowserAgentTool(
-            agentId,
-            workspaceId,
-            modelId,
-            modelMultiplier,
-            agentTemperature,
-            onBrowserEvent,
-            chatSessionId
-        );
-        if (browserAgentTool) {
-            langchainTools.push(browserAgentTool);
-            hasBrowser = true;
+    const browserType = agent.browserType || "cloud";
+
+    if (browserType === "cloud") {
+        // Cloud browser: autonomous sub-agent with internal browser tools
+        try {
+            const browserAgentTool = await buildBrowserAgentTool(
+                agentId,
+                workspaceId,
+                modelId,
+                modelMultiplier,
+                agentTemperature,
+                onBrowserEvent,
+                chatSessionId
+            );
+            if (browserAgentTool) {
+                langchainTools.push(browserAgentTool);
+                hasBrowser = true;
+            }
+        } catch (error) {
+            logger.warn(
+                { error, agentId },
+                "Failed to load cloud browser agent, proceeding without it"
+            );
         }
-    } catch (error) {
-        logger.warn(
-            { error, agentId },
-            "Failed to load browser agent, proceeding without it"
-        );
+    } else if (browserType === "extension") {
+        // Extension browser: autonomous sub-agent using Chrome extension tools
+        try {
+            const extBrowserAgentTool = buildExtensionBrowserAgentTool(
+                agentId,
+                workspaceId,
+                modelMultiplier,
+                agentTemperature,
+                onBrowserEvent
+            );
+            if (extBrowserAgentTool) {
+                langchainTools.push(extBrowserAgentTool);
+                hasBrowser = true;
+            }
+        } catch (error) {
+            logger.warn(
+                { error, agentId },
+                "Failed to load extension browser agent, proceeding without it"
+            );
+        }
     }
 
     // --- 5. Fetch KB metadata for prompt builder ---
@@ -531,17 +556,6 @@ export async function createAgentGraph(
         } catch (error) {
             logger.warn({ error }, "Failed to fetch KB metadata for prompt builder");
         }
-    }
-
-    // --- 6. Extension browser tools (real Chrome via extension) ---
-    try {
-        const extTools = buildExtensionBrowserTools();
-        langchainTools.push(...extTools);
-    } catch (error) {
-        logger.warn(
-            { error, agentId },
-            "Failed to load extension browser tools, proceeding without them"
-        );
     }
 
     // --- 6b. Vault tools (Bitwarden credential access) ---

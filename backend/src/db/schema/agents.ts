@@ -21,6 +21,7 @@ export const agents = pgTable("agents", {
     canManageAgents: boolean("can_manage_agents").default(false).notNull(),
     requireApprovalForAll: boolean("require_approval_for_all").default(false).notNull(),
     // Browser automation
+    browserType: text("browser_type").default("cloud").notNull(),
     browserEnabled: boolean("browser_enabled").default(true).notNull(),
     browserProxyId: uuid("browser_proxy_id").references(() => browserProxies.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at").defaultNow().notNull(),

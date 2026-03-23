@@ -25,6 +25,8 @@ import {
     Square,
     Globe,
     Play,
+    Cloud,
+    Chrome,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -90,6 +92,7 @@ function stripToolCallXml(text: string): string {
 import { getProfiles, startSession as startBrowserSession, endSession as endBrowserSession, updateProfile, getProxies, getSessions as getBrowserSessions } from '@/lib/api/browser';
 import { getBrowserSession } from '@/lib/api/sessions';
 import { BrowserPreview } from '@/components/browser/browser-preview';
+import { ExtensionLiveView } from '@/components/extension/ExtensionLiveView';
 import { BROWSER_WS_URL } from '@/lib/constants';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -103,6 +106,7 @@ import {
     SelectValue,
 } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
+import { cn } from '@/lib/utils';
 import { ToolCallDisplay } from '@/components/chat/tool-call-display';
 import { ApprovalCard } from '@/components/chat/approval-card';
 
@@ -425,9 +429,7 @@ export default function AgentsPage() {
 
     // Auto-open browser panel when agent uses browser tools
     useEffect(() => {
-        if (!workspace || !activeSession) return;
-        // Already showing browser — no need to poll
-        if (showBrowserPreview && browserWsUrl) return;
+        if (!workspace || !activeSession || !selectedAgent) return;
         // User manually hid the browser — don't re-open
         if (browserDismissedRef.current) return;
 
@@ -438,6 +440,18 @@ export default function AgentsPage() {
             )
         );
         if (!hasBrowserTool) return;
+
+        // For extension type: just show the extension preview panel
+        if (selectedAgent.browserType === 'extension') {
+            if (!showBrowserPreview) {
+                setShowBrowserPreview(true);
+            }
+            return;
+        }
+
+        // For cloud type: poll for browser session
+        // Already showing browser — no need to poll
+        if (showBrowserPreview && browserWsUrl) return;
 
         let cancelled = false;
 
@@ -461,7 +475,7 @@ export default function AgentsPage() {
             cancelled = true;
             clearInterval(interval);
         };
-    }, [workspace, activeSession, messages, showBrowserPreview, browserWsUrl]);
+    }, [workspace, activeSession, selectedAgent, messages, showBrowserPreview, browserWsUrl]);
 
     const handleStartBrowser = async () => {
         if (!workspace || !browserProfile || !selectedAgent) return;
@@ -497,6 +511,26 @@ export default function AgentsPage() {
     };
 
     // ── Browser settings handlers ─────────────────────────────────────────────
+
+    const handleChangeBrowserType = async (type: 'cloud' | 'extension') => {
+        if (!workspace || !selectedAgent) return;
+        setSavingBrowserSettings(true);
+        try {
+            const updated = await updateAgent(workspace.id, selectedAgent.id, { browserType: type });
+            setSelectedAgent(updated);
+            setAgents((prev) => prev.map((a) => a.id === updated.id ? updated : a));
+            // Reset browser state when switching types
+            setBrowserWsUrl(null);
+            setBrowserSessionId(null);
+            setShowBrowserPreview(false);
+            browserDismissedRef.current = false;
+            toast.success(`Browser type set to ${type === 'cloud' ? 'Cloud' : 'Extension'}`);
+        } catch {
+            toast.error('Failed to update browser type');
+        } finally {
+            setSavingBrowserSettings(false);
+        }
+    };
 
     const handleChangeFingerprint = async (os: string) => {
         if (!workspace || !selectedAgent) return;
@@ -1012,7 +1046,8 @@ export default function AgentsPage() {
                                                 </AlertDialogContent>
                                             </AlertDialog>
                                             <Button size="sm" variant="outline" className="gap-1.5 text-xs h-8" onClick={handleNewSession}><Plus className="h-3.5 w-3.5" />New Chat</Button>
-                                            {browserProfile && (
+                                            {/* Cloud browser controls */}
+                                            {(selectedAgent?.browserType || 'cloud') === 'cloud' && browserProfile && (
                                                 <>
                                                     {browserWsUrl ? (
                                                         <>
@@ -1057,6 +1092,22 @@ export default function AgentsPage() {
                                                     )}
                                                 </>
                                             )}
+                                            {/* Extension browser toggle */}
+                                            {selectedAgent?.browserType === 'extension' && (
+                                                <Button
+                                                    size="sm"
+                                                    variant="outline"
+                                                    className="gap-1.5 text-xs h-8"
+                                                    onClick={() => {
+                                                        const next = !showBrowserPreview;
+                                                        setShowBrowserPreview(next);
+                                                        browserDismissedRef.current = !next;
+                                                    }}
+                                                >
+                                                    <Chrome className="h-3.5 w-3.5" />
+                                                    {showBrowserPreview ? 'Hide' : 'Show'} Extension
+                                                </Button>
+                                            )}
                                         </>
                                     )}
                                     {viewMode === 'settings' && (
@@ -1072,7 +1123,7 @@ export default function AgentsPage() {
                             {viewMode === 'chat' && (
                                 activeSession ? (
                                     <div className="flex-1 flex min-h-0">
-                                        <div className={`flex flex-col ${showBrowserPreview && browserWsUrl ? 'w-1/2' : 'flex-1'}`}>
+                                        <div className={`flex flex-col ${showBrowserPreview && (browserWsUrl || selectedAgent?.browserType === 'extension') ? 'w-1/2' : 'flex-1'}`}>
                                         <div className="flex-1 overflow-y-auto">
                                             <div className="max-w-5xl mx-auto px-4 py-6 space-y-6">
                                                 {loadingMessages ? (
@@ -1197,8 +1248,8 @@ export default function AgentsPage() {
                                         </div>
                                         </div>
 
-                                        {/* Browser preview column */}
-                                        {showBrowserPreview && browserWsUrl && browserSessionId && (
+                                        {/* Browser preview column — Cloud */}
+                                        {showBrowserPreview && browserWsUrl && browserSessionId && (selectedAgent?.browserType || 'cloud') === 'cloud' && (
                                             <div className="w-1/2 border-l border-border p-3 overflow-y-auto">
                                                 <BrowserPreview
                                                     wsUrl={browserWsUrl}
@@ -1211,6 +1262,13 @@ export default function AgentsPage() {
                                                             : proxies.length > 0 ? 'Auto-proxied' : undefined
                                                     }
                                                 />
+                                            </div>
+                                        )}
+
+                                        {/* Browser preview column — Extension */}
+                                        {showBrowserPreview && selectedAgent?.browserType === 'extension' && workspace && (
+                                            <div className="w-1/2 border-l border-border p-3 overflow-y-auto">
+                                                <ExtensionLiveView workspaceId={workspace.id} />
                                             </div>
                                         )}
                                     </div>
@@ -1255,102 +1313,146 @@ export default function AgentsPage() {
                                             <h3 className="text-sm font-semibold">Browser Settings</h3>
                                         </div>
 
-                                        {/* Fingerprint (OS) */}
+                                        {/* Browser Type */}
                                         <div className="space-y-2">
-                                            <Label className="text-sm font-medium">Fingerprint</Label>
-                                            <Select
-                                                value={browserProfile?.os || 'windows'}
-                                                onValueChange={handleChangeFingerprint}
-                                                disabled={savingBrowserSettings}
-                                            >
-                                                <SelectTrigger className="w-full">
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    <SelectItem value="windows">Windows</SelectItem>
-                                                    <SelectItem value="macos">macOS</SelectItem>
-                                                    <SelectItem value="linux">Linux</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                            <p className="text-xs text-muted-foreground">
-                                                OS fingerprint used by this agent&apos;s browser profile
-                                            </p>
+                                            <Label className="text-sm font-medium">Browser Type</Label>
+                                            <div className="grid grid-cols-2 gap-3">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleChangeBrowserType('cloud')}
+                                                    disabled={savingBrowserSettings}
+                                                    className={cn(
+                                                        'flex items-center gap-3 rounded-lg border-2 p-3 transition-colors text-left',
+                                                        (selectedAgent.browserType || 'cloud') === 'cloud'
+                                                            ? 'border-primary bg-primary/5'
+                                                            : 'border-border hover:border-muted-foreground/30'
+                                                    )}
+                                                >
+                                                    <Cloud className={cn('h-4 w-4 flex-shrink-0', (selectedAgent.browserType || 'cloud') === 'cloud' ? 'text-primary' : 'text-muted-foreground')} />
+                                                    <div>
+                                                        <p className={cn('text-sm font-medium', (selectedAgent.browserType || 'cloud') === 'cloud' ? 'text-foreground' : 'text-muted-foreground')}>Cloud Browser</p>
+                                                        <p className="text-[11px] text-muted-foreground">Managed instance with proxy support</p>
+                                                    </div>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleChangeBrowserType('extension')}
+                                                    disabled={savingBrowserSettings}
+                                                    className={cn(
+                                                        'flex items-center gap-3 rounded-lg border-2 p-3 transition-colors text-left',
+                                                        selectedAgent.browserType === 'extension'
+                                                            ? 'border-primary bg-primary/5'
+                                                            : 'border-border hover:border-muted-foreground/30'
+                                                    )}
+                                                >
+                                                    <Chrome className={cn('h-4 w-4 flex-shrink-0', selectedAgent.browserType === 'extension' ? 'text-primary' : 'text-muted-foreground')} />
+                                                    <div>
+                                                        <p className={cn('text-sm font-medium', selectedAgent.browserType === 'extension' ? 'text-foreground' : 'text-muted-foreground')}>Extension Browser</p>
+                                                        <p className="text-[11px] text-muted-foreground">Your real Chrome browser</p>
+                                                    </div>
+                                                </button>
+                                            </div>
                                         </div>
 
-                                        {/* Proxy */}
-                                        <div className="space-y-2">
-                                            <Label className="text-sm font-medium">Proxy</Label>
-                                            <Select
-                                                value={selectedAgent.browserProxyId || '__auto__'}
-                                                onValueChange={handleChangeProxy}
-                                                disabled={savingBrowserSettings}
-                                            >
-                                                <SelectTrigger className="w-full">
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    <SelectItem value="__auto__">
-                                                        <div className="flex items-center gap-2">
-                                                            <Globe className="h-3.5 w-3.5 text-muted-foreground" />
-                                                            <span>Auto-select nearest proxy</span>
-                                                        </div>
-                                                    </SelectItem>
-                                                    {proxies.filter((p) => p.isActive).map((proxy) => (
-                                                        <SelectItem key={proxy.id} value={proxy.id}>
-                                                            <div className="flex items-center gap-2">
-                                                                {proxy.country && (
-                                                                    <span className="text-sm">
-                                                                        {String.fromCodePoint(
-                                                                            ...proxy.country.toUpperCase().split('').map((c) => 0x1f1e6 + c.charCodeAt(0) - 65)
+                                        {/* Cloud-specific settings */}
+                                        {(selectedAgent.browserType || 'cloud') === 'cloud' && (
+                                            <>
+                                                {/* Fingerprint (OS) */}
+                                                <div className="space-y-2">
+                                                    <Label className="text-sm font-medium">Fingerprint</Label>
+                                                    <Select
+                                                        value={browserProfile?.os || 'windows'}
+                                                        onValueChange={handleChangeFingerprint}
+                                                        disabled={savingBrowserSettings}
+                                                    >
+                                                        <SelectTrigger className="w-full">
+                                                            <SelectValue />
+                                                        </SelectTrigger>
+                                                        <SelectContent>
+                                                            <SelectItem value="windows">Windows</SelectItem>
+                                                            <SelectItem value="macos">macOS</SelectItem>
+                                                            <SelectItem value="linux">Linux</SelectItem>
+                                                        </SelectContent>
+                                                    </Select>
+                                                    <p className="text-xs text-muted-foreground">
+                                                        OS fingerprint used by this agent&apos;s browser profile
+                                                    </p>
+                                                </div>
+
+                                                {/* Proxy */}
+                                                <div className="space-y-2">
+                                                    <Label className="text-sm font-medium">Proxy</Label>
+                                                    <Select
+                                                        value={selectedAgent.browserProxyId || '__auto__'}
+                                                        onValueChange={handleChangeProxy}
+                                                        disabled={savingBrowserSettings}
+                                                    >
+                                                        <SelectTrigger className="w-full">
+                                                            <SelectValue />
+                                                        </SelectTrigger>
+                                                        <SelectContent>
+                                                            <SelectItem value="__auto__">
+                                                                <div className="flex items-center gap-2">
+                                                                    <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                                                                    <span>Auto-select nearest proxy</span>
+                                                                </div>
+                                                            </SelectItem>
+                                                            {proxies.filter((p) => p.isActive).map((proxy) => (
+                                                                <SelectItem key={proxy.id} value={proxy.id}>
+                                                                    <div className="flex items-center gap-2">
+                                                                        {proxy.country && (
+                                                                            <span className="text-sm">
+                                                                                {String.fromCodePoint(
+                                                                                    ...proxy.country.toUpperCase().split('').map((c) => 0x1f1e6 + c.charCodeAt(0) - 65)
+                                                                                )}
+                                                                            </span>
                                                                         )}
-                                                                    </span>
-                                                                )}
-                                                                <span>{proxy.label}</span>
-                                                                <span className="text-muted-foreground font-mono text-xs">
-                                                                    {proxy.host}:{proxy.port}
-                                                                </span>
-                                                            </div>
-                                                        </SelectItem>
-                                                    ))}
-                                                </SelectContent>
-                                            </Select>
-                                            <p className="text-xs text-muted-foreground">
-                                                {proxies.filter((p) => p.isActive).length === 0
-                                                    ? 'No proxies available. Add proxies from the admin panel.'
-                                                    : 'Choose a proxy location or let the system auto-select the nearest one'}
-                                            </p>
-                                        </div>
+                                                                        <span>{proxy.label}</span>
+                                                                        <span className="text-muted-foreground font-mono text-xs">
+                                                                            {proxy.host}:{proxy.port}
+                                                                        </span>
+                                                                    </div>
+                                                                </SelectItem>
+                                                            ))}
+                                                        </SelectContent>
+                                                    </Select>
+                                                    <p className="text-xs text-muted-foreground">
+                                                        {proxies.filter((p) => p.isActive).length === 0
+                                                            ? 'No proxies available. Add proxies from the admin panel.'
+                                                            : 'Choose a proxy location or let the system auto-select the nearest one'}
+                                                    </p>
+                                                </div>
 
-                                        {/* Start / End Session */}
-                                        <div className="space-y-2">
-                                            <Label className="text-sm font-medium">Browser Session</Label>
-                                            <div className="flex items-center gap-3">
-                                                {(browserSessionId || activeBrowserSession) ? (
-                                                    <>
-                                                        <div className="flex items-center gap-2">
-                                                            <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-                                                            <span className="text-sm text-muted-foreground">Session active</span>
-                                                        </div>
-                                                        <Button
-                                                            variant="outline"
-                                                            size="sm"
-                                                            className="gap-1.5 text-red-600 hover:text-red-700"
-                                                            onClick={handleEndBrowserSession}
-                                                        >
-                                                            <Square className="h-3.5 w-3.5" />
-                                                            End Session
-                                                        </Button>
-                                                    </>
-                                                ) : (
-                                                    <>
-                                                        <div className="flex items-center gap-2">
-                                                            <div className="h-2 w-2 rounded-full bg-muted-foreground/40" />
-                                                            <span className="text-sm text-muted-foreground">No active session</span>
-                                                        </div>
-                                                        <Button
-                                                            variant="outline"
-                                                            size="sm"
-                                                            className="gap-1.5"
+                                                {/* Start / End Session */}
+                                                <div className="space-y-2">
+                                                    <Label className="text-sm font-medium">Browser Session</Label>
+                                                    <div className="flex items-center gap-3">
+                                                        {(browserSessionId || activeBrowserSession) ? (
+                                                            <>
+                                                                <div className="flex items-center gap-2">
+                                                                    <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                                                                    <span className="text-sm text-muted-foreground">Session active</span>
+                                                                </div>
+                                                                <Button
+                                                                    variant="outline"
+                                                                    size="sm"
+                                                                    className="gap-1.5 text-red-600 hover:text-red-700"
+                                                                    onClick={handleEndBrowserSession}
+                                                                >
+                                                                    <Square className="h-3.5 w-3.5" />
+                                                                    End Session
+                                                                </Button>
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <div className="flex items-center gap-2">
+                                                                    <div className="h-2 w-2 rounded-full bg-muted-foreground/40" />
+                                                                    <span className="text-sm text-muted-foreground">No active session</span>
+                                                                </div>
+                                                                <Button
+                                                                    variant="outline"
+                                                                    size="sm"
+                                                                    className="gap-1.5"
                                                             onClick={handleStartBrowserSession}
                                                             disabled={startingBrowser}
                                                         >
@@ -1365,6 +1467,27 @@ export default function AgentsPage() {
                                                 )}
                                             </div>
                                         </div>
+                                            </>
+                                        )}
+
+                                        {/* Extension-specific settings */}
+                                        {selectedAgent.browserType === 'extension' && (
+                                            <div className="space-y-3">
+                                                <div className="rounded-lg bg-muted/50 border border-border p-4 space-y-2">
+                                                    <div className="flex items-center gap-2">
+                                                        <Chrome className="h-4 w-4 text-muted-foreground" />
+                                                        <p className="text-sm font-medium">Chrome Extension Browser</p>
+                                                    </div>
+                                                    <p className="text-xs text-muted-foreground leading-relaxed">
+                                                        This agent uses your real Chrome browser via the extension. The agent will see and interact with your actual browser tabs, sessions, and cookies.
+                                                    </p>
+                                                    <p className="text-xs text-muted-foreground leading-relaxed">
+                                                        Make sure the Chrome extension is installed and connected. You can configure it in{' '}
+                                                        <span className="font-medium text-foreground">Extension Settings</span>.
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
 
                                     <div className="grid grid-cols-2 gap-4">

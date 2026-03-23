@@ -9,6 +9,7 @@ export const agentRepository = {
         systemPrompt?: string;
         model?: string;
         temperature?: number;
+        browserType?: string;
         browserEnabled?: boolean;
         browserProxyId?: string | null;
     }) {
@@ -74,6 +75,7 @@ export const agentRepository = {
             systemPrompt: string;
             model: string;
             temperature: number;
+            browserType: string;
             browserEnabled: boolean;
             browserProxyId: string | null;
         }>

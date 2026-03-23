@@ -8,6 +8,7 @@ const createAgentSchema = z.object({
     systemPrompt: z.string().optional(),
     model: z.string().default("gpt-4o-mini"),
     temperature: z.number().min(0).max(2).default(0.7),
+    browserType: z.enum(["cloud", "extension"]).default("cloud"),
 });
 
 const updateAgentSchema = z.object({
@@ -15,6 +16,7 @@ const updateAgentSchema = z.object({
     systemPrompt: z.string().optional(),
     model: z.string().optional(),
     temperature: z.number().min(0).max(2).optional(),
+    browserType: z.enum(["cloud", "extension"]).optional(),
     browserProxyId: z.string().uuid().nullable().optional(),
 });
 

@@ -35,6 +35,7 @@ export interface Agent {
     canManageChannels: boolean;
     canManageAgents: boolean;
     requireApprovalForAll: boolean;
+    browserType: 'cloud' | 'extension';
     browserEnabled: boolean;
     browserProxyId: string | null;
     createdAt: string;

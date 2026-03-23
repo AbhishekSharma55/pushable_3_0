@@ -317,7 +317,7 @@ async function checkAndEmitInterrupts(
     graph: Awaited<ReturnType<typeof createAgentGraph>>,
     sessionId: string,
     runId: string
-): Promise<boolean> {
+): Promise<{ interrupted: boolean; approvalRequest?: unknown }> {
     try {
         const graphState = await graph.getState({
             configurable: { thread_id: sessionId },
@@ -338,12 +338,12 @@ async function checkAndEmitInterrupts(
                     timestamp: Date.now(),
                 });
             }
-            return true;
+            return { interrupted: true, approvalRequest: interruptPayload };
         }
     } catch (error) {
         logger.warn({ error }, "Failed to check graph state for interrupts");
     }
-    return false;
+    return { interrupted: false };
 }
 
 // ─── Execute a run in background (detached from HTTP) ────────────────────────
@@ -397,25 +397,13 @@ async function executeRun(
             "Graph stream complete"
         );
 
-        // Check for HITL interrupts
-        const isInterrupted = await checkAndEmitInterrupts(graph, sessionId, runId);
+        // Check for HITL interrupts (returns the payload to avoid a second getState call)
+        const interruptResult = await checkAndEmitInterrupts(graph, sessionId, runId);
+        const isInterrupted = interruptResult.interrupted;
+        const approvalRequest = interruptResult.approvalRequest;
 
-        // Get interrupt payload for persistence (if interrupted)
-        let approvalRequest: unknown = undefined;
-        if (isInterrupted) {
-            try {
-                const graphState = await graph.getState({
-                    configurable: { thread_id: sessionId },
-                });
-                const pendingInterrupts = (
-                    graphState.tasks as Array<{
-                        interrupts?: Array<{ value?: unknown }>;
-                    }>
-                ).flatMap((t) => t.interrupts || []);
-                approvalRequest = pendingInterrupts[0]?.value;
-            } catch {
-                // Already emitted via checkAndEmitInterrupts
-            }
+        if (isInterrupted && !approvalRequest) {
+            logger.warn({ runId }, "Run interrupted but no approval payload found — interrupt may not display correctly");
         }
 
         // Save assistant message with metadata
@@ -500,26 +488,10 @@ async function resumeRun(
 
         mergeBrowserEvents(streamResult, browserToolCalls, browserSegments);
 
-        // Check for further interrupts
-        const isInterrupted = await checkAndEmitInterrupts(graph, sessionId, runId);
-
-        // Get interrupt payload for persistence (if interrupted again)
-        let approvalRequest: unknown = undefined;
-        if (isInterrupted) {
-            try {
-                const graphState = await graph.getState({
-                    configurable: { thread_id: sessionId },
-                });
-                const pendingInterrupts = (
-                    graphState.tasks as Array<{
-                        interrupts?: Array<{ value?: unknown }>;
-                    }>
-                ).flatMap((t) => t.interrupts || []);
-                approvalRequest = pendingInterrupts[0]?.value;
-            } catch {
-                // Already emitted via checkAndEmitInterrupts
-            }
-        }
+        // Check for further interrupts (returns the payload to avoid a second getState call)
+        const interruptResult = await checkAndEmitInterrupts(graph, sessionId, runId);
+        const isInterrupted = interruptResult.interrupted;
+        const approvalRequest = interruptResult.approvalRequest;
 
         if (streamResult.content || streamResult.toolCalls.length > 0 || isInterrupted) {
             await messageRepository.create({
@@ -595,11 +567,21 @@ export async function chatRoutes(fastify: FastifyInstance) {
         // Guard: prevent concurrent runs on the same session
         const activeRun = await runRepository.findActiveBySession(sessionId, workspaceId);
         if (activeRun) {
-            throw new AppError(
-                "A run is already in progress for this session",
-                409,
-                "RUN_IN_PROGRESS"
-            );
+            // Auto-cancel stale interrupted runs (>1 hour old) so users aren't permanently blocked
+            const isInterrupted = activeRun.status === "interrupted";
+            const ageMs = Date.now() - new Date(activeRun.updatedAt ?? activeRun.createdAt).getTime();
+            const ONE_HOUR = 60 * 60 * 1000;
+
+            if (isInterrupted && ageMs > ONE_HOUR) {
+                logger.info({ runId: activeRun.id, ageMs }, "Auto-cancelling stale interrupted run");
+                await runRepository.updateStatus(activeRun.id, "cancelled", "Auto-cancelled: stale interrupted run replaced by new message");
+            } else {
+                throw new AppError(
+                    "A run is already in progress for this session",
+                    409,
+                    "RUN_IN_PROGRESS"
+                );
+            }
         }
 
         // Save user message immediately

@@ -262,8 +262,19 @@ export interface SystemSettings {
   browser_agent_prompt: string
 }
 
+async function ensureSystemSettingsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS system_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)
+}
+
 export async function getSystemSettings(): Promise<SystemSettings> {
   try {
+    await ensureSystemSettingsTable()
     const { rows } = await pool.query(`SELECT key, value FROM system_settings`)
     const map: Record<string, string> = {}
     for (const r of rows) map[r.key] = r.value
@@ -277,6 +288,7 @@ export async function getSystemSettings(): Promise<SystemSettings> {
 }
 
 export async function updateSystemSetting(key: string, value: string) {
+  await ensureSystemSettingsTable()
   await pool.query(`
     INSERT INTO system_settings (key, value, updated_at)
     VALUES ($1, $2, now())
@@ -336,9 +348,9 @@ export interface IntegrationSummary {
 export async function getIntegrationSummary(): Promise<IntegrationSummary[]> {
   try {
     const { rows } = await pool.query(`
-      SELECT toolkit_slug, COUNT(*)::int as count
+      SELECT composio_toolkit_slug as toolkit_slug, COUNT(*)::int as count
       FROM integrations
-      GROUP BY toolkit_slug
+      GROUP BY composio_toolkit_slug
       ORDER BY count DESC
     `)
     return rows

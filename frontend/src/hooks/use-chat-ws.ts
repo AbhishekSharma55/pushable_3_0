@@ -18,6 +18,7 @@ export interface ChatMessage {
         toolCalls?: StreamToolCall[];
         segments?: StreamSegment[];
         approvalRequest?: unknown;
+        thinking?: string;
     };
 }
 
@@ -76,6 +77,7 @@ async function connectSSE(
     onContent: (chunk: string) => void,
     onToolCall: (tc: StreamToolCall) => void,
     onApprovalRequest: (payload: unknown) => void,
+    onThinkingContent: (chunk: string) => void,
     onError: (error: string) => void,
     onDone: () => void
 ): Promise<void> {
@@ -124,6 +126,7 @@ async function connectSSE(
                     if (data.content) onContent(data.content as string);
                     if (data.toolCall) onToolCall(data.toolCall as StreamToolCall);
                     if (data.approvalRequest) onApprovalRequest(data.approvalRequest);
+                    if (data.thinkingContent) onThinkingContent(data.thinkingContent as string);
                     if (data.error) onError(data.error as string);
                 } catch {
                     // Skip malformed JSON
@@ -289,6 +292,17 @@ export function useChatWs(sessionKey: string) {
                         )
                     );
                     setIsLoading(false);
+                },
+                // onThinkingContent
+                (chunk) => {
+                    sseSucceeded = true;
+                    setMessages((prev) =>
+                        prev.map((m) =>
+                            m.id === thinkingId
+                                ? { ...m, metadata: { ...m.metadata, thinking: (m.metadata?.thinking ?? '') + chunk } }
+                                : m
+                        )
+                    );
                 },
                 // onError
                 (error) => {

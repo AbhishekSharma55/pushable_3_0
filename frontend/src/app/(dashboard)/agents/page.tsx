@@ -27,6 +27,7 @@ import {
     Play,
     Cloud,
     Chrome,
+    ChevronRight,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -109,6 +110,7 @@ import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 import { ToolCallDisplay } from '@/components/chat/tool-call-display';
 import { ApprovalCard } from '@/components/chat/approval-card';
+import { TextShimmer } from '@/components/ui/text-shimmer';
 
 interface ToolCallEvent {
     id: string;
@@ -135,9 +137,40 @@ interface ChatMessage extends Message {
     toolCalls?: ToolCallEvent[];
     segments?: ChatSegment[];
     approvalRequest?: ApprovalRequest;
+    thinking?: string;
 }
 
 type ViewMode = 'chat' | 'settings';
+
+const THINKING_MESSAGES = [
+    "Thinking...",
+    "Analyzing the prompt...",
+    "Processing context...",
+    "Reasoning step-by-step...",
+    "Synthesizing information...",
+    "Finalizing response...",
+    "Connecting to agent…",
+    "Analyzing your request…",
+    "Securing workspace access…",
+    "Gathering context…",
+    "Reasoning through the problem…",
+    "Preparing response…",
+];
+
+function ThinkingLoader() {
+    const [index, setIndex] = useState(0);
+    useEffect(() => {
+        const interval = setInterval(() => {
+            setIndex((prev) => (prev + 1) % THINKING_MESSAGES.length);
+        }, 4500);
+        return () => clearInterval(interval);
+    }, []);
+    return (
+        <TextShimmer className="font-mono text-sm" duration={1}>
+            {THINKING_MESSAGES[index]}
+        </TextShimmer>
+    );
+}
 
 export default function AgentsPage() {
     const workspace = useActiveWorkspace();
@@ -292,6 +325,7 @@ export default function AgentsPage() {
                             toolCalls: (meta.toolCalls as ToolCallEvent[] | undefined) || undefined,
                             segments: (meta.segments as ChatSegment[] | undefined) || undefined,
                             approvalRequest: (meta.approvalRequest as ApprovalRequest | undefined) || undefined,
+                            thinking: (meta.thinking as string | undefined) || undefined,
                         };
                     }
                     return msg;
@@ -679,6 +713,13 @@ export default function AgentsPage() {
                             return { ...m, toolCalls: updatedToolCalls, segments: [...segments] };
                         }));
                     }
+                    if (parsed.thinkingContent) {
+                        setMessages((prev) => prev.map((m) =>
+                            m.id === assistantMsgId
+                                ? { ...m, thinking: (m.thinking ?? '') + (parsed.thinkingContent as string) }
+                                : m
+                        ));
+                    }
                     if (parsed.approvalRequest) {
                         const request = parsed.approvalRequest as ApprovalRequest;
                         setPendingApproval({ msgId: assistantMsgId, request });
@@ -726,7 +767,7 @@ export default function AgentsPage() {
                     const hydrated: ChatMessage[] = msgsRes.map((msg: ChatMessage & { metadata?: Record<string, unknown> }) => {
                         const meta = msg.metadata as Record<string, unknown> | undefined;
                         if (meta && msg.role === 'assistant') {
-                            return { ...msg, toolCalls: (meta.toolCalls as ToolCallEvent[] | undefined) || undefined, segments: (meta.segments as ChatSegment[] | undefined) || undefined };
+                            return { ...msg, toolCalls: (meta.toolCalls as ToolCallEvent[] | undefined) || undefined, segments: (meta.segments as ChatSegment[] | undefined) || undefined, thinking: (meta.thinking as string | undefined) || undefined };
                         }
                         return msg;
                     });
@@ -746,6 +787,7 @@ export default function AgentsPage() {
                                 toolCalls: (meta.toolCalls as ToolCallEvent[] | undefined) || undefined,
                                 segments: (meta.segments as ChatSegment[] | undefined) || undefined,
                                 approvalRequest: (meta.approvalRequest as ApprovalRequest | undefined) || undefined,
+                                thinking: (meta.thinking as string | undefined) || undefined,
                             };
                         }
                         return msg;
@@ -1148,11 +1190,7 @@ export default function AgentsPage() {
                                                                     <div className="flex-1 min-w-0">
                                                                         <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5">
                                                                             {isStreaming && !text ? (
-                                                                                <span className="inline-flex gap-1">
-                                                                                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '0ms' }} />
-                                                                                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '150ms' }} />
-                                                                                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '300ms' }} />
-                                                                                </span>
+                                                                                <ThinkingLoader />
                                                                             ) : (
                                                                                 <>
                                                                                     {cleanMessage && (
@@ -1209,6 +1247,35 @@ export default function AgentsPage() {
                                                             );
                                                         };
 
+                                                        const ThinkingToggle = ({ content, isStreaming: isThinkingStreaming }: { content: string; isStreaming?: boolean }) => {
+                                                            const [open, setOpen] = useState(false);
+                                                            if (!content) return null;
+                                                            return (
+                                                                <div className="flex gap-3">
+                                                                    <div className="w-7 flex-shrink-0" />
+                                                                    <div className="flex-1 min-w-0 mb-1">
+                                                                        <button onClick={() => setOpen(!open)} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-1">
+                                                                            <Sparkles className="h-3 w-3" />
+                                                                            <span className="font-medium">{isThinkingStreaming ? 'Thinking...' : 'Thought process'}</span>
+                                                                            {isThinkingStreaming && (
+                                                                                <span className="inline-flex gap-0.5 ml-1">
+                                                                                    <span className="h-1 w-1 rounded-full bg-muted-foreground/50 animate-bounce" style={{ animationDelay: '0ms' }} />
+                                                                                    <span className="h-1 w-1 rounded-full bg-muted-foreground/50 animate-bounce" style={{ animationDelay: '150ms' }} />
+                                                                                    <span className="h-1 w-1 rounded-full bg-muted-foreground/50 animate-bounce" style={{ animationDelay: '300ms' }} />
+                                                                                </span>
+                                                                            )}
+                                                                            {open ? <ChevronDown className="h-3 w-3 ml-auto" /> : <ChevronRight className="h-3 w-3 ml-auto" />}
+                                                                        </button>
+                                                                        {open && (
+                                                                            <div className="mt-1 rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
+                                                                                {content}
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        };
+
                                                         return (
                                                         <Fragment key={msg.id}>
                                                             {msg.role === 'user' ? (
@@ -1220,6 +1287,7 @@ export default function AgentsPage() {
                                                             ) : msg.segments && msg.segments.length > 0 ? (
                                                                 /* Interleaved rendering: text and tool calls in order */
                                                                 <>
+                                                                    {msg.thinking && <ThinkingToggle content={msg.thinking} isStreaming={msg.isStreaming} />}
                                                                     {msg.segments.map((seg, si) => (
                                                                         <Fragment key={`${msg.id}-seg-${si}`}>
                                                                             {seg.type === 'text' && seg.content.trim() && renderAssistantText(seg.content, msg.isStreaming && si === msg.segments!.length - 1)}
@@ -1241,6 +1309,7 @@ export default function AgentsPage() {
                                                             ) : (
                                                                 /* Fallback for loaded messages without segments */
                                                                 <>
+                                                                    {msg.thinking && <ThinkingToggle content={msg.thinking} />}
                                                                     {msg.toolCalls && msg.toolCalls.length > 0 && (
                                                                         <ToolCallDisplay toolCalls={msg.toolCalls} messageId={msg.id} />
                                                                     )}

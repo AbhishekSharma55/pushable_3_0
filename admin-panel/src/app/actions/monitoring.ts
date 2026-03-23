@@ -148,13 +148,14 @@ export async function getRecentCreditLogs(): Promise<CreditLog[]> {
       cl.id,
       w.name AS workspace_name,
       ag.name AS agent_name,
-      cl.tokens_used,
-      cl.credits_deducted,
-      cl.model,
+      0 AS tokens_used,
+      ABS(cl.amount) AS credits_deducted,
+      COALESCE(cl.metadata->>'modelId', cl.type::text) AS model,
       cl.created_at
-    FROM credit_logs cl
+    FROM credit_ledger cl
     LEFT JOIN workspaces w ON w.id = cl.workspace_id
-    LEFT JOIN agents ag ON ag.id = cl.agent_id
+    LEFT JOIN agents ag ON ag.id::text = cl.metadata->>'agentId'
+    WHERE cl.amount < 0
     ORDER BY cl.created_at DESC
     LIMIT 50
   `)
@@ -219,12 +220,13 @@ export async function getRecentScheduleRuns(): Promise<ScheduleRunEntry[]> {
 export async function getModelUsage(): Promise<ModelUsage[]> {
   const result = await pool.query(`
     SELECT
-      model,
+      metadata->>'modelId' AS model,
       COUNT(*)::int AS call_count,
-      COALESCE(SUM(tokens_used), 0)::int AS total_tokens,
-      COALESCE(SUM(credits_deducted), 0)::int AS total_credits
-    FROM credit_logs
-    GROUP BY model
+      0 AS total_tokens,
+      COALESCE(SUM(ABS(amount)), 0)::int AS total_credits
+    FROM credit_ledger
+    WHERE metadata->>'modelId' IS NOT NULL
+    GROUP BY metadata->>'modelId'
     ORDER BY total_credits DESC
   `)
   return result.rows

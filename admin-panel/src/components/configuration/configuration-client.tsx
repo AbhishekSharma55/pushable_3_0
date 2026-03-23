@@ -195,7 +195,7 @@ function ModelPicker({ value, onChange, models }: {
 
 // ─── Tab type ───────────────────────────────────────────────────────
 
-type Tab = 'browser' | 'llm' | 'agents' | 'integrations'
+type Tab = 'browser' | 'llm' | 'agents'
 
 // ─── Main ───────────────────────────────────────────────────────────
 
@@ -219,7 +219,6 @@ export function ConfigurationClient({
     { key: 'browser', label: 'Browser' },
     { key: 'llm', label: 'LLM Models' },
     { key: 'agents', label: 'Agent Config' },
-    { key: 'integrations', label: 'Integrations' },
   ]
 
   return (
@@ -252,7 +251,6 @@ export function ConfigurationClient({
         )}
         {tab === 'llm' && <LLMTab models={models} gateway={envConfig.gateway} />}
         {tab === 'agents' && <AgentsTab defaults={agentDefaults} />}
-        {tab === 'integrations' && <IntegrationsTab integrations={integrations} />}
       </div>
     </div>
   )

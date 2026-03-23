@@ -19,7 +19,7 @@ const RECONNECT_DELAY   = 3000;   // ms between reconnect attempts
 const FRAME_INTERVAL    = 100;    // ms between live preview frames (~10 FPS)
 const FRAME_QUALITY     = 40;     // lower JPEG quality to save bandwidth at higher FPS
 const SCREENSHOT_QUALITY = 85;    // JPEG quality for on-demand screenshots
-const KEEPALIVE_MINUTES  = 0.4;   // ~24 s alarm interval
+const KEEPALIVE_MINUTES  = 0.3;   // ~18 s alarm interval (must be < 30s to prevent service worker suspension)
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -55,14 +55,27 @@ try {
     chrome.alarms.create('keepalive', { periodInMinutes: KEEPALIVE_MINUTES });
     chrome.alarms.onAlarm.addListener((alarm) => {
       if (alarm.name === 'keepalive') {
-        chrome.storage.local.get('serverUrl', () => {});
+        // Touch storage to keep service worker alive
+        chrome.storage.local.get('serverUrl', (r) => {
+          // Also check if we should be connected but aren't
+          if (r.serverUrl && (!ws || ws.readyState !== WebSocket.OPEN) && !wsConnecting && !reconnectTimer) {
+            connect();
+          }
+        });
       }
     });
   }
 } catch (_) { /* alarms API unavailable */ }
 
-// Fallback keepalive — setInterval to touch storage every 25s
-setInterval(() => { chrome.storage.local.get('keepalive', () => {}); }, 25000);
+// Fallback keepalive — setInterval to touch storage every 20s
+setInterval(() => {
+  chrome.storage.local.get('serverUrl', (r) => {
+    // Re-establish connection if it was lost (e.g. after service worker wake)
+    if (r.serverUrl && (!ws || ws.readyState !== WebSocket.OPEN) && !wsConnecting && !reconnectTimer) {
+      connect();
+    }
+  });
+}, 20000);
 
 // ─── WebSocket ───────────────────────────────────────────────────────────────
 
@@ -110,13 +123,18 @@ async function connect() {
 
     ws.onclose = (event) => {
       wsConnecting = false;
+      ws = null;
       stopFrameStream();
-      
+
       // If closed with a 4xxx code, it's an app-level rejection (e.g. 4001 Invalid API key)
       if (event.code >= 4000) {
         lastConnectionError = event.reason || 'Connection rejected by server';
         // Do not auto-reconnect if rejected for auth reasons
+      } else if (event.code === 1000 && event.reason === 'Replaced by new connection') {
+        // Server replaced us with a newer connection — don't fight it
+        lastConnectionError = null;
       } else {
+        // Normal disconnect or network issue — reconnect
         scheduleReconnect();
       }
     };

@@ -1,6 +1,7 @@
 'use server'
 
 import pool from '@/lib/db'
+import bcrypt from 'bcryptjs'
 import { revalidatePath } from 'next/cache'
 
 export interface AdminUser {
@@ -66,6 +67,53 @@ export async function blockUser(userId: string) {
 export async function unblockUser(userId: string) {
   await ensureBlockedAtColumn()
   await pool.query(`UPDATE users SET blocked_at = NULL WHERE id = $1`, [userId])
+  revalidatePath('/users')
+}
+
+export async function updateUser(
+  userId: string,
+  data: { name?: string; email?: string; role?: string }
+) {
+  const fields: string[] = []
+  const values: unknown[] = []
+  let i = 1
+
+  if (data.name !== undefined) {
+    fields.push(`name = $${i++}`)
+    values.push(data.name)
+  }
+  if (data.email !== undefined) {
+    fields.push(`email = $${i++}`)
+    values.push(data.email)
+  }
+
+  if (fields.length > 0) {
+    values.push(userId)
+    await pool.query(
+      `UPDATE users SET ${fields.join(', ')} WHERE id = $${i}`,
+      values
+    )
+  }
+
+  if (data.role !== undefined) {
+    await pool.query(
+      `UPDATE workspace_members SET role = $1 WHERE user_id = $2`,
+      [data.role, userId]
+    )
+  }
+
+  revalidatePath('/users')
+}
+
+export async function resetPassword(userId: string, newPassword: string) {
+  const passwordHash = await bcrypt.hash(newPassword, 12)
+  const result = await pool.query(
+    `UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+    [passwordHash, userId]
+  )
+  if (result.rowCount === 0) {
+    throw new Error('User not found')
+  }
   revalidatePath('/users')
 }
 

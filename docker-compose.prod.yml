@@ -119,6 +119,8 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-abhishek0003}@postgres:5432/${POSTGRES_DB:-pushable_ai}
       AUTH_SECRET: ${AUTH_SECRET:-pushable-admin-secret-key-change-in-prod}
       ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-false}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - backend
 

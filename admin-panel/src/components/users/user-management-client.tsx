@@ -10,7 +10,7 @@ import {
   ArrowUp, ArrowDown, ArrowUpDown,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { AdminUser, blockUser, unblockUser, deleteUser } from '@/app/actions/users'
+import { AdminUser, blockUser, unblockUser, deleteUser, updateUser, resetPassword } from '@/app/actions/users'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -24,6 +24,7 @@ import {
   DropdownMenuItem, DropdownMenuDestructiveItem, DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
 import { SheetRoot, SheetContent } from '@/components/ui/sheet'
+import { DialogRoot, DialogContent } from '@/components/ui/dialog'
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -112,10 +113,11 @@ function RoleBadge({ role }: { role: string | null }) {
 // ─── Drawer ─────────────────────────────────────────────────────────────────
 
 function UserDetailDrawer({
-  user, open, onClose, onBlock, onUnblock, onDelete,
+  user, open, onClose, onBlock, onUnblock, onDelete, onEdit, onResetPassword,
 }: {
   user: AdminUser | null; open: boolean; onClose: () => void
   onBlock: (id: string) => void; onUnblock: (id: string) => void; onDelete: (id: string) => void
+  onEdit: (user: AdminUser) => void; onResetPassword: (user: AdminUser) => void
 }) {
   if (!user) return null
   const status = getStatus(user.blocked_at)
@@ -215,10 +217,12 @@ function UserDetailDrawer({
         </Sec>
 
         <div className="p-6 space-y-2">
-          <Button className="w-full justify-start gap-3" variant="outline" size="lg">
+          <Button className="w-full justify-start gap-3" variant="outline" size="lg"
+            onClick={() => { onClose(); onEdit(user) }}>
             <Pencil className="size-4 text-muted-foreground" /> Edit User
           </Button>
-          <Button className="w-full justify-start gap-3" variant="outline" size="lg">
+          <Button className="w-full justify-start gap-3" variant="outline" size="lg"
+            onClick={() => { onClose(); onResetPassword(user) }}>
             <KeyRound className="size-4 text-muted-foreground" /> Reset Password
           </Button>
           <Button className="w-full justify-start gap-3" variant="destructive" size="lg"
@@ -252,6 +256,130 @@ function KV({ label, value, icon }: { label: string; value: React.ReactNode; ico
   )
 }
 
+// ─── Edit Dialog ─────────────────────────────────────────────────────────────
+
+function EditUserDialog({
+  user, open, onClose, onSave,
+}: {
+  user: AdminUser | null; open: boolean; onClose: () => void
+  onSave: (id: string, data: { name: string; email: string; role: string }) => void
+}) {
+  const [name, setName] = React.useState('')
+  const [email, setEmail] = React.useState('')
+  const [role, setRole] = React.useState('')
+  const [saving, setSaving] = React.useState(false)
+
+  React.useEffect(() => {
+    if (user) {
+      setName(user.name)
+      setEmail(user.email)
+      setRole(user.role ?? 'member')
+    }
+  }, [user])
+
+  if (!user) return null
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setSaving(true)
+    await onSave(user!.id, { name, email, role })
+    setSaving(false)
+    onClose()
+  }
+
+  return (
+    <DialogRoot open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent title="Edit User">
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          <div className="space-y-1.5">
+            <label className="text-[13px] font-medium text-muted-foreground">Name</label>
+            <Input value={name} onChange={(e) => setName(e.target.value)} required />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-[13px] font-medium text-muted-foreground">Email</label>
+            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-[13px] font-medium text-muted-foreground">Role</label>
+            <SelectRoot value={role} onValueChange={setRole}>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="owner">Owner</SelectItem>
+                <SelectItem value="admin">Admin</SelectItem>
+                <SelectItem value="member">Member</SelectItem>
+              </SelectContent>
+            </SelectRoot>
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? 'Saving…' : 'Save Changes'}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </DialogRoot>
+  )
+}
+
+// ─── Reset Password Dialog ───────────────────────────────────────────────────
+
+function ResetPasswordDialog({
+  user, open, onClose,
+}: {
+  user: AdminUser | null; open: boolean; onClose: () => void
+}) {
+  const [password, setPassword] = React.useState('')
+  const [confirm, setConfirm] = React.useState('')
+  const [saving, setSaving] = React.useState(false)
+  const [error, setError] = React.useState('')
+
+  React.useEffect(() => {
+    if (open) { setPassword(''); setConfirm(''); setError('') }
+  }, [open])
+
+  if (!user) return null
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (password.length < 8) { setError('Password must be at least 8 characters'); return }
+    if (password !== confirm) { setError('Passwords do not match'); return }
+    setSaving(true)
+    await resetPassword(user!.id, password)
+    setSaving(false)
+    onClose()
+  }
+
+  return (
+    <DialogRoot open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent title="Reset Password">
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          <p className="text-[13px] text-muted-foreground">
+            Set a new password for <span className="font-medium text-foreground">{user.name}</span>
+          </p>
+          <div className="space-y-1.5">
+            <label className="text-[13px] font-medium text-muted-foreground">New Password</label>
+            <Input type="password" value={password} onChange={(e) => { setPassword(e.target.value); setError('') }} required />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-[13px] font-medium text-muted-foreground">Confirm Password</label>
+            <Input type="password" value={confirm} onChange={(e) => { setConfirm(e.target.value); setError('') }} required />
+          </div>
+          {error && <p className="text-[13px] text-red-600">{error}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? 'Resetting…' : 'Reset Password'}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </DialogRoot>
+  )
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 export function UserManagementClient({ initialUsers }: { initialUsers: AdminUser[] }) {
@@ -264,6 +392,8 @@ export function UserManagementClient({ initialUsers }: { initialUsers: AdminUser
   const [page, setPage]                 = React.useState(1)
   const [perPage, setPerPage]           = React.useState(10)
   const [drawerUser, setDrawerUser]     = React.useState<AdminUser | null>(null)
+  const [editUser, setEditUser]         = React.useState<AdminUser | null>(null)
+  const [resetPwUser, setResetPwUser]   = React.useState<AdminUser | null>(null)
   const [loading, setLoading]           = React.useState<string | null>(null)
   const [sortKey, setSortKey]           = React.useState<SortKey | null>(null)
   const [sortDir, setSortDir]           = React.useState<SortDir>('asc')
@@ -347,6 +477,12 @@ export function UserManagementClient({ initialUsers }: { initialUsers: AdminUser
     setUsers((p) => p.filter((u) => !selectedIds.has(u.id)))
     setSelectedIds(new Set())
   }
+  async function handleEditSave(id: string, data: { name: string; email: string; role: string }) {
+    await updateUser(id, data)
+    setUsers((p) => p.map((u) => u.id === id ? { ...u, name: data.name, email: data.email, role: data.role } : u))
+    if (drawerUser?.id === id) setDrawerUser((u) => u ? { ...u, name: data.name, email: data.email, role: data.role } : u)
+  }
+
   function exportCSV() {
     const rows = filtered.map((u) =>
       [u.name, u.email, u.workspace_name ?? '', u.role ?? '', getPlan(u.plan_credits), fmtDate(u.created_at), getStatus(u.blocked_at)].join(','))
@@ -548,8 +684,8 @@ export function UserManagementClient({ initialUsers }: { initialUsers: AdminUser
                           <DropdownMenuItem onClick={() => setDrawerUser(user)}>
                             <Eye className="size-3.5" /> View Profile
                           </DropdownMenuItem>
-                          <DropdownMenuItem><Pencil className="size-3.5" /> Edit</DropdownMenuItem>
-                          <DropdownMenuItem><KeyRound className="size-3.5" /> Reset Password</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setEditUser(user)}><Pencil className="size-3.5" /> Edit</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setResetPwUser(user)}><KeyRound className="size-3.5" /> Reset Password</DropdownMenuItem>
                           <DropdownMenuSeparator />
                           {status === 'Active'
                             ? <DropdownMenuItem onClick={() => handleBlock(user.id)}><Ban className="size-3.5" /> Block</DropdownMenuItem>
@@ -606,6 +742,19 @@ export function UserManagementClient({ initialUsers }: { initialUsers: AdminUser
         user={drawerUser} open={!!drawerUser}
         onClose={() => setDrawerUser(null)}
         onBlock={handleBlock} onUnblock={handleUnblock} onDelete={handleDelete}
+        onEdit={(u) => setEditUser(u)}
+        onResetPassword={(u) => setResetPwUser(u)}
+      />
+
+      <EditUserDialog
+        user={editUser} open={!!editUser}
+        onClose={() => setEditUser(null)}
+        onSave={handleEditSave}
+      />
+
+      <ResetPasswordDialog
+        user={resetPwUser} open={!!resetPwUser}
+        onClose={() => setResetPwUser(null)}
       />
     </>
   )

@@ -817,6 +817,7 @@ export async function createAgentGraph(
         tools: toolCapabilities,
         mcpServers: mcpServerCapabilities,
         hasBrowser,
+        hasExtensionBrowser: browserType === "extension" && hasBrowser,
         browserProfileName: browserProfile?.name,
         connectedAgents,
         composioIntegrations,

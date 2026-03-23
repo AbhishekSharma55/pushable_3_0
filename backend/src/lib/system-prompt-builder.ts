@@ -71,6 +71,7 @@ export interface AgentCapabilities {
     tools: ToolCapability[];
     mcpServers: MCPServerCapability[];
     hasBrowser: boolean;
+    hasExtensionBrowser: boolean;
     browserProfileName?: string;
     connectedAgents: ConnectedAgent[];
     composioIntegrations: ComposioIntegration[];
@@ -354,8 +355,55 @@ IMPORTANT:
 - If you are currently responding to a channel message, you're talking to one of these users right now`);
     }
 
-    if (capabilities.hasBrowser) {
-        blocks.push(`## Browser Agent (Your Eyes and Hands on the Web)
+    if (capabilities.hasBrowser || capabilities.hasExtensionBrowser) {
+        if (capabilities.hasExtensionBrowser) {
+            blocks.push(`## Chrome Extension Browser (PRIMARY — User's Real Browser)
+
+You have access to the user's REAL Chrome browser through the Browser Agent Chrome extension.
+This is your PRIMARY and DEFAULT browser — always use the \`ext_browser_*\` tools for ALL browsing tasks.
+
+IMPORTANT: ALWAYS use \`ext_browser_*\` tools (NOT \`browser_agent\`) for web browsing tasks.
+The ext_browser tools control the user's actual Chrome browser where they are logged into their accounts.
+
+Available tools (use these by default):
+- \`ext_browser_check_connection\` — Check if extension is connected (call first if unsure)
+- \`ext_browser_navigate\` — Navigate to a URL
+- \`ext_browser_click\` — Click an element by CSS selector
+- \`ext_browser_type\` — Type text into an input field
+- \`ext_browser_type_char\` — Type text character by character (human-like)
+- \`ext_browser_screenshot\` — Take a screenshot of the current page
+- \`ext_browser_get_page_info\` — Get page content, links, buttons, inputs
+- \`ext_browser_new_tab\` — Open a new tab
+- \`ext_browser_close_tab\` — Close a tab
+- \`ext_browser_switch_tab\` — Switch to a different tab
+- \`ext_browser_scroll\` — Scroll the page
+- \`ext_browser_evaluate\` — Run JavaScript on the page
+
+WORKFLOW:
+1. First call \`ext_browser_check_connection\` to verify the extension is connected
+2. Use \`ext_browser_navigate\` to go to the target URL
+3. Use \`ext_browser_get_page_info\` or \`ext_browser_screenshot\` to understand the page
+4. Use \`ext_browser_click\`, \`ext_browser_type\`, etc. to interact with elements
+5. Use CSS selectors to target elements (e.g., "button.submit", "#login-form input[name=email]")
+
+WHEN TO USE:
+- For ALL web browsing tasks — this is your default browser
+- When interacting with any website
+- When the user asks to browse, navigate, click, type, or interact with web pages
+- When scraping data from websites
+
+WHEN NOT TO USE:
+- Only if the extension is confirmed disconnected AND the task is urgent — then fall back to \`browser_agent\``);
+
+            if (capabilities.hasBrowser) {
+                blocks.push(`## Internal Browser Agent (FALLBACK ONLY)
+
+You also have an internal browser agent available${capabilities.browserProfileName ? ` via profile: ${capabilities.browserProfileName}` : ""}.
+WARNING: ONLY use \`browser_agent\` as a FALLBACK when the Chrome extension is disconnected.
+Always prefer \`ext_browser_*\` tools over \`browser_agent\`.`);
+            }
+        } else {
+            blocks.push(`## Browser Agent (Your Eyes and Hands on the Web)
 
 You have a dedicated Browser Agent available${capabilities.browserProfileName ? ` via profile: ${capabilities.browserProfileName}` : ""}.
 The browser agent maintains your login sessions between conversations.
@@ -394,6 +442,7 @@ HOW TO USE:
 
 PRIORITY: Tools > Integrations > MCP > Browser Agent
 Only use the browser agent when the above cannot do the job.`);
+        }
     }
 
     if (capabilities.connectedAgents.length > 0) {
@@ -449,9 +498,11 @@ When deciding how to complete a task, follow this order:
    → If yes: delegate with full context
 
 6. BROWSER — Can only be done by interacting with a website?
-   → If yes: use the browser as a last resort
+   → If yes: use \`ext_browser_*\` tools (Chrome extension) as the PRIMARY browser
+   → Only fall back to \`browser_agent\` (internal) if the extension is disconnected
 
-Never skip steps. A task that can be done with a tool should never reach the browser.`);
+Never skip steps. A task that can be done with a tool should never reach the browser.
+When browsing IS needed, ALWAYS prefer ext_browser_* tools over browser_agent.`);
     }
 
     // --- BLOCK 5: System Level Access ---
@@ -551,7 +602,7 @@ function countCapabilities(capabilities: AgentCapabilities): number {
     if (capabilities.skills.length > 0) count++;
     if (capabilities.tools.length > 0) count++;
     if (capabilities.mcpServers.length > 0) count++;
-    if (capabilities.hasBrowser) count++;
+    if (capabilities.hasBrowser || capabilities.hasExtensionBrowser) count++;
     if (capabilities.connectedAgents.length > 0) count++;
     if (capabilities.composioIntegrations.length > 0) count++;
     if (capabilities.channels.length > 0) count++;

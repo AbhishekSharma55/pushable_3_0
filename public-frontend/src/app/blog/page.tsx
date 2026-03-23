@@ -180,7 +180,7 @@ export default async function BlogPage() {
             className="cta-btns"
             style={{ maxWidth: 440, margin: "0 auto" }}
           >
-            <a href="#" className="btn btn-green btn-lg">
+            <a href={`${process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000"}/register`} target="_blank" rel="noopener noreferrer" className="btn btn-green btn-lg">
               Subscribe to newsletter →
             </a>
           </div>

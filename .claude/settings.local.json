@@ -46,7 +46,15 @@
       "Read(//var/run/**)",
       "Bash(systemctl is-active:*)",
       "Bash(DOCKER_HOST=unix:///var/run/docker.sock docker info --format {{.ServerVersion}})",
-      "Bash(pnpm install:*)"
+      "Bash(pnpm install:*)",
+      "Bash(ls -la /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/frontend/src/app/\\\\\\(auth\\\\\\)/login/)",
+      "Bash(ls -la /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/frontend/src/app/\\\\\\(auth\\\\\\)/register/)",
+      "Bash(sudo lsof:*)",
+      "Bash(ls -la /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/frontend/src/app/\\\\\\(dashboard\\\\\\)/extension-settings/)",
+      "Bash(find /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0 -name .env* -type f)",
+      "Bash(fuser 4000/tcp)",
+      "Bash(find /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0 -type f \\\\\\(-name *.conf -o -name *.nginx -o -name nginx* \\\\\\) ! -path */node_modules/* ! -path */.next/*)",
+      "Bash(find /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0 -type f -name *.sh ! -path */node_modules/* ! -path */.next/*)"
     ]
   }
 }

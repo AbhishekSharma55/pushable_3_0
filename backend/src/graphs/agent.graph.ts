@@ -149,6 +149,82 @@ function sanitizeMessagesForProvider(messages: BaseMessage[]): BaseMessage[] {
     return result;
 }
 
+/**
+ * Recover tool calls that the model output as JSON text instead of using the
+ * API's native tool calling mechanism. This is a known intermittent issue with
+ * Claude where it sometimes serializes tool calls as text content rather than
+ * producing proper tool_use content blocks.
+ *
+ * Detects: {"tool_calls":[{"name":"TOOL_NAME","input":{...}}]}
+ * Returns parsed tool calls and cleaned text, or null if nothing found.
+ */
+function recoverToolCallsFromText(
+    content: string | Array<{ type: string; text?: string }>,
+    availableToolNames: Set<string>
+): { toolCalls: Array<{ name: string; args: Record<string, unknown>; id: string; type: "tool_call" }>; cleanedContent: string } | null {
+    const text = typeof content === "string"
+        ? content
+        : Array.isArray(content)
+            ? (content as Array<{ type: string; text?: string }>)
+                .filter(b => b.type === "text")
+                .map(b => b.text ?? "")
+                .join("")
+            : "";
+
+    if (!text || !text.includes('"tool_calls"')) return null;
+
+    // Find the {"tool_calls": marker
+    const marker = '"tool_calls"';
+    const markerIdx = text.indexOf(marker);
+    if (markerIdx === -1) return null;
+
+    // Walk backwards to find the opening {
+    let start = markerIdx - 1;
+    while (start >= 0 && /\s/.test(text[start])) start--;
+    if (start < 0 || text[start] !== '{') return null;
+
+    // Use brace counting to find the matching closing }
+    let depth = 0;
+    let end = -1;
+    for (let i = start; i < text.length; i++) {
+        if (text[i] === '{') depth++;
+        else if (text[i] === '}') {
+            depth--;
+            if (depth === 0) {
+                end = i + 1;
+                break;
+            }
+        }
+    }
+    if (end === -1) return null;
+
+    const jsonStr = text.substring(start, end);
+    try {
+        const parsed = JSON.parse(jsonStr);
+        if (!Array.isArray(parsed.tool_calls) || parsed.tool_calls.length === 0) {
+            return null;
+        }
+
+        const toolCalls = parsed.tool_calls
+            .filter((tc: Record<string, unknown>) =>
+                typeof tc.name === "string" && availableToolNames.has(tc.name as string)
+            )
+            .map((tc: Record<string, unknown>) => ({
+                name: tc.name as string,
+                args: ((tc.input ?? tc.args ?? {}) as Record<string, unknown>),
+                id: (typeof tc.id === "string" ? tc.id : null) || `recovered-${randomUUID()}`,
+                type: "tool_call" as const,
+            }));
+
+        if (toolCalls.length === 0) return null;
+
+        const cleanedContent = (text.substring(0, start) + text.substring(end)).trim();
+        return { toolCalls, cleanedContent };
+    } catch {
+        return null;
+    }
+}
+
 const AgentState = Annotation.Root({
     ...MessagesAnnotation.spec,
     summary: Annotation<string>({
@@ -1166,11 +1242,35 @@ You have a \`save_memory\` tool. You MUST use it aggressively to learn from ever
                         .map(b => b.text ?? "")
                         .join("")
                     : "";
+
+            // --- Recover tool calls output as text (Claude intermittent issue) ---
+            // Claude sometimes serializes tool calls as JSON text (e.g.
+            // {"tool_calls":[{"name":"TOOL","input":{...}}]}) instead of using
+            // the API's native tool_use blocks. Detect this and convert to proper
+            // tool_calls so the graph routes to the tool node correctly.
+            if (responseToolCalls.length === 0 && responseContent.length > 0 && langchainTools.length > 0) {
+                const availableToolNames = new Set(langchainTools.map(t => t.name));
+                const recovered = recoverToolCallsFromText(aiResponse.content, availableToolNames);
+                if (recovered) {
+                    logger.warn({
+                        recoveredCount: recovered.toolCalls.length,
+                        toolNames: recovered.toolCalls.map(tc => tc.name),
+                        originalContentPreview: responseContent.slice(0, 200),
+                    }, "Recovered tool calls from text — model serialized tool calls as JSON instead of using API tool_use");
+                    response = new AIMessage({
+                        content: recovered.cleanedContent,
+                        tool_calls: recovered.toolCalls,
+                    });
+                }
+            }
+
+            const finalToolCalls = (response as AIMessage).tool_calls ?? [];
             logger.info({
                 responseContentLength: responseContent.length,
                 responseContentPreview: responseContent.slice(0, 200),
-                responseToolCallCount: responseToolCalls.length,
-                responseToolCallNames: responseToolCalls.map(tc => tc.name),
+                responseToolCallCount: finalToolCalls.length,
+                responseToolCallNames: finalToolCalls.map(tc => tc.name),
+                wasRecovered: finalToolCalls.length > 0 && responseToolCalls.length === 0,
             }, "LLM response received");
         } catch (error: unknown) {
             logger.error({ error, isClaudeDirect, modelId }, "LLM invocation error details");

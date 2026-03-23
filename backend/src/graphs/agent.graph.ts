@@ -56,18 +56,23 @@ const KEEP_MESSAGES = 10; // Keep the last N messages after summarization
  * Sanitize message history to ensure proper tool call/response pairing.
  * Required for providers like Gemini that mandate tool responses immediately follow tool calls.
  * Removes orphaned ToolMessages and strips orphaned tool_calls from AIMessages.
+ *
+ * SAFETY: Uses raw property access (not instanceof/class checks) to handle
+ * AIMessage, AIMessageChunk, and any future variants. Includes a failsafe:
+ * if we detect ToolMessages but fail to find ANY tool_calls (detection bug),
+ * we skip sanitization entirely rather than deleting valid messages.
  */
 function sanitizeMessagesForProvider(messages: BaseMessage[]): BaseMessage[] {
     const toolCallIds = new Set<string>();
     const toolResponseIds = new Set<string>();
 
-    // Check for tool_calls using property access (not instanceof) to handle
-    // both AIMessage and AIMessageChunk — LangGraph stores AIMessageChunk
-    // in state when using streaming LLMs.
     for (const msg of messages) {
-        const msgToolCalls = (msg as AIMessage).tool_calls;
-        if (msgToolCalls?.length && msg._getType() === "ai") {
-            for (const tc of msgToolCalls) {
+        // Use raw property access — works for AIMessage, AIMessageChunk, and
+        // any object that carries a tool_calls array, regardless of class hierarchy.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawToolCalls = (msg as any).tool_calls;
+        if (Array.isArray(rawToolCalls) && rawToolCalls.length > 0) {
+            for (const tc of rawToolCalls as Array<{ id?: string }>) {
                 if (tc.id) toolCallIds.add(tc.id);
             }
         }
@@ -89,20 +94,33 @@ function sanitizeMessagesForProvider(messages: BaseMessage[]): BaseMessage[] {
         return messages;
     }
 
+    // FAILSAFE: If we found ToolMessages but zero tool_calls, our detection
+    // is broken. Return messages unchanged rather than deleting valid responses.
+    if (toolCallIds.size === 0 && toolResponseIds.size > 0) {
+        logger.error({
+            toolResponseCount: toolResponseIds.size,
+        }, "Sanitization failsafe: found ToolMessages but zero tool_calls — skipping sanitization to avoid data loss");
+        return messages;
+    }
+
     logger.warn({
         orphanedResponses: orphanedResponses.size,
         orphanedCalls: orphanedCalls.size,
+        totalToolCalls: toolCallIds.size,
+        totalToolResponses: toolResponseIds.size,
     }, "Sanitizing orphaned tool call/response messages");
 
     const result: BaseMessage[] = [];
     for (const msg of messages) {
         if (msg instanceof ToolMessage && msg.tool_call_id && orphanedResponses.has(msg.tool_call_id)) {
+            logger.info({ removedToolCallId: msg.tool_call_id, toolName: msg.name }, "Removing orphaned ToolMessage");
             continue;
         }
 
-        const msgToolCalls = (msg as AIMessage).tool_calls;
-        if (msgToolCalls?.length && msg._getType() === "ai") {
-            const validCalls = msgToolCalls.filter(tc => !tc.id || !orphanedCalls.has(tc.id));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawToolCalls2 = (msg as any).tool_calls;
+        if (Array.isArray(rawToolCalls2) && rawToolCalls2.length > 0) {
+            const validCalls = rawToolCalls2.filter((tc: { id?: string }) => !tc.id || !orphanedCalls.has(tc.id));
             if (validCalls.length === 0) {
                 const text = typeof msg.content === "string"
                     ? msg.content
@@ -117,12 +135,9 @@ function sanitizeMessagesForProvider(messages: BaseMessage[]): BaseMessage[] {
                 }
                 continue;
             }
-            if (validCalls.length < msgToolCalls.length) {
-                result.push(new AIMessage({
-                    content: msg.content,
-                    tool_calls: validCalls,
-                    id: msg.id,
-                }));
+            if (validCalls.length < rawToolCalls2.length) {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                result.push(new AIMessage({ content: msg.content as any, tool_calls: validCalls, id: msg.id }));
                 continue;
             }
         }

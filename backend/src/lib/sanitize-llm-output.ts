@@ -52,6 +52,9 @@ const WHITESPACE_COLLAPSE_RE = /\n{3,}/g;
  *
  * Safe to call on every chunk during streaming — the regex set is compiled
  * once and handles both complete and partial (mid-stream) tags.
+ *
+ * NOTE: Does NOT trim the result so that whitespace between streamed chunks
+ * is preserved. Use {@link stripToolCallXmlFinal} for the accumulated result.
  */
 export function stripToolCallXml(text: string): string {
     if (!text) return text;
@@ -73,8 +76,17 @@ export function stripToolCallXml(text: string): string {
     // 5. Partial tag being formed at the very end during streaming
     cleaned = cleaned.replace(PARTIAL_TAG_END_RE, "");
 
-    // 6. Collapse excessive whitespace left behind
-    cleaned = cleaned.replace(WHITESPACE_COLLAPSE_RE, "\n\n").trim();
+    // 6. Collapse excessive whitespace left behind (but don't trim — preserves
+    //    leading/trailing spaces that separate streamed tokens)
+    cleaned = cleaned.replace(WHITESPACE_COLLAPSE_RE, "\n\n");
 
     return cleaned;
+}
+
+/**
+ * Sanitize the fully-accumulated content after streaming is complete.
+ * Same as {@link stripToolCallXml} but also trims leading/trailing whitespace.
+ */
+export function stripToolCallXmlFinal(text: string): string {
+    return stripToolCallXml(text).trim();
 }

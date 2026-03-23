@@ -9,7 +9,7 @@ import { createAgentGraph } from "../graphs/agent.graph.ts";
 import { runEventBus, type SSEEvent } from "../lib/run-event-bus.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
 import { logger } from "../lib/logger.ts";
-import { stripToolCallXml } from "../lib/sanitize-llm-output.ts";
+import { stripToolCallXml, stripToolCallXmlFinal } from "../lib/sanitize-llm-output.ts";
 import type { BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -301,10 +301,10 @@ async function processGraphStream(
     }
 
     // Final sanitization pass on accumulated content before persisting
-    const cleanContent = stripToolCallXml(fullContent);
+    const cleanContent = stripToolCallXmlFinal(fullContent);
     const cleanSegments = segments.map((seg) =>
         seg.type === "text"
-            ? { ...seg, content: stripToolCallXml(seg.content ?? "") }
+            ? { ...seg, content: stripToolCallXmlFinal(seg.content ?? "") }
             : seg
     ).filter((seg) => seg.type !== "text" || (seg.content ?? "").trim());
 

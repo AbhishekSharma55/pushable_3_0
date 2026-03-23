@@ -1,4 +1,5 @@
 import { StateGraph, Annotation, MessagesAnnotation, interrupt } from "@langchain/langgraph";
+import type { RunnableConfig } from "@langchain/core/runnables";
 import { createLLM } from "../lib/gateway.ts";
 import { SystemMessage, AIMessage, HumanMessage, RemoveMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages";
 import { DynamicStructuredTool } from "@langchain/core/tools";
@@ -236,6 +237,42 @@ async function resolveModel(
     return { modelId: requestedModelId, multiplier: 1.0, displayName: requestedModelId };
 }
 
+// ── Graph cache ──────────────────────────────────────────────────────────────
+// Caches compiled agent graphs per session to avoid expensive DB queries,
+// MCP connections, and Composio API calls on every message.
+// A mutable ref is used for onBrowserEvent so the cached graph always
+// emits browser events to the current run's event bus.
+
+interface GraphCacheEntry {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    graph: any; // CompiledStateGraph returned by graph.compile()
+    browserEventRef: { current: BrowserAgentEventEmitter | undefined };
+    timestamp: number;
+}
+
+const graphCache = new Map<string, GraphCacheEntry>();
+const GRAPH_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes
+
+/** Evict stale entries periodically to prevent memory leaks */
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of graphCache) {
+        if (now - entry.timestamp > GRAPH_CACHE_TTL_MS * 2) {
+            graphCache.delete(key);
+        }
+    }
+}, GRAPH_CACHE_TTL_MS).unref();
+
+/** Invalidate cache for a specific agent (call after agent config changes) */
+export function invalidateGraphCache(agentId: string, workspaceId: string): void {
+    const prefix = `${agentId}:${workspaceId}:`;
+    for (const key of graphCache.keys()) {
+        if (key.startsWith(prefix)) {
+            graphCache.delete(key);
+        }
+    }
+}
+
 export async function createAgentGraph(
     agentId: string,
     workspaceId: string,
@@ -243,6 +280,16 @@ export async function createAgentGraph(
     onBrowserEvent?: BrowserAgentEventEmitter,
     chatSessionId?: string
 ) {
+    // Check graph cache — reuse compiled graph for same session
+    const cacheKey = `${agentId}:${workspaceId}:${userId || ""}:${chatSessionId || ""}`;
+    const cached = graphCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < GRAPH_CACHE_TTL_MS) {
+        // Update browser event ref to point to current run's handler
+        cached.browserEventRef.current = onBrowserEvent;
+        logger.info({ agentId, cacheKey }, "Using cached agent graph");
+        return cached.graph;
+    }
+
     const agent = await agentRepository.findById(agentId, workspaceId);
     if (!agent) throw new Error("Agent not found");
 
@@ -407,33 +454,48 @@ export async function createAgentGraph(
         }
     }
 
-    // --- 2. Agent delegation tools ---
+    // --- 2. Agent delegation tools (parallel) ---
     const delegateAgentIds = allowedAgentIds.filter((id) => id !== agentId);
     const connectedAgents: ConnectedAgent[] = [];
 
-    for (const targetAgentId of delegateAgentIds) {
-        try {
-            const targetAgent = await agentRepository.findById(targetAgentId, workspaceId);
-            if (targetAgent) {
-                const agentTool = await buildAgentCallerTool(
-                    agentId,
-                    targetAgentId,
-                    workspaceId
-                );
-                if (agentTool) {
-                    langchainTools.push(agentTool);
-                    connectedAgents.push({
-                        id: targetAgent.id,
-                        name: targetAgent.name,
-                        role: targetAgent.systemPrompt?.split("\n")[0] || "General Assistant",
-                    });
+    if (delegateAgentIds.length > 0) {
+        const delegateResults = await Promise.all(
+            delegateAgentIds.map(async (targetAgentId) => {
+                try {
+                    const targetAgent = await agentRepository.findById(targetAgentId, workspaceId);
+                    if (targetAgent) {
+                        const agentTool = await buildAgentCallerTool(
+                            agentId,
+                            targetAgentId,
+                            workspaceId
+                        );
+                        if (agentTool) {
+                            return {
+                                tool: agentTool,
+                                agent: {
+                                    id: targetAgent.id,
+                                    name: targetAgent.name,
+                                    role: targetAgent.systemPrompt?.split("\n")[0] || "General Assistant",
+                                } as ConnectedAgent,
+                            };
+                        }
+                    }
+                    return null;
+                } catch (error) {
+                    logger.warn(
+                        { error, targetAgentId },
+                        "Failed to build agent caller tool, skipping"
+                    );
+                    return null;
                 }
+            })
+        );
+
+        for (const result of delegateResults) {
+            if (result) {
+                langchainTools.push(result.tool);
+                connectedAgents.push(result.agent);
             }
-        } catch (error) {
-            logger.warn(
-                { error, targetAgentId },
-                "Failed to build agent caller tool, skipping"
-            );
         }
     }
 
@@ -513,6 +575,12 @@ export async function createAgentGraph(
     }
 
     // --- 4. Browser Agent (load ONLY the selected browser type) ---
+    // Use a mutable ref so the cached graph always emits to the current run
+    const browserEventRef: { current: BrowserAgentEventEmitter | undefined } = { current: onBrowserEvent };
+    const stableBrowserEventEmitter: BrowserAgentEventEmitter = (event) => {
+        browserEventRef.current?.(event);
+    };
+
     let hasBrowser = false;
     const browserType = agent.browserType || "cloud";
 
@@ -525,7 +593,7 @@ export async function createAgentGraph(
                 modelId,
                 modelMultiplier,
                 agentTemperature,
-                onBrowserEvent,
+                stableBrowserEventEmitter,
                 chatSessionId
             );
             if (browserAgentTool) {
@@ -546,7 +614,7 @@ export async function createAgentGraph(
                 workspaceId,
                 modelMultiplier,
                 agentTemperature,
-                onBrowserEvent
+                stableBrowserEventEmitter
             );
             if (extBrowserAgentTool) {
                 langchainTools.push(extBrowserAgentTool);
@@ -560,19 +628,22 @@ export async function createAgentGraph(
         }
     }
 
-    // --- 5. Fetch KB metadata for prompt builder ---
+    // --- 5. Fetch KB metadata for prompt builder (parallel) ---
     const kbCapabilities: KBCapability[] = [];
     if (allowedKbIds.length > 0) {
         try {
             const kbs = await kbRepository.findKBsByIds(allowedKbIds, workspaceId);
-            for (const kb of kbs) {
-                const docs = await kbRepository.findDocumentsByKB(kb.id, workspaceId);
-                kbCapabilities.push({
-                    name: kb.name,
-                    description: kb.description,
-                    documentCount: docs.length,
-                });
-            }
+            const kbsWithDocs = await Promise.all(
+                kbs.map(async (kb) => {
+                    const docs = await kbRepository.findDocumentsByKB(kb.id, workspaceId);
+                    return {
+                        name: kb.name,
+                        description: kb.description,
+                        documentCount: docs.length,
+                    };
+                })
+            );
+            kbCapabilities.push(...kbsWithDocs);
         } catch (error) {
             logger.warn({ error }, "Failed to fetch KB metadata for prompt builder");
         }
@@ -884,16 +955,45 @@ export async function createAgentGraph(
         skillsSection = `\n\nSkills you must apply:\n${skillLines}`;
     }
 
-    const agentNode = async (state: typeof AgentState.State) => {
+    const agentNode = async (state: typeof AgentState.State, config: RunnableConfig) => {
         // Sync planning state from graph state
         currentTodos = state.todos || [];
 
-        // --- Credit check BEFORE LLM call ---
         const estimatedCost = calculateCreditCost({
             action: "chat_message",
             modelMultiplier,
         });
-        const creditCheck = await checkCredits(workspaceId, estimatedCost);
+
+        // Prepare KB query input before Promise.all
+        const lastUserMsg = allowedKbIds.length > 0
+            ? [...state.messages].reverse().find((m) => m instanceof HumanMessage)
+            : null;
+        const lastUserMsgContent =
+            lastUserMsg && typeof lastUserMsg.content === "string"
+                ? lastUserMsg.content
+                : null;
+
+        // --- Run credit check, memories, and KB query in PARALLEL ---
+        const [creditCheck, memories, kbResults] = await Promise.all([
+            checkCredits(workspaceId, estimatedCost),
+            userId
+                ? memoryRepository
+                      .findByUser(workspaceId, agentId, userId)
+                      .catch((error) => {
+                          logger.warn({ error }, "Failed to load long-term memories");
+                          return [] as Awaited<ReturnType<typeof memoryRepository.findByUser>>;
+                      })
+                : Promise.resolve([] as Awaited<ReturnType<typeof memoryRepository.findByUser>>),
+            lastUserMsgContent
+                ? kbService
+                      .queryKB(allowedKbIds, lastUserMsgContent, workspaceId, 5)
+                      .catch((error) => {
+                          logger.warn({ error, agentId }, "KB query failed, proceeding without context");
+                          return [] as Awaited<ReturnType<typeof kbService.queryKB>>;
+                      })
+                : Promise.resolve([] as Awaited<ReturnType<typeof kbService.queryKB>>),
+        ]);
+
         if (!creditCheck.allowed) {
             const errorMsg = `Insufficient credits. Available: ${creditCheck.available}. Required: ~${estimatedCost}. Top up at Settings > Billing.`;
             return { messages: [new AIMessage(errorMsg)], todos: currentTodos };
@@ -910,60 +1010,55 @@ export async function createAgentGraph(
         }
 
         // 0b. Inject long-term memories for this user
-        if (userId) {
-            try {
-                const memories = await memoryRepository.findByUser(workspaceId, agentId, userId);
-                if (memories.length > 0) {
-                    const memoryLines = memories
-                        .map((m) => `- [${m.category}] ${m.content}`)
-                        .join("\n");
-                    systemPromptParts.push(
-                        `## Long-term Memories About This User\n` +
-                        `These are facts and preferences you previously saved about this user:\n${memoryLines}`
-                    );
-                }
-            } catch (error) {
-                logger.warn({ error }, "Failed to load long-term memories");
+        if (memories.length > 0) {
+            const processMemories = memories.filter((m) => m.category === "process");
+            const otherMemories = memories.filter((m) => m.category !== "process");
+
+            const memoryParts: string[] = [];
+
+            if (processMemories.length > 0) {
+                const processLines = processMemories
+                    .map((m) => `- ${m.content}`)
+                    .join("\n");
+                memoryParts.push(
+                    `### Learned Processes & Workflows (FOLLOW THESE)\n` +
+                    `These are processes the user taught you. When a request matches one of these, follow it exactly:\n${processLines}`
+                );
             }
+
+            if (otherMemories.length > 0) {
+                const otherLines = otherMemories
+                    .map((m) => `- [${m.category}] ${m.content}`)
+                    .join("\n");
+                memoryParts.push(
+                    `### User Facts & Preferences\n${otherLines}`
+                );
+            }
+
+            systemPromptParts.push(
+                `## Long-term Memories About This User\n` +
+                `⚠️ You MUST read and apply these memories. They represent things this user has already told you.\n\n` +
+                memoryParts.join("\n\n")
+            );
         }
 
         // 1. KB context (RAG) — with credit deduction
-        if (allowedKbIds.length > 0) {
-            const lastUserMsg = [...state.messages]
-                .reverse()
-                .find((m) => m instanceof HumanMessage);
-            if (lastUserMsg && typeof lastUserMsg.content === "string") {
-                try {
-                    const results = await kbService.queryKB(
-                        allowedKbIds,
-                        lastUserMsg.content,
-                        workspaceId,
-                        5
-                    );
-                    if (results.length > 0) {
-                        const context = results
-                            .map((r) => r.content)
-                            .join("\n\n---\n\n");
-                        systemPromptParts.push(
-                            `Relevant context from knowledge base:\n${context}`
-                        );
-                        // Deduct KB query credits (fire-and-forget)
-                        deductCredits({
-                            workspaceId,
-                            amount: calculateCreditCost({ action: "kb_query" }),
-                            type: "kb_query",
-                            metadata: { agentId, kbIds: allowedKbIds },
-                        }).catch((err) =>
-                            logger.warn({ err }, "KB query credit deduction failed")
-                        );
-                    }
-                } catch (error) {
-                    logger.warn(
-                        { error, agentId },
-                        "KB query failed, proceeding without context"
-                    );
-                }
-            }
+        if (kbResults.length > 0) {
+            const context = kbResults
+                .map((r) => r.content)
+                .join("\n\n---\n\n");
+            systemPromptParts.push(
+                `Relevant context from knowledge base:\n${context}`
+            );
+            // Deduct KB query credits (fire-and-forget)
+            deductCredits({
+                workspaceId,
+                amount: calculateCreditCost({ action: "kb_query" }),
+                type: "kb_query",
+                metadata: { agentId, kbIds: allowedKbIds },
+            }).catch((err) =>
+                logger.warn({ err }, "KB query credit deduction failed")
+            );
         }
 
         // 2. Capability-aware system prompt
@@ -1019,12 +1114,30 @@ Rules:
 
         // 6. Memory capability instructions
         if (userId) {
-            systemPromptParts.push(`## Memory
-You can remember important information about users across conversations using the \`save_memory\` tool.
-- Save proactively when a user shares: their name, preferences, project details, important decisions, timezone, etc.
-- Write memories as clear, standalone statements (e.g. "User's name is Alice", "User prefers concise responses").
-- Don't save trivial or temporary information.
-- Your previously saved memories (if any) are included in this prompt — use them to personalize responses.`);
+            systemPromptParts.push(`## Memory — IMPORTANT
+You have a \`save_memory\` tool. You MUST use it aggressively to learn from every conversation. The user should NEVER have to repeat themselves.
+
+### When to save (DO THIS EVERY TIME):
+- **Processes & Workflows:** If the user explains how to do something step-by-step, save the ENTIRE process immediately. This is the most important type of memory.
+- **Corrections:** If the user corrects you ("no, do it this way", "that's wrong"), save their correction as a process or preference so you never repeat the mistake.
+- **Preferences & Rules:** How they want things done, formatting rules, communication style, tools they prefer.
+- **Facts:** Names, roles, project details, technical stack, team structure, important context.
+- **Decisions:** Choices made, reasons behind them, trade-offs considered.
+
+### How to save:
+- Write memories as **detailed, standalone statements** that your future self can act on without any other context.
+- For processes, include ALL steps in order with enough detail to execute them independently.
+- Use category "process" for workflows/instructions, "preference" for how they like things, "fact" for information, "decision" for choices made.
+- BAD: "User told me about deployment" — too vague, useless.
+- GOOD: "Deployment process: 1) Run 'npm test' 2) Build with 'docker build -t app .' 3) Push to staging with 'kubectl apply -f staging.yaml' 4) Wait for user approval 5) Push to production with 'kubectl apply -f prod.yaml'"
+
+### How to use saved memories:
+- Your previously saved memories are included at the top of this prompt. READ THEM CAREFULLY before every response.
+- If a saved memory describes a process relevant to the user's current request, FOLLOW IT exactly without asking.
+- If a saved memory contains a preference, APPLY IT automatically.
+- If you're unsure whether a memory applies, follow it — the user saved it for a reason.
+
+### Rule: When in doubt, SAVE IT. It's better to save too much than to forget something the user told you.`);
         }
 
         const systemMsg = new SystemMessage(systemPromptParts.join("\n\n"));
@@ -1040,7 +1153,7 @@ You can remember important information about users across conversations using th
                 modelId,
                 lastMessageType: state.messages[state.messages.length - 1]?.constructor?.name,
             }, "Invoking LLM");
-            response = await llmWithTools.invoke([systemMsg, ...sanitizedMessages]);
+            response = await llmWithTools.invoke([systemMsg, ...sanitizedMessages], config);
 
             // Debug: log what the model returned
             const aiResponse = response as AIMessage;
@@ -1084,7 +1197,7 @@ You can remember important information about users across conversations using th
     };
 
     // Summarization node — compresses older messages into a summary
-    const summarizeConversation = async (state: typeof AgentState.State) => {
+    const summarizeConversation = async (state: typeof AgentState.State, config: RunnableConfig) => {
         const { summary, messages } = state;
 
         let summaryPrompt: string;
@@ -1104,7 +1217,7 @@ You can remember important information about users across conversations using th
             new HumanMessage({ id: randomUUID(), content: summaryPrompt }),
         ];
 
-        const response = await llm.invoke(allMessages);
+        const response = await llm.invoke(allMessages, config);
 
         // Keep the last N messages, but walk boundary back to avoid splitting tool call/response pairs
         let boundary = messages.length - KEEP_MESSAGES;
@@ -1268,5 +1381,15 @@ You can remember important information about users across conversations using th
 
     const checkpointer = await getCheckpointer();
 
-    return graph.compile({ checkpointer });
+    const compiled = graph.compile({ checkpointer });
+
+    // Cache compiled graph for subsequent messages in this session
+    graphCache.set(cacheKey, {
+        graph: compiled,
+        browserEventRef,
+        timestamp: Date.now(),
+    });
+    logger.info({ agentId, cacheKey }, "Agent graph compiled and cached");
+
+    return compiled;
 }

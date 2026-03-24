@@ -245,9 +245,8 @@ export async function buildBrowserAgentTool(
 
             try {
                 // Fresh LLM per invocation (stateless)
-                // Always use Gemini Flash for browser agent — optimised for speed + vision
-                const BROWSER_AGENT_MODEL = "google/gemini-3-flash-preview";
-                const { llm } = createLLM({ modelId: BROWSER_AGENT_MODEL, temperature });
+                logger.info({ modelId }, "Browser agent creating LLM with model");
+                const { llm } = createLLM({ modelId, temperature });
                 const llmWithTools = llm.bindTools(wrappedBrowserTools);
 
                 // --- Agent node (auto-injects page state before LLM call) ---

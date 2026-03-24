@@ -37,6 +37,7 @@ import {
 } from "../lib/credit-engine.ts";
 import { channelRepository } from "../repositories/channel.repository.ts";
 import { channelManager } from "../channels/channel-manager.ts";
+import { getBrowserAgentSettings } from "../lib/system-settings.ts";
 import type {
     AgentCapabilities,
     KBCapability,
@@ -356,8 +357,12 @@ export async function createAgentGraph(
     onBrowserEvent?: BrowserAgentEventEmitter,
     chatSessionId?: string
 ) {
-    // Check graph cache — reuse compiled graph for same session
-    const cacheKey = `${agentId}:${workspaceId}:${userId || ""}:${chatSessionId || ""}`;
+    // Read browser agent model early so it can be part of cache key
+    const browserAgentSettings = await getBrowserAgentSettings();
+    const browserModelId = browserAgentSettings.model;
+
+    // Check graph cache — reuse compiled graph for same session + same browser model
+    const cacheKey = `${agentId}:${workspaceId}:${userId || ""}:${chatSessionId || ""}:${browserModelId}`;
     const cached = graphCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < GRAPH_CACHE_TTL_MS) {
         // Update browser event ref to point to current run's handler
@@ -660,13 +665,15 @@ export async function createAgentGraph(
     let hasBrowser = false;
     const browserType = agent.browserType || "cloud";
 
+    logger.info({ browserModelId }, "Browser agent using model from system_settings");
+
     if (browserType === "cloud") {
         // Cloud browser: autonomous sub-agent with internal browser tools
         try {
             const browserAgentTool = await buildBrowserAgentTool(
                 agentId,
                 workspaceId,
-                modelId,
+                browserModelId,
                 modelMultiplier,
                 agentTemperature,
                 stableBrowserEventEmitter,
@@ -690,7 +697,8 @@ export async function createAgentGraph(
                 workspaceId,
                 modelMultiplier,
                 agentTemperature,
-                stableBrowserEventEmitter
+                stableBrowserEventEmitter,
+                browserModelId
             );
             if (extBrowserAgentTool) {
                 langchainTools.push(extBrowserAgentTool);

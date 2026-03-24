@@ -50,6 +50,7 @@ interface StreamResult {
     content: string;
     toolCalls: StreamToolCall[];
     segments: StreamSegment[];
+    thinking: string;
 }
 
 // ─── Browser event handler (emits to RunEventBus) ────────────────────────────
@@ -165,6 +166,7 @@ async function processGraphStream(
     runId: string
 ): Promise<StreamResult> {
     let fullContent = "";
+    let fullThinking = "";
     const allToolCalls: StreamToolCall[] = [];
     const segments: StreamSegment[] = [];
     let lastSegmentType: "text" | "tools" | null = null;
@@ -261,15 +263,37 @@ async function processGraphStream(
         // Stream AI content chunks
         if (msgObj.content) {
             let chunk = "";
+            let thinkingChunk = "";
+
             if (typeof msgObj.content === "string") {
                 chunk = msgObj.content;
             } else if (Array.isArray(msgObj.content)) {
-                chunk = (
-                    msgObj.content as Array<{ type: string; text: string }>
-                )
+                const blocks = msgObj.content as Array<{ type: string; text?: string; thinking?: string }>;
+                chunk = blocks
                     .filter((b) => b.type === "text")
-                    .map((b) => b.text)
+                    .map((b) => b.text ?? "")
                     .join("");
+                // Extract thinking blocks (Claude extended thinking)
+                thinkingChunk = blocks
+                    .filter((b) => b.type === "thinking")
+                    .map((b) => b.thinking ?? b.text ?? "")
+                    .join("");
+            }
+
+            // Also check additional_kwargs for reasoning_content (DeepSeek, OpenRouter reasoning models)
+            const additionalKwargs = msgObj.additional_kwargs as Record<string, unknown> | undefined;
+            if (additionalKwargs?.reasoning_content && typeof additionalKwargs.reasoning_content === "string") {
+                thinkingChunk += additionalKwargs.reasoning_content;
+            }
+
+            // Emit thinking content
+            if (thinkingChunk) {
+                fullThinking += thinkingChunk;
+                runEventBus.emit(runId, {
+                    type: "thinkingContent",
+                    data: { thinkingContent: thinkingChunk },
+                    timestamp: Date.now(),
+                });
             }
 
             if (chunk) {
@@ -308,7 +332,7 @@ async function processGraphStream(
             : seg
     ).filter((seg) => seg.type !== "text" || (seg.content ?? "").trim());
 
-    return { content: cleanContent, toolCalls: allToolCalls, segments: cleanSegments };
+    return { content: cleanContent, toolCalls: allToolCalls, segments: cleanSegments, thinking: fullThinking };
 }
 
 // ─── Check for HITL interrupts ───────────────────────────────────────────────
@@ -418,6 +442,7 @@ async function executeRun(
                     toolCalls: streamResult.toolCalls,
                     segments: streamResult.segments,
                     ...(approvalRequest ? { approvalRequest } : {}),
+                    ...(streamResult.thinking ? { thinking: streamResult.thinking } : {}),
                 },
             });
         }
@@ -504,6 +529,7 @@ async function resumeRun(
                     toolCalls: streamResult.toolCalls,
                     segments: streamResult.segments,
                     ...(approvalRequest ? { approvalRequest } : {}),
+                    ...(streamResult.thinking ? { thinking: streamResult.thinking } : {}),
                 },
             });
         }

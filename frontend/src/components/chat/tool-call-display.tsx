@@ -37,9 +37,11 @@ interface ToolCallDisplayProps {
 }
 
 const PLANNING_TOOLS = new Set(['write_todos', 'update_todo', 'get_todos']);
+const NOTEBOOK_TOOLS = new Set(['write_notebook', 'read_notebook', 'list_notebook', 'delete_notebook_entry']);
 
-function classifyTool(name: string): 'planning' | 'system' | 'integration' | 'browser' | 'agent' | 'tool' {
+function classifyTool(name: string): 'planning' | 'notebook' | 'system' | 'integration' | 'browser' | 'agent' | 'tool' {
     if (PLANNING_TOOLS.has(name)) return 'planning';
+    if (NOTEBOOK_TOOLS.has(name)) return 'notebook';
     if (name.startsWith('system_')) return 'system';
     if (name.startsWith('COMPOSIO_') || name.startsWith('composio_')) return 'integration';
     if (name.startsWith('browser_')) return 'browser';
@@ -51,6 +53,7 @@ function getToolIcon(name: string) {
     const category = classifyTool(name);
     switch (category) {
         case 'planning': return ListTodo;
+        case 'notebook': return BookOpen;
         case 'system':
             if (name.includes('kb') || name.includes('document')) return BookOpen;
             if (name.includes('skill')) return Zap;

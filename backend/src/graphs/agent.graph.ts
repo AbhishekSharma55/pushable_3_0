@@ -4,6 +4,7 @@ import { createLLM } from "../lib/gateway.ts";
 import { SystemMessage, AIMessage, HumanMessage, RemoveMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages";
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
+import { PostgresStore } from "@langchain/langgraph-checkpoint-postgres/store";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { z } from "zod";
 import { randomUUID } from "crypto";
@@ -26,6 +27,7 @@ import { buildVaultTools } from "../tools/vault.tools.ts";
 import { buildSystemTools } from "../tools/system.tools.ts";
 import { buildMemoryTools } from "../tools/memory.tools.ts";
 import { buildPlanningTools, type Todo } from "../tools/planning.tools.ts";
+import { buildNotebookTools, loadNotebookEntries } from "../tools/notebook.tools.ts";
 import { memoryRepository } from "../repositories/memory.repository.ts";
 import { buildSystemPrompt } from "../lib/system-prompt-builder.ts";
 import { browserRepository } from "../repositories/browser.repository.ts";
@@ -248,6 +250,18 @@ async function getCheckpointer(): Promise<PostgresSaver> {
         await checkpointerInstance.setup();
     }
     return checkpointerInstance;
+}
+
+let storeInstance: PostgresStore | null = null;
+
+async function getStore(): Promise<PostgresStore> {
+    if (!storeInstance) {
+        storeInstance = PostgresStore.fromConnString(
+            process.env.DATABASE_URL!
+        );
+        await storeInstance.setup();
+    }
+    return storeInstance;
 }
 
 // For now, workspace plan is always "scale". Replace when subscription system is built.
@@ -774,9 +788,14 @@ export async function createAgentGraph(
     }
 
     // --- 8. Memory tools (when user context is available) ---
+    const store = await getStore();
     if (userId) {
         const memoryTools = buildMemoryTools({ workspaceId, agentId, userId });
         langchainTools.push(...memoryTools);
+
+        // --- 8a. Notebook tools (persistent cross-session scratchpad) ---
+        const notebookTools = buildNotebookTools({ store, workspaceId, agentId, userId });
+        langchainTools.push(...notebookTools);
     }
 
     // --- 8b. Planning tools (write_todos, update_todo, get_todos) ---
@@ -1057,8 +1076,8 @@ export async function createAgentGraph(
                 ? lastUserMsg.content
                 : null;
 
-        // --- Run credit check, memories, and KB query in PARALLEL ---
-        const [creditCheck, memories, kbResults] = await Promise.all([
+        // --- Run credit check, memories, notebook, and KB query in PARALLEL ---
+        const [creditCheck, memories, notebookSection, kbResults] = await Promise.all([
             checkCredits(workspaceId, estimatedCost),
             userId
                 ? memoryRepository
@@ -1068,6 +1087,9 @@ export async function createAgentGraph(
                           return [] as Awaited<ReturnType<typeof memoryRepository.findByUser>>;
                       })
                 : Promise.resolve([] as Awaited<ReturnType<typeof memoryRepository.findByUser>>),
+            userId
+                ? loadNotebookEntries({ store, workspaceId, agentId, userId })
+                : Promise.resolve(""),
             lastUserMsgContent
                 ? kbService
                       .queryKB(allowedKbIds, lastUserMsgContent, workspaceId, 5)
@@ -1091,6 +1113,11 @@ export async function createAgentGraph(
             systemPromptParts.push(
                 `## Conversation Summary (earlier messages)\n${state.summary}`
             );
+        }
+
+        // 0a. Inject notebook (persistent working context) — placed early so it survives compression
+        if (notebookSection) {
+            systemPromptParts.push(notebookSection);
         }
 
         // 0b. Inject long-term memories for this user
@@ -1222,6 +1249,30 @@ You have a \`save_memory\` tool. You MUST use it aggressively to learn from ever
 - If you're unsure whether a memory applies, follow it — the user saved it for a reason.
 
 ### Rule: When in doubt, SAVE IT. It's better to save too much than to forget something the user told you.`);
+
+            // 6b. Notebook usage instructions
+            systemPromptParts.push(`## Notebook — Your Persistent Scratchpad
+You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\`, \`delete_notebook_entry\`) for saving working references that persist across all sessions.
+
+### Notebook vs Memory — When to use which:
+- **save_memory** → Facts *about the user*: preferences, processes, decisions, corrections
+- **write_notebook** → Things *you discovered* during work: resource IDs, sheet names, API URLs, config values, last-processed positions
+
+### When to write to notebook (DO THIS AUTOMATICALLY):
+- You **looked up** a resource ID (Google Sheet ID, document ID, database record ID) → save it immediately
+- You **discovered** an API endpoint, URL, or service address → save it
+- You are **working through data** and need to track position (e.g. last row processed) → save it
+- You found a **name-to-ID mapping** you'll need again (e.g. "Leads Sheet" → "1Bxi...") → save it
+- Any **operational reference** you'd lose if the conversation restarted → save it
+
+### Before searching for resources:
+- ALWAYS check your notebook first (entries are shown at the top of this prompt)
+- If a notebook entry has the ID you need, use it directly — do NOT search again
+- If the notebook is empty or doesn't have what you need, search normally and then save the result
+
+### Key format:
+- Use descriptive snake_case keys: \`leads_sheet_id\`, \`email_template_doc_id\`, \`crm_api_base\`
+- Include a brief description when saving so future-you knows what it's for`);
         }
 
         const systemMsg = new SystemMessage(systemPromptParts.join("\n\n"));
@@ -1489,7 +1540,7 @@ You have a \`save_memory\` tool. You MUST use it aggressively to learn from ever
 
     const checkpointer = await getCheckpointer();
 
-    const compiled = graph.compile({ checkpointer });
+    const compiled = graph.compile({ checkpointer, store });
 
     // Cache compiled graph for subsequent messages in this session
     graphCache.set(cacheKey, {

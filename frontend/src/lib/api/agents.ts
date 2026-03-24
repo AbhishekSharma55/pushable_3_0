@@ -6,9 +6,11 @@ export interface CreateAgentInput {
     systemPrompt?: string;
     model?: string;
     temperature?: number;
+    browserType?: 'cloud' | 'extension';
 }
 
 export interface UpdateAgentInput extends Partial<CreateAgentInput> {
+    browserType?: 'cloud' | 'extension';
     browserProxyId?: string | null;
 }
 

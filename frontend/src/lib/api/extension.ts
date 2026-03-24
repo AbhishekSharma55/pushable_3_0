@@ -1,4 +1,5 @@
 import { apiClient } from './client';
+import { API_URL } from '@/lib/constants';
 
 export interface ExtensionSettings {
     wsUrl: string;
@@ -12,3 +13,6 @@ export const regenerateExtensionApiKey = (workspaceId: string): Promise<{ apiKey
     apiClient
         .post(`/api/workspaces/${workspaceId}/extension-settings/regenerate`)
         .then((r) => r.data.data);
+
+export const getExtensionDownloadUrl = (): string =>
+    `${API_URL}/api/extension/download`;

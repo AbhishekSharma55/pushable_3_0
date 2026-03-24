@@ -71,6 +71,7 @@ export interface AgentCapabilities {
     tools: ToolCapability[];
     mcpServers: MCPServerCapability[];
     hasBrowser: boolean;
+    hasExtensionBrowser: boolean;
     browserProfileName?: string;
     connectedAgents: ConnectedAgent[];
     composioIntegrations: ComposioIntegration[];
@@ -354,8 +355,47 @@ IMPORTANT:
 - If you are currently responding to a channel message, you're talking to one of these users right now`);
     }
 
-    if (capabilities.hasBrowser) {
-        blocks.push(`## Browser Agent (Your Eyes and Hands on the Web)
+    if (capabilities.hasBrowser || capabilities.hasExtensionBrowser) {
+        if (capabilities.hasExtensionBrowser) {
+            blocks.push(`## Extension Browser Agent (PRIMARY — User's Real Browser)
+
+You have access to the user's REAL Chrome browser through the Extension Browser Agent.
+This is your PRIMARY and DEFAULT browser — always use the \`extension_browser_agent\` tool for ALL browsing tasks.
+
+Use the \`extension_browser_agent\` tool to delegate any web browsing task. Simply describe what you want done in natural language:
+- "Go to google.com and search for 'LangChain documentation'"
+- "Navigate to linkedin.com/in/username and extract their job title and company"
+- "Log into dashboard.example.com, go to settings, and change the timezone to UTC"
+- "Scrape the first 10 product names and prices from example-store.com/products"
+
+The extension browser agent will autonomously:
+- Navigate websites using the user's real Chrome browser (with their logged-in sessions)
+- Read page content and extract data
+- Click buttons, fill forms, and interact with UI elements
+- Handle multi-step workflows (login flows, checkout, etc.)
+- Report results clearly
+
+WHEN TO USE:
+- For ALL web browsing tasks — this is your default browser
+- When interacting with any website
+- When the user asks to browse, navigate, click, type, or interact with web pages
+- When scraping data from websites
+
+HOW TO USE:
+- Give clear, specific instructions in the \`instruction\` field
+- Include target URLs when you know them
+- Describe the expected outcome or data you need
+- The extension browser agent handles all low-level interactions internally — you don't need to specify CSS selectors or individual clicks`);
+
+            if (capabilities.hasBrowser) {
+                blocks.push(`## Internal Browser Agent (FALLBACK ONLY)
+
+You also have an internal browser agent available${capabilities.browserProfileName ? ` via profile: ${capabilities.browserProfileName}` : ""}.
+WARNING: ONLY use \`browser_agent\` as a FALLBACK when the Chrome extension is disconnected.
+Always prefer \`extension_browser_agent\` over \`browser_agent\`.`);
+            }
+        } else {
+            blocks.push(`## Browser Agent (Your Eyes and Hands on the Web)
 
 You have a dedicated Browser Agent available${capabilities.browserProfileName ? ` via profile: ${capabilities.browserProfileName}` : ""}.
 The browser agent maintains your login sessions between conversations.
@@ -394,6 +434,7 @@ HOW TO USE:
 
 PRIORITY: Tools > Integrations > MCP > Browser Agent
 Only use the browser agent when the above cannot do the job.`);
+        }
     }
 
     if (capabilities.connectedAgents.length > 0) {
@@ -449,9 +490,11 @@ When deciding how to complete a task, follow this order:
    → If yes: delegate with full context
 
 6. BROWSER — Can only be done by interacting with a website?
-   → If yes: use the browser as a last resort
+   → If yes: use \`extension_browser_agent\` (Chrome extension) as the PRIMARY browser
+   → Only fall back to \`browser_agent\` (internal) if the extension is disconnected
 
-Never skip steps. A task that can be done with a tool should never reach the browser.`);
+Never skip steps. A task that can be done with a tool should never reach the browser.
+When browsing IS needed, ALWAYS prefer extension_browser_agent over browser_agent.`);
     }
 
     // --- BLOCK 5: System Level Access ---
@@ -551,7 +594,7 @@ function countCapabilities(capabilities: AgentCapabilities): number {
     if (capabilities.skills.length > 0) count++;
     if (capabilities.tools.length > 0) count++;
     if (capabilities.mcpServers.length > 0) count++;
-    if (capabilities.hasBrowser) count++;
+    if (capabilities.hasBrowser || capabilities.hasExtensionBrowser) count++;
     if (capabilities.connectedAgents.length > 0) count++;
     if (capabilities.composioIntegrations.length > 0) count++;
     if (capabilities.channels.length > 0) count++;

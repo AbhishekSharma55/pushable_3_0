@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Copy, RefreshCw, Eye, EyeOff, CheckCircle, PuzzleIcon, Wifi } from 'lucide-react';
+import { Copy, RefreshCw, Eye, EyeOff, CheckCircle, PuzzleIcon, Wifi, Download } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,7 +14,7 @@ import {
     DialogHeader,
     DialogTitle,
 } from '@/components/ui/dialog';
-import { getExtensionSettings, regenerateExtensionApiKey } from '@/lib/api/extension';
+import { getExtensionSettings, regenerateExtensionApiKey, getExtensionDownloadUrl } from '@/lib/api/extension';
 import { ACTIVE_WORKSPACE_KEY } from '@/lib/constants';
 import type { ExtensionSettings } from '@/lib/api/extension';
 
@@ -196,11 +196,36 @@ export default function ExtensionSettingsPage() {
                         </div>
                     </div>
 
+                    {/* Download Extension */}
+                    <div className="border-t border-border px-6 py-5">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <p className="text-sm font-medium">Download Browser Agent Extension</p>
+                                <p className="text-xs text-muted-foreground">
+                                    Download the Chrome extension as a .zip file and load it in Developer Mode.
+                                </p>
+                            </div>
+                            <Button
+                                asChild
+                                variant="default"
+                                size="sm"
+                                className="gap-2"
+                            >
+                                <a href={getExtensionDownloadUrl()} download>
+                                    <Download className="h-3.5 w-3.5" />
+                                    Download .zip
+                                </a>
+                            </Button>
+                        </div>
+                    </div>
+
                     {/* How to connect */}
                     <div className="border-t border-border bg-muted/20 px-6 py-5 rounded-b-xl">
                         <p className="mb-3 text-sm font-medium">How to connect your extension</p>
                         <ol className="space-y-2 text-sm text-muted-foreground list-decimal list-inside">
-                            <li>Install the <strong>Browser Agent</strong> Chrome extension from the extension folder.</li>
+                            <li>Download and unzip the <strong>Browser Agent</strong> extension using the button above.</li>
+                            <li>Go to <strong>chrome://extensions</strong>, enable <strong>Developer Mode</strong>, and click <strong>Load unpacked</strong>.</li>
+                            <li>Select the unzipped extension folder.</li>
                             <li>Click the extension icon in your Chrome toolbar.</li>
                             <li>Paste the <strong>WebSocket URL</strong> into the &quot;Server URL&quot; field.</li>
                             <li>Paste the <strong>API Key</strong> into the &quot;API Key&quot; field.</li>

@@ -1,6 +1,7 @@
 import { StateGraph, Annotation, MessagesAnnotation, interrupt } from "@langchain/langgraph";
+import type { RunnableConfig } from "@langchain/core/runnables";
 import { createLLM } from "../lib/gateway.ts";
-import { SystemMessage, AIMessage, HumanMessage, RemoveMessage, ToolMessage } from "@langchain/core/messages";
+import { SystemMessage, AIMessage, HumanMessage, RemoveMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages";
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
@@ -20,7 +21,7 @@ import { integrationRepository } from "../repositories/integration.repository.ts
 import { getComposioClient } from "../lib/composio.ts";
 import { logger } from "../lib/logger.ts";
 import { buildBrowserAgentTool, type BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
-import { buildExtensionBrowserTools } from "../lib/extension-bridge-client.ts";
+import { buildExtensionBrowserAgentTool } from "../lib/extension-browser-agent-tool.ts";
 import { buildVaultTools } from "../tools/vault.tools.ts";
 import { buildSystemTools } from "../tools/system.tools.ts";
 import { buildMemoryTools } from "../tools/memory.tools.ts";
@@ -49,8 +50,180 @@ import type {
     SystemPermissions,
 } from "../lib/system-prompt-builder.ts";
 
-const SUMMARIZE_THRESHOLD = 20; // Trigger summarization when messages exceed this count
-const KEEP_MESSAGES = 4; // Keep the last N messages after summarization
+const SUMMARIZE_THRESHOLD = 30; // Trigger summarization when messages exceed this count
+const KEEP_MESSAGES = 10; // Keep the last N messages after summarization
+
+/**
+ * Sanitize message history to ensure proper tool call/response pairing.
+ * Required for providers like Gemini that mandate tool responses immediately follow tool calls.
+ * Removes orphaned ToolMessages and strips orphaned tool_calls from AIMessages.
+ *
+ * SAFETY: Uses raw property access (not instanceof/class checks) to handle
+ * AIMessage, AIMessageChunk, and any future variants. Includes a failsafe:
+ * if we detect ToolMessages but fail to find ANY tool_calls (detection bug),
+ * we skip sanitization entirely rather than deleting valid messages.
+ */
+function sanitizeMessagesForProvider(messages: BaseMessage[]): BaseMessage[] {
+    const toolCallIds = new Set<string>();
+    const toolResponseIds = new Set<string>();
+
+    for (const msg of messages) {
+        // Use raw property access — works for AIMessage, AIMessageChunk, and
+        // any object that carries a tool_calls array, regardless of class hierarchy.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawToolCalls = (msg as any).tool_calls;
+        if (Array.isArray(rawToolCalls) && rawToolCalls.length > 0) {
+            for (const tc of rawToolCalls as Array<{ id?: string }>) {
+                if (tc.id) toolCallIds.add(tc.id);
+            }
+        }
+        if (msg instanceof ToolMessage && msg.tool_call_id) {
+            toolResponseIds.add(msg.tool_call_id);
+        }
+    }
+
+    const orphanedResponses = new Set<string>();
+    for (const id of toolResponseIds) {
+        if (!toolCallIds.has(id)) orphanedResponses.add(id);
+    }
+    const orphanedCalls = new Set<string>();
+    for (const id of toolCallIds) {
+        if (!toolResponseIds.has(id)) orphanedCalls.add(id);
+    }
+
+    if (orphanedResponses.size === 0 && orphanedCalls.size === 0) {
+        return messages;
+    }
+
+    // FAILSAFE: If we found ToolMessages but zero tool_calls, our detection
+    // is broken. Return messages unchanged rather than deleting valid responses.
+    if (toolCallIds.size === 0 && toolResponseIds.size > 0) {
+        logger.error({
+            toolResponseCount: toolResponseIds.size,
+        }, "Sanitization failsafe: found ToolMessages but zero tool_calls — skipping sanitization to avoid data loss");
+        return messages;
+    }
+
+    logger.warn({
+        orphanedResponses: orphanedResponses.size,
+        orphanedCalls: orphanedCalls.size,
+        totalToolCalls: toolCallIds.size,
+        totalToolResponses: toolResponseIds.size,
+    }, "Sanitizing orphaned tool call/response messages");
+
+    const result: BaseMessage[] = [];
+    for (const msg of messages) {
+        if (msg instanceof ToolMessage && msg.tool_call_id && orphanedResponses.has(msg.tool_call_id)) {
+            logger.info({ removedToolCallId: msg.tool_call_id, toolName: msg.name }, "Removing orphaned ToolMessage");
+            continue;
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawToolCalls2 = (msg as any).tool_calls;
+        if (Array.isArray(rawToolCalls2) && rawToolCalls2.length > 0) {
+            const validCalls = rawToolCalls2.filter((tc: { id?: string }) => !tc.id || !orphanedCalls.has(tc.id));
+            if (validCalls.length === 0) {
+                const text = typeof msg.content === "string"
+                    ? msg.content
+                    : Array.isArray(msg.content)
+                        ? (msg.content as Array<{ type: string; text?: string }>)
+                            .filter(b => b.type === "text")
+                            .map(b => b.text ?? "")
+                            .join("")
+                        : "";
+                if (text) {
+                    result.push(new AIMessage({ content: text, id: msg.id }));
+                }
+                continue;
+            }
+            if (validCalls.length < rawToolCalls2.length) {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                result.push(new AIMessage({ content: msg.content as any, tool_calls: validCalls, id: msg.id }));
+                continue;
+            }
+        }
+
+        result.push(msg);
+    }
+
+    return result;
+}
+
+/**
+ * Recover tool calls that the model output as JSON text instead of using the
+ * API's native tool calling mechanism. This is a known intermittent issue with
+ * Claude where it sometimes serializes tool calls as text content rather than
+ * producing proper tool_use content blocks.
+ *
+ * Detects: {"tool_calls":[{"name":"TOOL_NAME","input":{...}}]}
+ * Returns parsed tool calls and cleaned text, or null if nothing found.
+ */
+function recoverToolCallsFromText(
+    content: string | Array<{ type: string; text?: string }>,
+    availableToolNames: Set<string>
+): { toolCalls: Array<{ name: string; args: Record<string, unknown>; id: string; type: "tool_call" }>; cleanedContent: string } | null {
+    const text = typeof content === "string"
+        ? content
+        : Array.isArray(content)
+            ? (content as Array<{ type: string; text?: string }>)
+                .filter(b => b.type === "text")
+                .map(b => b.text ?? "")
+                .join("")
+            : "";
+
+    if (!text || !text.includes('"tool_calls"')) return null;
+
+    // Find the {"tool_calls": marker
+    const marker = '"tool_calls"';
+    const markerIdx = text.indexOf(marker);
+    if (markerIdx === -1) return null;
+
+    // Walk backwards to find the opening {
+    let start = markerIdx - 1;
+    while (start >= 0 && /\s/.test(text[start])) start--;
+    if (start < 0 || text[start] !== '{') return null;
+
+    // Use brace counting to find the matching closing }
+    let depth = 0;
+    let end = -1;
+    for (let i = start; i < text.length; i++) {
+        if (text[i] === '{') depth++;
+        else if (text[i] === '}') {
+            depth--;
+            if (depth === 0) {
+                end = i + 1;
+                break;
+            }
+        }
+    }
+    if (end === -1) return null;
+
+    const jsonStr = text.substring(start, end);
+    try {
+        const parsed = JSON.parse(jsonStr);
+        if (!Array.isArray(parsed.tool_calls) || parsed.tool_calls.length === 0) {
+            return null;
+        }
+
+        const toolCalls = parsed.tool_calls
+            .filter((tc: Record<string, unknown>) =>
+                typeof tc.name === "string" && availableToolNames.has(tc.name as string)
+            )
+            .map((tc: Record<string, unknown>) => ({
+                name: tc.name as string,
+                args: ((tc.input ?? tc.args ?? {}) as Record<string, unknown>),
+                id: (typeof tc.id === "string" ? tc.id : null) || `recovered-${randomUUID()}`,
+                type: "tool_call" as const,
+            }));
+
+        if (toolCalls.length === 0) return null;
+
+        const cleanedContent = (text.substring(0, start) + text.substring(end)).trim();
+        return { toolCalls, cleanedContent };
+    } catch {
+        return null;
+    }
+}
 
 const AgentState = Annotation.Root({
     ...MessagesAnnotation.spec,
@@ -76,9 +249,9 @@ async function getCheckpointer(): Promise<PostgresSaver> {
     return checkpointerInstance;
 }
 
-// For now, workspace plan is always "pro". Replace when subscription system is built.
+// For now, workspace plan is always "scale". Replace when subscription system is built.
 function getWorkspacePlan(_workspaceId: string): string {
-    return "pro";
+    return "scale";
 }
 
 /**
@@ -140,6 +313,42 @@ async function resolveModel(
     return { modelId: requestedModelId, multiplier: 1.0, displayName: requestedModelId };
 }
 
+// ── Graph cache ──────────────────────────────────────────────────────────────
+// Caches compiled agent graphs per session to avoid expensive DB queries,
+// MCP connections, and Composio API calls on every message.
+// A mutable ref is used for onBrowserEvent so the cached graph always
+// emits browser events to the current run's event bus.
+
+interface GraphCacheEntry {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    graph: any; // CompiledStateGraph returned by graph.compile()
+    browserEventRef: { current: BrowserAgentEventEmitter | undefined };
+    timestamp: number;
+}
+
+const graphCache = new Map<string, GraphCacheEntry>();
+const GRAPH_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes
+
+/** Evict stale entries periodically to prevent memory leaks */
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of graphCache) {
+        if (now - entry.timestamp > GRAPH_CACHE_TTL_MS * 2) {
+            graphCache.delete(key);
+        }
+    }
+}, GRAPH_CACHE_TTL_MS).unref();
+
+/** Invalidate cache for a specific agent (call after agent config changes) */
+export function invalidateGraphCache(agentId: string, workspaceId: string): void {
+    const prefix = `${agentId}:${workspaceId}:`;
+    for (const key of graphCache.keys()) {
+        if (key.startsWith(prefix)) {
+            graphCache.delete(key);
+        }
+    }
+}
+
 export async function createAgentGraph(
     agentId: string,
     workspaceId: string,
@@ -147,6 +356,16 @@ export async function createAgentGraph(
     onBrowserEvent?: BrowserAgentEventEmitter,
     chatSessionId?: string
 ) {
+    // Check graph cache — reuse compiled graph for same session
+    const cacheKey = `${agentId}:${workspaceId}:${userId || ""}:${chatSessionId || ""}`;
+    const cached = graphCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < GRAPH_CACHE_TTL_MS) {
+        // Update browser event ref to point to current run's handler
+        cached.browserEventRef.current = onBrowserEvent;
+        logger.info({ agentId, cacheKey }, "Using cached agent graph");
+        return cached.graph;
+    }
+
     const agent = await agentRepository.findById(agentId, workspaceId);
     if (!agent) throw new Error("Agent not found");
 
@@ -311,33 +530,48 @@ export async function createAgentGraph(
         }
     }
 
-    // --- 2. Agent delegation tools ---
+    // --- 2. Agent delegation tools (parallel) ---
     const delegateAgentIds = allowedAgentIds.filter((id) => id !== agentId);
     const connectedAgents: ConnectedAgent[] = [];
 
-    for (const targetAgentId of delegateAgentIds) {
-        try {
-            const targetAgent = await agentRepository.findById(targetAgentId, workspaceId);
-            if (targetAgent) {
-                const agentTool = await buildAgentCallerTool(
-                    agentId,
-                    targetAgentId,
-                    workspaceId
-                );
-                if (agentTool) {
-                    langchainTools.push(agentTool);
-                    connectedAgents.push({
-                        id: targetAgent.id,
-                        name: targetAgent.name,
-                        role: targetAgent.systemPrompt?.split("\n")[0] || "General Assistant",
-                    });
+    if (delegateAgentIds.length > 0) {
+        const delegateResults = await Promise.all(
+            delegateAgentIds.map(async (targetAgentId) => {
+                try {
+                    const targetAgent = await agentRepository.findById(targetAgentId, workspaceId);
+                    if (targetAgent) {
+                        const agentTool = await buildAgentCallerTool(
+                            agentId,
+                            targetAgentId,
+                            workspaceId
+                        );
+                        if (agentTool) {
+                            return {
+                                tool: agentTool,
+                                agent: {
+                                    id: targetAgent.id,
+                                    name: targetAgent.name,
+                                    role: targetAgent.systemPrompt?.split("\n")[0] || "General Assistant",
+                                } as ConnectedAgent,
+                            };
+                        }
+                    }
+                    return null;
+                } catch (error) {
+                    logger.warn(
+                        { error, targetAgentId },
+                        "Failed to build agent caller tool, skipping"
+                    );
+                    return null;
                 }
+            })
+        );
+
+        for (const result of delegateResults) {
+            if (result) {
+                langchainTools.push(result.tool);
+                connectedAgents.push(result.agent);
             }
-        } catch (error) {
-            logger.warn(
-                { error, targetAgentId },
-                "Failed to build agent caller tool, skipping"
-            );
         }
     }
 
@@ -416,56 +650,79 @@ export async function createAgentGraph(
         }
     }
 
-    // --- 4. Browser Agent (internal autonomous agent for browser tasks) ---
+    // --- 4. Browser Agent (load ONLY the selected browser type) ---
+    // Use a mutable ref so the cached graph always emits to the current run
+    const browserEventRef: { current: BrowserAgentEventEmitter | undefined } = { current: onBrowserEvent };
+    const stableBrowserEventEmitter: BrowserAgentEventEmitter = (event) => {
+        browserEventRef.current?.(event);
+    };
+
     let hasBrowser = false;
-    try {
-        const browserAgentTool = await buildBrowserAgentTool(
-            agentId,
-            workspaceId,
-            modelId,
-            modelMultiplier,
-            agentTemperature,
-            onBrowserEvent,
-            chatSessionId
-        );
-        if (browserAgentTool) {
-            langchainTools.push(browserAgentTool);
-            hasBrowser = true;
+    const browserType = agent.browserType || "cloud";
+
+    if (browserType === "cloud") {
+        // Cloud browser: autonomous sub-agent with internal browser tools
+        try {
+            const browserAgentTool = await buildBrowserAgentTool(
+                agentId,
+                workspaceId,
+                modelId,
+                modelMultiplier,
+                agentTemperature,
+                stableBrowserEventEmitter,
+                chatSessionId
+            );
+            if (browserAgentTool) {
+                langchainTools.push(browserAgentTool);
+                hasBrowser = true;
+            }
+        } catch (error) {
+            logger.warn(
+                { error, agentId },
+                "Failed to load cloud browser agent, proceeding without it"
+            );
         }
-    } catch (error) {
-        logger.warn(
-            { error, agentId },
-            "Failed to load browser agent, proceeding without it"
-        );
+    } else if (browserType === "extension") {
+        // Extension browser: autonomous sub-agent using Chrome extension tools
+        try {
+            const extBrowserAgentTool = buildExtensionBrowserAgentTool(
+                agentId,
+                workspaceId,
+                modelMultiplier,
+                agentTemperature,
+                stableBrowserEventEmitter
+            );
+            if (extBrowserAgentTool) {
+                langchainTools.push(extBrowserAgentTool);
+                hasBrowser = true;
+            }
+        } catch (error) {
+            logger.warn(
+                { error, agentId },
+                "Failed to load extension browser agent, proceeding without it"
+            );
+        }
     }
 
-    // --- 5. Fetch KB metadata for prompt builder ---
+    // --- 5. Fetch KB metadata for prompt builder (parallel) ---
     const kbCapabilities: KBCapability[] = [];
     if (allowedKbIds.length > 0) {
         try {
             const kbs = await kbRepository.findKBsByIds(allowedKbIds, workspaceId);
-            for (const kb of kbs) {
-                const docs = await kbRepository.findDocumentsByKB(kb.id, workspaceId);
-                kbCapabilities.push({
-                    name: kb.name,
-                    description: kb.description,
-                    documentCount: docs.length,
-                });
-            }
+            const kbsWithDocs = await Promise.all(
+                kbs.map(async (kb) => {
+                    const docs = await kbRepository.findDocumentsByKB(kb.id, workspaceId);
+                    return {
+                        name: kb.name,
+                        description: kb.description,
+                        documentCount: docs.length,
+                    };
+                })
+            );
+            kbCapabilities.push(...kbsWithDocs);
         } catch (error) {
             logger.warn({ error }, "Failed to fetch KB metadata for prompt builder");
         }
-    }
-
-    // --- 6. Extension browser tools (real Chrome via extension) ---
-    try {
-        const extTools = buildExtensionBrowserTools();
-        langchainTools.push(...extTools);
-    } catch (error) {
-        logger.warn(
-            { error, agentId },
-            "Failed to load extension browser tools, proceeding without them"
-        );
     }
 
     // --- 6b. Vault tools (Bitwarden credential access) ---
@@ -727,6 +984,7 @@ export async function createAgentGraph(
         tools: toolCapabilities,
         mcpServers: mcpServerCapabilities,
         hasBrowser,
+        hasExtensionBrowser: browserType === "extension" && hasBrowser,
         browserProfileName: browserProfile?.name,
         connectedAgents,
         composioIntegrations,
@@ -773,16 +1031,45 @@ export async function createAgentGraph(
         skillsSection = `\n\nSkills you must apply:\n${skillLines}`;
     }
 
-    const agentNode = async (state: typeof AgentState.State) => {
+    const agentNode = async (state: typeof AgentState.State, config: RunnableConfig) => {
         // Sync planning state from graph state
         currentTodos = state.todos || [];
 
-        // --- Credit check BEFORE LLM call ---
         const estimatedCost = calculateCreditCost({
             action: "chat_message",
             modelMultiplier,
         });
-        const creditCheck = await checkCredits(workspaceId, estimatedCost);
+
+        // Prepare KB query input before Promise.all
+        const lastUserMsg = allowedKbIds.length > 0
+            ? [...state.messages].reverse().find((m) => m instanceof HumanMessage)
+            : null;
+        const lastUserMsgContent =
+            lastUserMsg && typeof lastUserMsg.content === "string"
+                ? lastUserMsg.content
+                : null;
+
+        // --- Run credit check, memories, and KB query in PARALLEL ---
+        const [creditCheck, memories, kbResults] = await Promise.all([
+            checkCredits(workspaceId, estimatedCost),
+            userId
+                ? memoryRepository
+                      .findByUser(workspaceId, agentId, userId)
+                      .catch((error) => {
+                          logger.warn({ error }, "Failed to load long-term memories");
+                          return [] as Awaited<ReturnType<typeof memoryRepository.findByUser>>;
+                      })
+                : Promise.resolve([] as Awaited<ReturnType<typeof memoryRepository.findByUser>>),
+            lastUserMsgContent
+                ? kbService
+                      .queryKB(allowedKbIds, lastUserMsgContent, workspaceId, 5)
+                      .catch((error) => {
+                          logger.warn({ error, agentId }, "KB query failed, proceeding without context");
+                          return [] as Awaited<ReturnType<typeof kbService.queryKB>>;
+                      })
+                : Promise.resolve([] as Awaited<ReturnType<typeof kbService.queryKB>>),
+        ]);
+
         if (!creditCheck.allowed) {
             const errorMsg = `Insufficient credits. Available: ${creditCheck.available}. Required: ~${estimatedCost}. Top up at Settings > Billing.`;
             return { messages: [new AIMessage(errorMsg)], todos: currentTodos };
@@ -799,60 +1086,55 @@ export async function createAgentGraph(
         }
 
         // 0b. Inject long-term memories for this user
-        if (userId) {
-            try {
-                const memories = await memoryRepository.findByUser(workspaceId, agentId, userId);
-                if (memories.length > 0) {
-                    const memoryLines = memories
-                        .map((m) => `- [${m.category}] ${m.content}`)
-                        .join("\n");
-                    systemPromptParts.push(
-                        `## Long-term Memories About This User\n` +
-                        `These are facts and preferences you previously saved about this user:\n${memoryLines}`
-                    );
-                }
-            } catch (error) {
-                logger.warn({ error }, "Failed to load long-term memories");
+        if (memories.length > 0) {
+            const processMemories = memories.filter((m) => m.category === "process");
+            const otherMemories = memories.filter((m) => m.category !== "process");
+
+            const memoryParts: string[] = [];
+
+            if (processMemories.length > 0) {
+                const processLines = processMemories
+                    .map((m) => `- ${m.content}`)
+                    .join("\n");
+                memoryParts.push(
+                    `### Learned Processes & Workflows (FOLLOW THESE)\n` +
+                    `These are processes the user taught you. When a request matches one of these, follow it exactly:\n${processLines}`
+                );
             }
+
+            if (otherMemories.length > 0) {
+                const otherLines = otherMemories
+                    .map((m) => `- [${m.category}] ${m.content}`)
+                    .join("\n");
+                memoryParts.push(
+                    `### User Facts & Preferences\n${otherLines}`
+                );
+            }
+
+            systemPromptParts.push(
+                `## Long-term Memories About This User\n` +
+                `⚠️ You MUST read and apply these memories. They represent things this user has already told you.\n\n` +
+                memoryParts.join("\n\n")
+            );
         }
 
         // 1. KB context (RAG) — with credit deduction
-        if (allowedKbIds.length > 0) {
-            const lastUserMsg = [...state.messages]
-                .reverse()
-                .find((m) => m instanceof HumanMessage);
-            if (lastUserMsg && typeof lastUserMsg.content === "string") {
-                try {
-                    const results = await kbService.queryKB(
-                        allowedKbIds,
-                        lastUserMsg.content,
-                        workspaceId,
-                        5
-                    );
-                    if (results.length > 0) {
-                        const context = results
-                            .map((r) => r.content)
-                            .join("\n\n---\n\n");
-                        systemPromptParts.push(
-                            `Relevant context from knowledge base:\n${context}`
-                        );
-                        // Deduct KB query credits (fire-and-forget)
-                        deductCredits({
-                            workspaceId,
-                            amount: calculateCreditCost({ action: "kb_query" }),
-                            type: "kb_query",
-                            metadata: { agentId, kbIds: allowedKbIds },
-                        }).catch((err) =>
-                            logger.warn({ err }, "KB query credit deduction failed")
-                        );
-                    }
-                } catch (error) {
-                    logger.warn(
-                        { error, agentId },
-                        "KB query failed, proceeding without context"
-                    );
-                }
-            }
+        if (kbResults.length > 0) {
+            const context = kbResults
+                .map((r) => r.content)
+                .join("\n\n---\n\n");
+            systemPromptParts.push(
+                `Relevant context from knowledge base:\n${context}`
+            );
+            // Deduct KB query credits (fire-and-forget)
+            deductCredits({
+                workspaceId,
+                amount: calculateCreditCost({ action: "kb_query" }),
+                type: "kb_query",
+                metadata: { agentId, kbIds: allowedKbIds },
+            }).catch((err) =>
+                logger.warn({ err }, "KB query credit deduction failed")
+            );
         }
 
         // 2. Capability-aware system prompt
@@ -908,24 +1190,88 @@ Rules:
 
         // 6. Memory capability instructions
         if (userId) {
-            systemPromptParts.push(`## Memory
-You can remember important information about users across conversations using the \`save_memory\` tool.
-- Save proactively when a user shares: their name, preferences, project details, important decisions, timezone, etc.
-- Write memories as clear, standalone statements (e.g. "User's name is Alice", "User prefers concise responses").
-- Don't save trivial or temporary information.
-- Your previously saved memories (if any) are included in this prompt — use them to personalize responses.`);
+            systemPromptParts.push(`## Memory — IMPORTANT
+You have a \`save_memory\` tool. You MUST use it aggressively to learn from every conversation. The user should NEVER have to repeat themselves.
+
+### When to save (DO THIS EVERY TIME):
+- **Processes & Workflows:** If the user explains how to do something step-by-step, save the ENTIRE process immediately. This is the most important type of memory.
+- **Corrections:** If the user corrects you ("no, do it this way", "that's wrong"), save their correction as a process or preference so you never repeat the mistake.
+- **Preferences & Rules:** How they want things done, formatting rules, communication style, tools they prefer.
+- **Facts:** Names, roles, project details, technical stack, team structure, important context.
+- **Decisions:** Choices made, reasons behind them, trade-offs considered.
+
+### How to save:
+- Write memories as **detailed, standalone statements** that your future self can act on without any other context.
+- For processes, include ALL steps in order with enough detail to execute them independently.
+- Use category "process" for workflows/instructions, "preference" for how they like things, "fact" for information, "decision" for choices made.
+- BAD: "User told me about deployment" — too vague, useless.
+- GOOD: "Deployment process: 1) Run 'npm test' 2) Build with 'docker build -t app .' 3) Push to staging with 'kubectl apply -f staging.yaml' 4) Wait for user approval 5) Push to production with 'kubectl apply -f prod.yaml'"
+
+### How to use saved memories:
+- Your previously saved memories are included at the top of this prompt. READ THEM CAREFULLY before every response.
+- If a saved memory describes a process relevant to the user's current request, FOLLOW IT exactly without asking.
+- If a saved memory contains a preference, APPLY IT automatically.
+- If you're unsure whether a memory applies, follow it — the user saved it for a reason.
+
+### Rule: When in doubt, SAVE IT. It's better to save too much than to forget something the user told you.`);
         }
 
         const systemMsg = new SystemMessage(systemPromptParts.join("\n\n"));
         let response;
         try {
+            const sanitizedMessages = sanitizeMessagesForProvider(state.messages);
             logger.info({
                 messageCount: state.messages.length,
+                sanitizedMessageCount: sanitizedMessages.length,
                 systemPromptLength: systemPromptParts.join("\n\n").length,
                 toolCount: langchainTools.length,
                 isClaudeDirect,
+                modelId,
+                lastMessageType: state.messages[state.messages.length - 1]?.constructor?.name,
             }, "Invoking LLM");
-            response = await llmWithTools.invoke([systemMsg, ...state.messages]);
+            response = await llmWithTools.invoke([systemMsg, ...sanitizedMessages], config);
+
+            // Debug: log what the model returned
+            const aiResponse = response as AIMessage;
+            const responseToolCalls = aiResponse.tool_calls ?? [];
+            const responseContent = typeof aiResponse.content === "string"
+                ? aiResponse.content
+                : Array.isArray(aiResponse.content)
+                    ? (aiResponse.content as Array<{ type: string; text?: string }>)
+                        .filter(b => b.type === "text")
+                        .map(b => b.text ?? "")
+                        .join("")
+                    : "";
+
+            // --- Recover tool calls output as text (Claude intermittent issue) ---
+            // Claude sometimes serializes tool calls as JSON text (e.g.
+            // {"tool_calls":[{"name":"TOOL","input":{...}}]}) instead of using
+            // the API's native tool_use blocks. Detect this and convert to proper
+            // tool_calls so the graph routes to the tool node correctly.
+            if (responseToolCalls.length === 0 && responseContent.length > 0 && langchainTools.length > 0) {
+                const availableToolNames = new Set(langchainTools.map(t => t.name));
+                const recovered = recoverToolCallsFromText(aiResponse.content, availableToolNames);
+                if (recovered) {
+                    logger.warn({
+                        recoveredCount: recovered.toolCalls.length,
+                        toolNames: recovered.toolCalls.map(tc => tc.name),
+                        originalContentPreview: responseContent.slice(0, 200),
+                    }, "Recovered tool calls from text — model serialized tool calls as JSON instead of using API tool_use");
+                    response = new AIMessage({
+                        content: recovered.cleanedContent,
+                        tool_calls: recovered.toolCalls,
+                    });
+                }
+            }
+
+            const finalToolCalls = (response as AIMessage).tool_calls ?? [];
+            logger.info({
+                responseContentLength: responseContent.length,
+                responseContentPreview: responseContent.slice(0, 200),
+                responseToolCallCount: finalToolCalls.length,
+                responseToolCallNames: finalToolCalls.map(tc => tc.name),
+                wasRecovered: finalToolCalls.length > 0 && responseToolCalls.length === 0,
+            }, "LLM response received");
         } catch (error: unknown) {
             logger.error({ error, isClaudeDirect, modelId }, "LLM invocation error details");
             throw error;
@@ -951,7 +1297,7 @@ You can remember important information about users across conversations using th
     };
 
     // Summarization node — compresses older messages into a summary
-    const summarizeConversation = async (state: typeof AgentState.State) => {
+    const summarizeConversation = async (state: typeof AgentState.State, config: RunnableConfig) => {
         const { summary, messages } = state;
 
         let summaryPrompt: string;
@@ -967,15 +1313,24 @@ You can remember important information about users across conversations using th
         }
 
         const allMessages = [
-            ...messages,
+            ...sanitizeMessagesForProvider(messages),
             new HumanMessage({ id: randomUUID(), content: summaryPrompt }),
         ];
 
-        const response = await llm.invoke(allMessages);
+        const response = await llm.invoke(allMessages, config);
 
-        // Keep only the last N messages, remove the rest
+        // Keep the last N messages, but walk boundary back to avoid splitting tool call/response pairs
+        let boundary = messages.length - KEEP_MESSAGES;
+        if (boundary > 0) {
+            // Walk back until we land on a HumanMessage (safe split point)
+            while (boundary > 0 && !(messages[boundary] instanceof HumanMessage)) {
+                boundary--;
+            }
+        }
+        if (boundary <= 0) boundary = 0;
+
         const deleteMessages = messages
-            .slice(0, -KEEP_MESSAGES)
+            .slice(0, boundary)
             .filter((m) => m.id)
             .map((m) => new RemoveMessage({ id: m.id! }));
 
@@ -1001,12 +1356,24 @@ You can remember important information about users across conversations using th
             (lastMessage as AIMessage).tool_calls &&
             (lastMessage as AIMessage).tool_calls!.length > 0
         ) {
+            logger.info({
+                route: "tools",
+                toolCallCount: (lastMessage as AIMessage).tool_calls!.length,
+                toolCallNames: (lastMessage as AIMessage).tool_calls!.map(tc => tc.name),
+                messageCount: state.messages.length,
+            }, "shouldContinue → tools");
             return "tools";
         }
         // Check if conversation is long enough to warrant summarization
         if (state.messages.length > SUMMARIZE_THRESHOLD) {
+            logger.info({ route: "summarize", messageCount: state.messages.length }, "shouldContinue → summarize");
             return "summarize_conversation";
         }
+        logger.info({
+            route: "__end__",
+            messageCount: state.messages.length,
+            lastMessageType: lastMessage?.constructor?.name,
+        }, "shouldContinue → __end__");
         return "__end__";
     };
 
@@ -1021,6 +1388,12 @@ You can remember important information about users across conversations using th
         currentTodos = state.todos || [];
         const lastMessage = state.messages[state.messages.length - 1] as AIMessage;
         const toolCalls = lastMessage.tool_calls ?? [];
+
+        logger.info({
+            toolCallCount: toolCalls.length,
+            toolCallNames: toolCalls.map(tc => tc.name),
+            messageCount: state.messages.length,
+        }, "Tool node executing");
 
         const results: ToolMessage[] = [];
         for (const tc of toolCalls) {
@@ -1063,14 +1436,22 @@ You can remember important information about users across conversations using th
 
             try {
                 const result = await tool.invoke(tc.args);
+                const resultContent = typeof result === "string" ? result : JSON.stringify(result);
+                logger.info({
+                    toolName: tc.name,
+                    resultLength: resultContent.length,
+                    resultPreview: resultContent.slice(0, 300),
+                }, "Tool executed successfully");
                 results.push(new ToolMessage({
-                    content: typeof result === "string" ? result : JSON.stringify(result),
+                    content: resultContent,
                     tool_call_id: tc.id!,
                     name: tc.name,
                 }));
             } catch (error) {
+                const errMsg = `Error: ${error instanceof Error ? error.message : "Unknown error"}`;
+                logger.error({ toolName: tc.name, error: errMsg }, "Tool execution failed");
                 results.push(new ToolMessage({
-                    content: `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+                    content: errMsg,
                     tool_call_id: tc.id!,
                     name: tc.name,
                 }));
@@ -1100,5 +1481,15 @@ You can remember important information about users across conversations using th
 
     const checkpointer = await getCheckpointer();
 
-    return graph.compile({ checkpointer });
+    const compiled = graph.compile({ checkpointer });
+
+    // Cache compiled graph for subsequent messages in this session
+    graphCache.set(cacheKey, {
+        graph: compiled,
+        browserEventRef,
+        timestamp: Date.now(),
+    });
+    logger.info({ agentId, cacheKey }, "Agent graph compiled and cached");
+
+    return compiled;
 }

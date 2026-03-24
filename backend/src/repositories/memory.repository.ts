@@ -15,7 +15,7 @@ export const memoryRepository = {
                 )
             )
             .orderBy(desc(agentMemories.createdAt))
-            .limit(50);
+            .limit(100);
     },
 
     async create(data: {

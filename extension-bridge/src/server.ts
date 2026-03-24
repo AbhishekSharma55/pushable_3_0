@@ -167,8 +167,13 @@ export class BridgeServer extends EventEmitter {
       isAuthorized = true;
     }
 
-    // Reject if neither validation method passed (and authentication is enforced by having either configured)
-    const authRequired = !!this.config.apiKey;
+    // Backend and frontend roles connect from internal Docker network — skip key validation for them
+    if (role === 'backend' || role === 'frontend') {
+      isAuthorized = true;
+    }
+
+    // Reject if neither validation method passed (authentication enforced if static key OR backend URL is configured)
+    const authRequired = !!this.config.apiKey || !!this.config.backendUrl;
     if (authRequired && !isAuthorized) {
       this.log(`🚫 Connection rejected: invalid API key (Role: ${role || 'extension'})`);
       // Delay closing by 50ms so the HTTP Upgrade response has time to flush to the client.
@@ -252,11 +257,19 @@ export class BridgeServer extends EventEmitter {
     this.lastPong = Date.now();
     this.log('✅ Chrome Extension connected');
 
+    // Track WebSocket-level pong responses (browser handles these even when service worker is suspended)
+    socket.on('pong', () => {
+      this.lastPong = Date.now();
+    });
+
     socket.on('message', (data: Buffer | string) => {
       try {
         const msgStr = data.toString();
         const msg = JSON.parse(msgStr) as ExtensionMessage;
-        
+
+        // Update lastPong on any message (extension is clearly alive)
+        this.lastPong = Date.now();
+
         // Forward back to backend if connected (the backend sent the command)
         if (this.backendClient && this.backendClient.readyState === WebSocket.OPEN) {
            this.backendClient.send(msgStr);
@@ -312,22 +325,20 @@ export class BridgeServer extends EventEmitter {
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
+    // Use WebSocket-level ping/pong instead of app-level messages.
+    // This works even when Chrome's Manifest V3 service worker is suspended,
+    // because the browser's WebSocket implementation handles pong frames natively.
     this.heartbeatTimer = setInterval(() => {
       if (!this.extensionClient || this.extensionClient.readyState !== WebSocket.OPEN) return;
 
-      // Check if last pong is too old (2x heartbeat interval = dead)
-      const sinceLastPong = Date.now() - this.lastPong;
-      if (this.lastPong > 0 && sinceLastPong > this.config.heartbeatInterval * 2.5) {
-        this.log('💀 Extension heartbeat timeout, disconnecting');
-        try { this.extensionClient.close(); } catch (_) { /* ignore */ }
-        this.extensionClient = null;
-        this.emit('disconnected');
-        return;
-      }
-
-      // Send ping to extension
-      this.send({ type: 'ping', ts: Date.now() });
+      // Use WebSocket protocol-level ping (handled by browser, not service worker JS)
+      try {
+        this.extensionClient.ping();
+      } catch (_) { /* ignore */ }
     }, this.config.heartbeatInterval);
+
+    // Listen for pong at the WebSocket protocol level
+    // Note: we set this up per-connection in handleConnection instead
   }
 
   private stopHeartbeat(): void {

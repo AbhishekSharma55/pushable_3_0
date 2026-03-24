@@ -111,8 +111,8 @@ export default function Navbar() {
       </div>
 
       <div className="nav-right">
-        <a href="#" className="btn btn-ghost">Log in</a>
-        <a href="#" className="btn btn-white">Get started →</a>
+        <a href={`${process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000"}/login`} target="_blank" rel="noopener noreferrer" className="btn btn-ghost">Log in</a>
+        <a href={`${process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000"}/register`} target="_blank" rel="noopener noreferrer" className="btn btn-white">Get started →</a>
       </div>
     </nav>
   );

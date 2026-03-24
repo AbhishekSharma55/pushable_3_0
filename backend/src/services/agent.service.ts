@@ -8,6 +8,7 @@ export const agentService = {
             systemPrompt?: string;
             model?: string;
             temperature?: number;
+            browserType?: string;
         },
         workspaceId: string
     ) {
@@ -34,6 +35,7 @@ export const agentService = {
             systemPrompt: string;
             model: string;
             temperature: number;
+            browserType: string;
             browserProxyId: string | null;
         }>
     ) {

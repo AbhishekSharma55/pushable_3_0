@@ -46,9 +46,14 @@ services:
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       BROWSER_SERVICE_URL: http://browser-service:8080
+      EXTENSION_BRIDGE_PUBLIC_URL: ${EXTENSION_BRIDGE_PUBLIC_URL:-ws://localhost:3004}
+      EXTENSION_BRIDGE_URL: ws://extension-bridge:3001
+      EXTENSION_DIR: /app/pushable-relay
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_CLI_PROXY_URL: ${CLAUDE_CLI_PROXY_URL:-}
       NODE_ENV: production
+    volumes:
+      - ./pushable-relay:/app/pushable-relay:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -102,6 +107,20 @@ services:
       - "${PUBLIC_FRONTEND_PORT:-3001}:3001"
     environment:
       NODE_ENV: production
+    depends_on:
+      - backend
+
+  extension-bridge:
+    build:
+      context: ./extension-bridge
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${EXTENSION_BRIDGE_PORT:-3004}:3001"
+    environment:
+      BRIDGE_PORT: "3001"
+      BACKEND_URL: http://backend:4000
+      BRIDGE_API_KEY: ${BRIDGE_API_KEY:-}
     depends_on:
       - backend
 

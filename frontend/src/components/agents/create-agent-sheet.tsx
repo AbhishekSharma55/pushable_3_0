@@ -19,6 +19,8 @@ import { Label } from '@/components/ui/label';
 import { Slider } from '@/components/ui/slider';
 import { createAgent, updateAgent } from '@/lib/api/agents';
 import { ModelPicker } from '@/components/model-picker';
+import { Cloud, Chrome } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import type { Agent } from '@/types';
 
 const agentSchema = z.object({
@@ -26,6 +28,7 @@ const agentSchema = z.object({
     systemPrompt: z.string().optional(),
     model: z.string().min(1, 'Model is required'),
     temperature: z.number().min(0).max(2).default(0.7),
+    browserType: z.enum(['cloud', 'extension']).default('cloud'),
 });
 
 type AgentFormData = z.input<typeof agentSchema>;
@@ -61,11 +64,13 @@ export function CreateAgentSheet({
             systemPrompt: '',
             model: '',
             temperature: 0.7,
+            browserType: 'cloud',
         },
     });
 
     const temperature = watch('temperature');
     const model = watch('model');
+    const browserType = watch('browserType');
 
     // Reset form when agent changes
     useEffect(() => {
@@ -75,6 +80,7 @@ export function CreateAgentSheet({
                 systemPrompt: agent.systemPrompt ?? '',
                 model: agent.model,
                 temperature: agent.temperature,
+                browserType: agent.browserType || 'cloud',
             });
         } else {
             reset({
@@ -82,6 +88,7 @@ export function CreateAgentSheet({
                 systemPrompt: '',
                 model: '',
                 temperature: 0.7,
+                browserType: 'cloud',
             });
         }
     }, [agent, reset]);
@@ -177,6 +184,50 @@ export function CreateAgentSheet({
                             <span>Precise</span>
                             <span>Creative</span>
                         </div>
+                    </div>
+
+                    {/* Browser Type */}
+                    <div className="space-y-2">
+                        <Label>Browser Type</Label>
+                        <div className="grid grid-cols-2 gap-3">
+                            <button
+                                type="button"
+                                onClick={() => setValue('browserType', 'cloud')}
+                                className={cn(
+                                    'flex flex-col items-center gap-2 rounded-lg border-2 p-4 transition-colors',
+                                    browserType === 'cloud'
+                                        ? 'border-primary bg-primary/5'
+                                        : 'border-border hover:border-muted-foreground/30'
+                                )}
+                            >
+                                <Cloud className={cn('h-5 w-5', browserType === 'cloud' ? 'text-primary' : 'text-muted-foreground')} />
+                                <div className="text-center">
+                                    <p className={cn('text-sm font-medium', browserType === 'cloud' ? 'text-foreground' : 'text-muted-foreground')}>Cloud Browser</p>
+                                    <p className="text-[11px] text-muted-foreground mt-0.5">Managed cloud instance</p>
+                                </div>
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setValue('browserType', 'extension')}
+                                className={cn(
+                                    'flex flex-col items-center gap-2 rounded-lg border-2 p-4 transition-colors',
+                                    browserType === 'extension'
+                                        ? 'border-primary bg-primary/5'
+                                        : 'border-border hover:border-muted-foreground/30'
+                                )}
+                            >
+                                <Chrome className={cn('h-5 w-5', browserType === 'extension' ? 'text-primary' : 'text-muted-foreground')} />
+                                <div className="text-center">
+                                    <p className={cn('text-sm font-medium', browserType === 'extension' ? 'text-foreground' : 'text-muted-foreground')}>Extension Browser</p>
+                                    <p className="text-[11px] text-muted-foreground mt-0.5">Your real Chrome browser</p>
+                                </div>
+                            </button>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                            {browserType === 'cloud'
+                                ? 'Uses a managed cloud browser with proxy and fingerprint support.'
+                                : 'Uses your real Chrome browser via the extension. Requires the extension to be connected.'}
+                        </p>
                     </div>
 
                     <Button

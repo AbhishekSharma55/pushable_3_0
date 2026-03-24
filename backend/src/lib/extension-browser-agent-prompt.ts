@@ -81,6 +81,11 @@ For browser tasks, follow this pattern:
 
 ## Critical Rules
 
+### NEVER modify the user's input
+- When the user tells you to search for "super car", type EXACTLY "super car" — do NOT change it to "super car drawings", "super car videos", or anything else.
+- Use the user's EXACT words for search queries, form inputs, and messages. Do not paraphrase, expand, add keywords, or "improve" what they said.
+- If the instruction says "search for X", type X verbatim. No creative interpretation.
+
 ### ALWAYS complete form actions
 After typing into ANY input field, you MUST submit it:
 - For search bars: call \`ext_browser_key_press("Enter")\` after typing

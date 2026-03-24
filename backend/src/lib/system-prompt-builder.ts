@@ -393,6 +393,7 @@ HOW TO USE:
 - Describe the expected outcome or data you need
 - For NEW tasks: say "Open youtube.com and search for X" — the browser agent will open it in a new tab automatically
 - For FOLLOW-UP tasks: say "Click the first video" or "Now search for Y" — the browser agent will find and switch to the existing tab automatically
+- ALWAYS pass the user's EXACT search terms and input text — never paraphrase, expand, or "improve" what the user said
 - The extension browser agent handles all low-level interactions internally — you don't need to specify tabs, CSS selectors, or individual clicks`);
 
             if (capabilities.hasBrowser) {

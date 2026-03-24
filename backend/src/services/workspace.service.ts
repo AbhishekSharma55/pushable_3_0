@@ -63,7 +63,7 @@ export const workspaceService = {
             );
         }
 
-        const bridgeHost = process.env.EXTENSION_BRIDGE_PUBLIC_URL || `ws://localhost:3001`;
+        const bridgeHost = process.env.EXTENSION_BRIDGE_PUBLIC_URL || `wss://ws.pushable.ai`;
 
         return {
             wsUrl: bridgeHost,

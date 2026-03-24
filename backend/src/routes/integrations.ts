@@ -71,7 +71,7 @@ export async function integrationRoutes(fastify: FastifyInstance) {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const body = connectSchema.parse(request.body);
         const frontendUrl =
-            process.env.FRONTEND_URL || "http://localhost:3000";
+            process.env.FRONTEND_URL || "https://platform.pushable.ai";
         const result = await integrationService.initiateConnection({
             workspaceId,
             toolkitSlug: body.toolkitSlug,

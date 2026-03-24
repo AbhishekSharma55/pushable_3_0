@@ -45,7 +45,7 @@ export default function PricingSection() {
             </div>
             <div className="pcred">100 credits / month</div>
             <a
-              href={`${process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000"}/register`}
+              href={`${process.env.NEXT_PUBLIC_FRONTEND_URL || "https://platform.pushable.ai"}/register`}
               target="_blank"
               rel="noopener noreferrer"
               className="btn btn-ghost"
@@ -88,7 +88,7 @@ export default function PricingSection() {
             </div>
             <div className="pcred">2,000 credits + rollover</div>
             <a
-              href={`${process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000"}/register`}
+              href={`${process.env.NEXT_PUBLIC_FRONTEND_URL || "https://platform.pushable.ai"}/register`}
               target="_blank"
               rel="noopener noreferrer"
               className="btn btn-green btn-lg"
@@ -137,7 +137,7 @@ export default function PricingSection() {
             </div>
             <div className="pcred">Unlimited credits</div>
             <a
-              href={`${process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000"}/login`}
+              href={`${process.env.NEXT_PUBLIC_FRONTEND_URL || "https://platform.pushable.ai"}/login`}
               target="_blank"
               rel="noopener noreferrer"
               className="btn btn-ghost"

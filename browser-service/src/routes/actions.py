@@ -176,34 +176,35 @@ async def click(req: ClickRequest):
 async def type_text(req: TypeRequest):
     try:
         page = browser_manager.get_page(req.sessionId)
+        lock = browser_manager.get_lock(req.sessionId)
         locator = page.locator(req.selector).first
-        
-        # Click to focus the input field
-        await locator.click()
-        await asyncio.sleep(0.1)
-        
-        if req.clearFirst:
-            # Select all and delete (most realistic way to clear)
-            # Use 'Control+A' for Windows/Linux and 'Meta+A' for Mac
-            await page.keyboard.press("Control+A")
-            await page.keyboard.press("Meta+A") 
-            await page.keyboard.press("Backspace")
+
+        async with lock:
+            # Click to focus the input field
+            await locator.click()
+            await asyncio.sleep(0.15)
+
+            if req.clearFirst:
+                # Select all and delete
+                await page.keyboard.press("Control+a")
+                await asyncio.sleep(0.05)
+                await page.keyboard.press("Backspace")
+                await asyncio.sleep(0.1)
+
+            # Type character by character with a moderate delay
+            await locator.press_sequentially(req.text, delay=75)
+            await asyncio.sleep(0.2)
+
+            # Force React/Vue framework state updates by explicitly dispatching final events
+            await locator.evaluate("""el => {
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+            }""")
+
+            # Click outside to ensure blur actually happens in the browser UI
+            await page.mouse.click(0, 0)
             await asyncio.sleep(0.1)
-            
-        # Type character by character with a realistic delay
-        await locator.press_sequentially(req.text, delay=100)
-        await asyncio.sleep(0.2)
-        
-        # Force React/Vue framework state updates by explicitly dispatching final events
-        await locator.evaluate("""el => {
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            el.dispatchEvent(new Event('blur', { bubbles: true }));
-        }""")
-        
-        # Click outside to ensure blur actually happens in the browser UI
-        await page.mouse.click(0, 0)
-        await asyncio.sleep(0.1)
 
         return _ok("Typed successfully")
 
@@ -309,7 +310,9 @@ async def go_back(req: ActionRequest):
 async def keyboard(req: KeyboardRequest):
     try:
         page = browser_manager.get_page(req.sessionId)
-        await page.keyboard.press(req.key)
+        lock = browser_manager.get_lock(req.sessionId)
+        async with lock:
+            await page.keyboard.press(req.key)
         return _ok(f"Pressed '{req.key}'")
     except KeyError as e:
         return _err(str(e))

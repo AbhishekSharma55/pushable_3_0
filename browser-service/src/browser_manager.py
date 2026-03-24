@@ -25,6 +25,14 @@ class BrowserManager:
     def __init__(self) -> None:
         self.active_sessions: dict[str, dict] = {}
         self.profiles_dir = os.getenv("PROFILES_DIR", "./profiles")
+        # Per-session locks to prevent WebSocket input from racing with API actions
+        self._session_locks: dict[str, asyncio.Lock] = {}
+
+    def get_lock(self, session_id: str) -> asyncio.Lock:
+        """Get or create an asyncio.Lock for the given session."""
+        if session_id not in self._session_locks:
+            self._session_locks[session_id] = asyncio.Lock()
+        return self._session_locks[session_id]
 
     async def create_session(
         self,
@@ -181,59 +189,76 @@ class BrowserManager:
     async def click_element(self, session_id: str, index: int) -> dict:
         """Click an element by its index number. Returns result dict."""
         page = self.get_page(session_id)
+        lock = self.get_lock(session_id)
 
-        # Get element coordinates
-        result = await page.evaluate(CLICK_ELEMENT_JS, index)
-        if "error" in result:
-            return result
+        async with lock:
+            # Get element coordinates
+            result = await page.evaluate(CLICK_ELEMENT_JS, index)
+            if "error" in result:
+                return result
 
-        # Click at the element's center using Playwright's mouse
-        # This produces realistic mouse events
-        try:
-            await page.mouse.click(result["x"], result["y"])
-            await asyncio.sleep(0.3)  # Wait for any triggered actions
-            return {
-                "clicked": True,
-                "tag": result.get("tag", ""),
-                "text": result.get("text", ""),
-                "url": page.url,
-                "title": await page.title(),
-            }
-        except Exception as e:
-            return {"error": f"Click failed: {str(e)}"}
+            # Click at the element's center using Playwright's mouse
+            # This produces realistic mouse events
+            try:
+                await page.mouse.click(result["x"], result["y"])
+                await asyncio.sleep(0.3)  # Wait for any triggered actions
+                return {
+                    "clicked": True,
+                    "tag": result.get("tag", ""),
+                    "text": result.get("text", ""),
+                    "url": page.url,
+                    "title": await page.title(),
+                }
+            except Exception as e:
+                return {"error": f"Click failed: {str(e)}"}
 
     async def type_element(
         self, session_id: str, index: int, text: str, clear_first: bool = False
     ) -> dict:
-        """Focus an element by index and type text into it."""
+        """Focus an element by index and type text into it.
+
+        Uses click-to-focus (not just JS focus) and holds a session lock
+        to prevent WebSocket input events from stealing focus mid-typing.
+        """
         page = self.get_page(session_id)
+        lock = self.get_lock(session_id)
 
-        # Focus the element
-        result = await page.evaluate(FOCUS_ELEMENT_JS, {"index": index, "clearFirst": clear_first})
-        if "error" in result:
-            return result
+        async with lock:
+            # Scroll element into view and get its coordinates (same as click_element)
+            result = await page.evaluate(CLICK_ELEMENT_JS, index)
+            if "error" in result:
+                return result
 
-        # Clear existing content if requested
-        if clear_first:
-            await page.keyboard.press("Backspace")
-            # Select all and delete for thorough clearing
-            await page.keyboard.press("Control+a")
-            await page.keyboard.press("Backspace")
-            await asyncio.sleep(0.1)
+            # Click the element to focus it — more reliable than el.focus()
+            # especially for React/Vue inputs that rely on click event handlers
+            try:
+                await page.mouse.click(result["x"], result["y"])
+            except Exception as e:
+                return {"error": f"Click-to-focus failed: {str(e)}"}
+            await asyncio.sleep(0.15)
 
-        # Type using Playwright's keyboard for realistic key events
-        await page.keyboard.type(text, delay=30)
+            # Clear existing content if requested
+            if clear_first:
+                # Select all first, then delete — correct order
+                await page.keyboard.press("Control+a")
+                await asyncio.sleep(0.05)
+                await page.keyboard.press("Backspace")
+                await asyncio.sleep(0.1)
 
-        return {
-            "typed": True,
-            "text": text,
-            "tag": result.get("tag", ""),
-        }
+            # Type with a moderate delay that won't overwhelm framework re-renders
+            await page.keyboard.type(text, delay=50)
+
+            return {
+                "typed": True,
+                "text": text,
+                "tag": result.get("tag", ""),
+            }
 
     # ── Existing methods ──────────────────────────────────────────────
 
     async def close_session(self, session_id: str) -> None:
         session = self.active_sessions.pop(session_id, None)
+        self._session_locks.pop(session_id, None)
         if not session:
             return
 

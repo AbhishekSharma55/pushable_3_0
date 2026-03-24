@@ -50,6 +50,11 @@ async def _receive_input(websocket: WebSocket, session_id: str, last_pong: dict)
                 continue
 
             try:
+                # Skip input events when an API action (typing, clicking) holds
+                # the session lock — prevents focus theft mid-typing
+                lock = browser_manager.get_lock(session_id)
+                if lock.locked():
+                    continue
                 page = browser_manager.get_page(session_id)
                 await handle_input_event(page, event)
             except KeyError:

@@ -171,8 +171,13 @@ async function processGraphStream(
     const segments: StreamSegment[] = [];
     let lastSegmentType: "text" | "tools" | null = null;
 
-    for await (const [message] of stream) {
+    for await (const [message, metadata] of stream) {
         if (!message) continue;
+
+        // Skip messages from the summarize_conversation node — these are internal
+        // summaries that should never be streamed to the user as chat content.
+        const meta = metadata as Record<string, unknown> | undefined;
+        if (meta?.langgraph_node === "summarize_conversation") continue;
 
         // Detect AI tool_calls
         const msgObj = message as Record<string, unknown>;

@@ -147,7 +147,7 @@ export function buildExtensionBrowserAgentTool(
                         type: "chat_message",
                         metadata: {
                             agentId,
-                            modelId: BROWSER_AGENT_MODEL,
+                            modelId: resolvedModel,
                             source: "extension_browser_agent",
                         },
                     }).catch((err) =>

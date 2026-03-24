@@ -57,7 +57,7 @@ import { getAgents, deleteAgent, updateAgent } from '@/lib/api/agents';
 import { getSessions, createSession, getMessages, deleteSession } from '@/lib/api/sessions';
 import { API_URL } from '@/lib/constants';
 import { getToken } from '@/lib/auth';
-import { parseArtifact, detectStreamingArtifact } from '@/lib/artifact-parser';
+import { parseArtifact, parseAllArtifacts, detectStreamingArtifact } from '@/lib/artifact-parser';
 import type { Artifact } from '@/lib/artifact-parser';
 import { ArtifactPanel, FileIcon } from '@/components/artifact';
 import { downloadArtifact } from '@/lib/artifact-download';
@@ -694,6 +694,7 @@ export default function AgentsPage() {
                 try {
                     const parsed = JSON.parse(data);
                     if (parsed.content) {
+                        sseDeliveredRef.current = true;
                         fullContent += parsed.content;
                         if (lastSegmentType === 'text' && segments.length > 0) {
                             (segments[segments.length - 1] as { type: 'text'; content: string }).content += parsed.content;
@@ -704,6 +705,7 @@ export default function AgentsPage() {
                         setMessages((prev) => prev.map((m) => m.id === assistantMsgId ? { ...m, content: fullContent, segments: [...segments] } : m));
                     }
                     if (parsed.toolCall) {
+                        sseDeliveredRef.current = true;
                         const tc = parsed.toolCall as ToolCallEvent;
                         setMessages((prev) => prev.map((m) => {
                             if (m.id !== assistantMsgId) return m;
@@ -762,6 +764,8 @@ export default function AgentsPage() {
     };
 
     // ── Polling fallback for when SSE doesn't work ───────────────────────────
+    const sseDeliveredRef = useRef(false);
+
     const pollForCompletion = async (sessionId: string, assistantMsgId: string, signal: AbortSignal) => {
         const pollInterval = 1500;
         while (!signal.aborted) {
@@ -775,7 +779,8 @@ export default function AgentsPage() {
                 });
                 const runData = await runRes.json();
                 if (!runData.data) {
-                    // Run completed — load messages from DB
+                    // Run completed — only load from DB if SSE didn't deliver
+                    if (sseDeliveredRef.current) return;
                     const msgsRes = await getMessages(workspace!.id, sessionId);
                     const hydrated: ChatMessage[] = msgsRes.map((msg: ChatMessage & { metadata?: Record<string, unknown> }) => {
                         const meta = msg.metadata as Record<string, unknown> | undefined;
@@ -838,6 +843,7 @@ export default function AgentsPage() {
         const content = chatInput.trim();
         setChatInput('');
         setSending(true);
+        sseDeliveredRef.current = false;
 
         const userMsg: ChatMessage = {
             id: `temp-user-${Date.now()}`, sessionId: activeSession.id,
@@ -898,6 +904,7 @@ export default function AgentsPage() {
         }));
         setPendingApproval(null);
         setSending(true);
+        sseDeliveredRef.current = false;
 
         const abortController = new AbortController();
 
@@ -1206,7 +1213,7 @@ export default function AgentsPage() {
                                                         // Helper to render assistant text content
                                                         const renderAssistantText = (text: string, isStreaming?: boolean) => {
                                                             const sanitized = stripToolCallXml(text);
-                                                            let artifact: Artifact | null = null;
+                                                            let artifacts: Artifact[] = [];
                                                             let cleanMessage: string = sanitized;
                                                             let isArtifactStreaming = false;
                                                             let streamingArtifactType: string | undefined;
@@ -1219,18 +1226,18 @@ export default function AgentsPage() {
                                                                 isArtifactStreaming = detected.isArtifactStreaming;
                                                                 streamingArtifactType = detected.type;
                                                                 streamingArtifactFilename = detected.filename;
-                                                                // If the closed artifact was detected in one chunk during streaming
+                                                                // If completed artifacts were detected during streaming, parse them all
                                                                 if (!detected.isArtifactStreaming && detected.type) {
-                                                                    const parsed = parseArtifact(sanitized);
-                                                                    artifact = parsed.artifact;
+                                                                    const parsed = parseAllArtifacts(sanitized);
+                                                                    artifacts = parsed.artifacts;
                                                                     cleanMessage = parsed.cleanMessage;
                                                                 }
                                                             } else {
-                                                                const parsed = parseArtifact(sanitized);
-                                                                artifact = parsed.artifact;
+                                                                const parsed = parseAllArtifacts(sanitized);
+                                                                artifacts = parsed.artifacts;
                                                                 cleanMessage = parsed.cleanMessage;
                                                             }
-                                                            if (!cleanMessage && !artifact && !isArtifactStreaming && !isStreaming) return null;
+                                                            if (!cleanMessage && artifacts.length === 0 && !isArtifactStreaming && !isStreaming) return null;
                                                             return (
                                                                 <div className="flex gap-3">
                                                                     <div className="flex h-7 w-7 items-center justify-center rounded-full bg-muted flex-shrink-0 mt-0.5"><Bot className="h-3.5 w-3.5 text-muted-foreground" /></div>
@@ -1271,22 +1278,22 @@ export default function AgentsPage() {
                                                                                             </ReactMarkdown>
                                                                                         </div>
                                                                                     )}
-                                                                                    {artifact && (
-                                                                                        <div className={`flex items-center gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5 ${cleanMessage ? 'mt-3' : ''}`}>
-                                                                                            <FileIcon type={artifact.type} className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                                                                                    {artifacts.map((art, idx) => (
+                                                                                        <div key={idx} className={`flex items-center gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5 ${cleanMessage || idx > 0 ? 'mt-3' : ''}`}>
+                                                                                            <FileIcon type={art.type} className="h-5 w-5 text-muted-foreground flex-shrink-0" />
                                                                                             <div className="flex-1 min-w-0">
-                                                                                                <p className="text-sm font-medium truncate">{artifact.filename}</p>
-                                                                                                <p className="text-[11px] text-muted-foreground">{artifact.type.toUpperCase()}</p>
+                                                                                                <p className="text-sm font-medium truncate">{art.filename}</p>
+                                                                                                <p className="text-[11px] text-muted-foreground">{art.type.toUpperCase()}</p>
                                                                                             </div>
-                                                                                            <Button size="sm" variant="outline" className="gap-1.5 text-xs h-7 flex-shrink-0" onClick={() => setActiveArtifact(artifact)}>
+                                                                                            <Button size="sm" variant="outline" className="gap-1.5 text-xs h-7 flex-shrink-0" onClick={() => setActiveArtifact(art)}>
                                                                                                 <Eye className="h-3 w-3" />View
                                                                                             </Button>
-                                                                                            <button className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors flex-shrink-0" onClick={() => downloadArtifact(artifact)} title="Download">
+                                                                                            <button className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors flex-shrink-0" onClick={() => downloadArtifact(art)} title="Download">
                                                                                                 <Download className="h-3.5 w-3.5" />
                                                                                             </button>
                                                                                         </div>
-                                                                                    )}
-                                                                                    {isArtifactStreaming && !artifact && (
+                                                                                    ))}
+                                                                                    {isArtifactStreaming && artifacts.length === 0 && (
                                                                                         <div className={`flex items-center gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5 animate-pulse ${cleanMessage ? 'mt-3' : ''}`}>
                                                                                             {streamingArtifactType ? (
                                                                                                 <FileIcon type={streamingArtifactType as Artifact['type']} className="h-5 w-5 text-muted-foreground flex-shrink-0" />
@@ -1353,7 +1360,7 @@ export default function AgentsPage() {
                                                                         <Fragment key={`${msg.id}-seg-${si}`}>
                                                                             {seg.type === 'text' && seg.content.trim() && renderAssistantText(seg.content, msg.isStreaming && si === msg.segments!.length - 1)}
                                                                             {seg.type === 'tools' && (
-                                                                                <ToolCallDisplay toolCalls={seg.toolCalls} messageId={`${msg.id}-${si}`} />
+                                                                                <ToolCallDisplay toolCalls={seg.toolCalls} messageId={`${msg.id}-${si}`} isMessageComplete={!msg.isStreaming} />
                                                                             )}
                                                                         </Fragment>
                                                                     ))}
@@ -1372,7 +1379,7 @@ export default function AgentsPage() {
                                                                 <>
                                                                     {msg.thinking && <ThinkingToggle content={msg.thinking} />}
                                                                     {msg.toolCalls && msg.toolCalls.length > 0 && (
-                                                                        <ToolCallDisplay toolCalls={msg.toolCalls} messageId={msg.id} />
+                                                                        <ToolCallDisplay toolCalls={msg.toolCalls} messageId={msg.id} isMessageComplete={!msg.isStreaming} />
                                                                     )}
                                                                     {msg.approvalRequest && pendingApproval?.msgId === msg.id && (
                                                                         <ApprovalCard

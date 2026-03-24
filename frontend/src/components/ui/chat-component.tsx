@@ -772,6 +772,7 @@ function MessageBubble({
                 status: tc.status === 'thinking' ? 'running' : (tc.status as 'running' | 'done' | 'pending_approval' | 'approved' | 'rejected') || 'done',
               }))}
               messageId={msg.id}
+              isMessageComplete={msg.status !== 'thinking'}
             />
           )}
 

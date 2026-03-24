@@ -9,42 +9,57 @@ export interface Artifact {
 // Match with closing tag
 const ARTIFACT_CLOSED_REGEX = /<artifact\s+type="([^"]+)"(?:\s+filename="([^"]*)")?\s*>([\s\S]*?)<\/artifact>/;
 
+// Global version — finds ALL closed artifact blocks
+const ARTIFACT_CLOSED_REGEX_G = /<artifact\s+type="([^"]+)"(?:\s+filename="([^"]*)")?\s*>([\s\S]*?)<\/artifact>/g;
+
 // Match opening tag without closing — treat rest of message as content
 const ARTIFACT_OPEN_REGEX = /<artifact\s+type="([^"]+)"(?:\s+filename="([^"]*)")?\s*>([\s\S]*)$/;
 
 const VALID_TYPES = new Set<string>(['html', 'markdown', 'mdx', 'txt', 'csv', 'xlsx', 'pdf']);
 
+/** Parse ALL artifacts from a message (supports multiple artifact blocks). */
+export function parseAllArtifacts(message: string): { artifacts: Artifact[]; cleanMessage: string } {
+    const artifacts: Artifact[] = [];
+    let cleanMessage = message;
+
+    // Find all closed artifact blocks
+    for (const match of message.matchAll(ARTIFACT_CLOSED_REGEX_G)) {
+        const rawType = match[1].trim().toLowerCase();
+        if (!VALID_TYPES.has(rawType)) continue;
+
+        const type = rawType as ArtifactType;
+        const filename = match[2]?.trim() || `artifact.${type === 'markdown' ? 'md' : type}`;
+        const content = match[3].trim();
+        if (!content) continue;
+
+        artifacts.push({ type, filename, content });
+        cleanMessage = cleanMessage.replace(match[0], '');
+    }
+
+    // Also check for an unclosed artifact tag at the end (streaming leftover / truncated)
+    const openMatch = cleanMessage.match(ARTIFACT_OPEN_REGEX);
+    if (openMatch) {
+        const rawType = openMatch[1].trim().toLowerCase();
+        if (VALID_TYPES.has(rawType)) {
+            const type = rawType as ArtifactType;
+            const filename = openMatch[2]?.trim() || `artifact.${type === 'markdown' ? 'md' : type}`;
+            const content = openMatch[3].trim();
+            if (content) {
+                artifacts.push({ type, filename, content });
+                cleanMessage = cleanMessage.replace(ARTIFACT_OPEN_REGEX, '');
+            }
+        }
+    }
+
+    cleanMessage = cleanMessage.replace(/\n{3,}/g, '\n\n').trim();
+
+    return { artifacts, cleanMessage };
+}
+
+/** Backward-compatible single-artifact parser. Returns only the first artifact. */
 export function parseArtifact(message: string): { artifact: Artifact | null; cleanMessage: string } {
-    // Try closed tag first (proper format)
-    let match = message.match(ARTIFACT_CLOSED_REGEX);
-    let regex: RegExp = ARTIFACT_CLOSED_REGEX;
-
-    // Fallback: opening tag without closing tag
-    if (!match) {
-        match = message.match(ARTIFACT_OPEN_REGEX);
-        regex = ARTIFACT_OPEN_REGEX;
-    }
-
-    if (!match) {
-        return { artifact: null, cleanMessage: message };
-    }
-
-    const rawType = match[1].trim().toLowerCase();
-    if (!VALID_TYPES.has(rawType)) {
-        return { artifact: null, cleanMessage: message };
-    }
-
-    const type = rawType as ArtifactType;
-    const filename = match[2]?.trim() || `artifact.${type === 'markdown' ? 'md' : type}`;
-    const content = match[3].trim();
-
-    if (!content) {
-        return { artifact: null, cleanMessage: message };
-    }
-
-    const cleanMessage = message.replace(regex, '').trim();
-
-    return { artifact: { type, filename, content }, cleanMessage };
+    const { artifacts, cleanMessage } = parseAllArtifacts(message);
+    return { artifact: artifacts[0] ?? null, cleanMessage };
 }
 
 // Detect an artifact tag during streaming — strips raw XML from visible text
@@ -65,35 +80,34 @@ export interface StreamingArtifactResult {
 }
 
 export function detectStreamingArtifact(message: string): StreamingArtifactResult {
-    // First check: is there a complete closed artifact? (agent finished it in one chunk)
-    if (ARTIFACT_CLOSED_REGEX.test(message)) {
-        const parsed = parseArtifact(message);
-        return {
-            isArtifactStreaming: false,
-            cleanMessage: parsed.cleanMessage,
-            type: parsed.artifact?.type,
-            filename: parsed.artifact?.filename,
-        };
-    }
+    // Strip any already-completed artifact blocks first so they don't leak as raw text.
+    // We use parseAllArtifacts which handles multiple closed blocks.
+    const { artifacts: completedArtifacts, cleanMessage: strippedMessage } = parseAllArtifacts(message);
 
-    // Second check: opening tag present (content is streaming)
-    const openMatch = message.match(ARTIFACT_OPEN_REGEX);
+    // Now check the stripped message for a still-streaming artifact (open tag without close)
+    const openMatch = strippedMessage.match(ARTIFACT_OPEN_REGEX);
     if (openMatch) {
         const rawType = openMatch[1]?.trim().toLowerCase();
         const type = VALID_TYPES.has(rawType) ? (rawType as ArtifactType) : undefined;
         const filename = openMatch[2]?.trim() || undefined;
-        const cleanMessage = message.slice(0, openMatch.index ?? 0).trim();
+        const cleanMessage = strippedMessage.slice(0, openMatch.index ?? 0).trim();
         return { isArtifactStreaming: true, cleanMessage, type, filename };
     }
 
-    // Third check: partial tag (e.g. `<artifact` or `<artifact type="html"` — no closing `>` yet)
-    const partialMatch = message.match(ARTIFACT_PARTIAL_TAG_REGEX);
+    // Check for partial tag (e.g. `<artifact` or `<artifact type="html"` — no closing `>` yet)
+    const partialMatch = strippedMessage.match(ARTIFACT_PARTIAL_TAG_REGEX);
     if (partialMatch) {
-        const cleanMessage = message.slice(0, partialMatch.index ?? 0).trim();
+        const cleanMessage = strippedMessage.slice(0, partialMatch.index ?? 0).trim();
         return { isArtifactStreaming: true, cleanMessage };
     }
 
-    return { isArtifactStreaming: false, cleanMessage: message };
+    // No streaming artifact — return cleaned message (completed artifacts already stripped)
+    return {
+        isArtifactStreaming: false,
+        cleanMessage: strippedMessage,
+        type: completedArtifacts[completedArtifacts.length - 1]?.type,
+        filename: completedArtifacts[completedArtifacts.length - 1]?.filename,
+    };
 }
 
 export function getLanguageFromType(type: ArtifactType): string {

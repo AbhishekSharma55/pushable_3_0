@@ -34,6 +34,8 @@ interface ToolCallEvent {
 interface ToolCallDisplayProps {
     toolCalls: ToolCallEvent[];
     messageId: string;
+    /** When true, the message/run is fully complete (not still streaming) */
+    isMessageComplete?: boolean;
 }
 
 const PLANNING_TOOLS = new Set(['write_todos', 'update_todo', 'get_todos']);
@@ -302,7 +304,7 @@ function ActionCall({ tc, index }: { tc: ToolCallEvent; index: number }) {
     );
 }
 
-export function ToolCallDisplay({ toolCalls, messageId }: ToolCallDisplayProps) {
+export function ToolCallDisplay({ toolCalls, messageId, isMessageComplete }: ToolCallDisplayProps) {
     const [expanded, setExpanded] = useState(false);
 
     if (!toolCalls || toolCalls.length === 0) return null;
@@ -313,6 +315,17 @@ export function ToolCallDisplay({ toolCalls, messageId }: ToolCallDisplayProps) 
 
     const latestAction = actionCalls[actionCalls.length - 1];
     const isRunning = actionCalls.some((tc) => tc.status === 'running');
+
+    // Auto-complete plan steps ONLY when the entire message/run is fully done.
+    // During streaming, there are gaps between tool calls where isRunning is briefly false —
+    // we must NOT auto-complete during those gaps, only when the message is finalized.
+    if (plan && isMessageComplete && !isRunning && actionCalls.length > 0) {
+        for (const step of plan) {
+            if (step.status === 'pending' || step.status === 'in_progress') {
+                step.status = 'completed';
+            }
+        }
+    }
     const hasErrors = actionCalls.some((tc) => tc.status === 'rejected');
 
     return (

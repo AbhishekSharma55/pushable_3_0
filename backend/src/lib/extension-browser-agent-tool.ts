@@ -48,7 +48,7 @@ export function buildExtensionBrowserAgentTool(
     // Get extension browser tools
     let extTools: DynamicStructuredTool[];
     try {
-        extTools = buildExtensionBrowserTools();
+        extTools = buildExtensionBrowserTools(workspaceId);
     } catch (error) {
         logger.warn({ error, agentId }, "Failed to build extension browser tools");
         return null;

@@ -29,6 +29,7 @@ let reconnectTimer    = null;
 let frameStreamTimer  = null;
 let streamingTabId    = null;   // which tab the frame stream targets
 let lastConnectionError = null; // stores human-readable connection error
+let userDisconnected  = false;  // true when user explicitly clicked Disconnect
 
 /**
  * Per-tab command queues.
@@ -57,8 +58,8 @@ try {
       if (alarm.name === 'keepalive') {
         // Touch storage to keep service worker alive
         chrome.storage.local.get('serverUrl', (r) => {
-          // Also check if we should be connected but aren't
-          if (r.serverUrl && (!ws || ws.readyState !== WebSocket.OPEN) && !wsConnecting && !reconnectTimer) {
+          // Only auto-reconnect if user hasn't explicitly disconnected
+          if (!userDisconnected && r.serverUrl && (!ws || ws.readyState !== WebSocket.OPEN) && !wsConnecting && !reconnectTimer) {
             connect();
           }
         });
@@ -70,8 +71,8 @@ try {
 // Fallback keepalive — setInterval to touch storage every 20s
 setInterval(() => {
   chrome.storage.local.get('serverUrl', (r) => {
-    // Re-establish connection if it was lost (e.g. after service worker wake)
-    if (r.serverUrl && (!ws || ws.readyState !== WebSocket.OPEN) && !wsConnecting && !reconnectTimer) {
+    // Only auto-reconnect if user hasn't explicitly disconnected
+    if (!userDisconnected && r.serverUrl && (!ws || ws.readyState !== WebSocket.OPEN) && !wsConnecting && !reconnectTimer) {
       connect();
     }
   });
@@ -100,6 +101,7 @@ async function connect() {
   if (ws && ws.readyState === WebSocket.OPEN) return;
   if (wsConnecting) return;
   wsConnecting = true;
+  userDisconnected = false;
   lastConnectionError = null;
 
   try {
@@ -126,9 +128,16 @@ async function connect() {
       ws = null;
       stopFrameStream();
 
+      // User explicitly disconnected — do nothing
+      if (userDisconnected) return;
+
       // If closed with a 4xxx code, it's an app-level rejection (e.g. 4001 Invalid API key)
       if (event.code >= 4000) {
-        lastConnectionError = event.reason || 'Connection rejected by server';
+        if (event.code === 4001) {
+          lastConnectionError = 'Invalid API key. Check your API key and try again.';
+        } else {
+          lastConnectionError = event.reason || 'Connection rejected by server';
+        }
         // Do not auto-reconnect if rejected for auth reasons
       } else if (event.code === 1000 && event.reason === 'Replaced by new connection') {
         // Server replaced us with a newer connection — don't fight it
@@ -170,6 +179,7 @@ async function connect() {
 }
 
 function disconnect() {
+  userDisconnected = true;
   stopReconnect();
   stopFrameStream();
   if (ws) { ws.close(); ws = null; }

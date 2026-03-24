@@ -38,8 +38,8 @@ async def create_session(req: CreateSessionRequest):
             headless=req.headless,
             proxy_url=req.proxyUrl,
         )
-        port = os.getenv("PORT", "8080")
-        ws_url = f"ws://localhost:{port}/ws/{req.sessionId}"
+        public_url = os.getenv("BROWSER_PUBLIC_URL", "wss://browser.pushable.ai")
+        ws_url = f"{public_url}/ws/{req.sessionId}"
         return CreateSessionResponse(
             sessionId=result["sessionId"],
             status=result["status"],

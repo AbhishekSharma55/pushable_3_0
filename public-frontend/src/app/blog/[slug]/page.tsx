@@ -25,7 +25,7 @@ export async function generateStaticParams() {
   const apiUrl =
     process.env.API_URL ||
     process.env.NEXT_PUBLIC_API_URL ||
-    "http://localhost:4000";
+    "https://api.pushable.ai";
   try {
     const res = await fetch(`${apiUrl}/api/public/blogs`, {
       cache: "force-cache",
@@ -43,7 +43,7 @@ async function getBlog(slug: string): Promise<BlogPost | null> {
   const apiUrl =
     process.env.API_URL ||
     process.env.NEXT_PUBLIC_API_URL ||
-    "http://localhost:4000";
+    "https://api.pushable.ai";
   try {
     const res = await fetch(`${apiUrl}/api/public/blogs/${slug}`, {
       cache: "force-cache",

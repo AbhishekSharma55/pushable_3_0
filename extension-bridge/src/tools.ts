@@ -52,7 +52,7 @@ export function buildExtensionBrowserTools(bridge: ExtensionBridge): DynamicStru
           `Please connect the Chrome Browser Agent extension:\n` +
           `1. Open Google Chrome\n` +
           `2. Click the Browser Agent extension icon in the toolbar\n` +
-          `3. Enter the server URL: ws://localhost:${bridge['config'].port}\n` +
+          `3. Enter the server URL: ${process.env.EXTENSION_BRIDGE_PUBLIC_URL || `wss://ws.pushable.ai`}\n` +
           `4. Click "Connect"\n` +
           `5. Wait for the status to show "Connected"\n\n` +
           `Once connected, try your request again.`

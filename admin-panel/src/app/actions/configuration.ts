@@ -77,7 +77,7 @@ export interface ServiceStatus {
 
 export async function checkServiceHealth(): Promise<ServiceStatus[]> {
   const services = [
-    { name: 'Backend API', url: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000' },
+    { name: 'Backend API', url: process.env.NEXT_PUBLIC_API_URL || 'https://api.pushable.ai' },
     { name: 'Browser Service', url: (process.env.BROWSER_SERVICE_URL || 'http://browser-service:8080') },
   ]
 
@@ -135,7 +135,7 @@ export async function getEnvConfig(): Promise<EnvConfig> {
   return {
     gateway: process.env.GATEWAY || 'OpenRouter',
     browserServiceUrl: process.env.BROWSER_SERVICE_URL || 'http://browser-service:8080',
-    frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
+    frontendUrl: process.env.FRONTEND_URL || 'https://platform.pushable.ai',
     hasOpenRouterKey: !!process.env.OPENROUTER_KEY,
     hasComposioKey: !!process.env.COMPOSIO_API_KEY,
     hasClaudeToken: !!process.env.CLAUDE_ACCESS_TOKEN,

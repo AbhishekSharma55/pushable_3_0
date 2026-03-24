@@ -263,7 +263,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
                     "Please connect:\n" +
                     "1. Open Google Chrome\n" +
                     "2. Click the Browser Agent extension icon\n" +
-                    "3. Enter URL: ws://localhost:3001\n" +
+                    "3. Enter URL: wss://ws.pushable.ai\n" +
                     "4. Click Connect\n" +
                     "5. Wait for Connected status\n\n" +
                     "Then try again."

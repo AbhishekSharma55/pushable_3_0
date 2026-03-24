@@ -82,7 +82,7 @@ setInterval(() => {
 function getWsUrl() {
   return new Promise((resolve) => {
     chrome.storage.local.get(['serverUrl', 'apiKey'], (r) => {
-      let url = r.serverUrl || 'ws://localhost:3001';
+      let url = r.serverUrl || 'wss://ws.pushable.ai';
       const key = r.apiKey || '';
       if (key) url += (url.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(key);
       resolve(url);

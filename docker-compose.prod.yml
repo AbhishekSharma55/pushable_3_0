@@ -44,9 +44,9 @@ services:
       OPENROUTER_KEY: ${OPENROUTER_KEY}
       REDIS_URL: redis://redis:6379
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
-      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      FRONTEND_URL: ${FRONTEND_URL:-https://platform.pushable.ai}
       BROWSER_SERVICE_URL: http://browser-service:8080
-      EXTENSION_BRIDGE_PUBLIC_URL: ${EXTENSION_BRIDGE_PUBLIC_URL:-ws://localhost:3004}
+      EXTENSION_BRIDGE_PUBLIC_URL: ${EXTENSION_BRIDGE_PUBLIC_URL:-wss://ws.pushable.ai}
       EXTENSION_BRIDGE_URL: ws://extension-bridge:3001
       EXTENSION_DIR: /app/pushable-relay
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -70,13 +70,14 @@ services:
     environment:
       PORT: "8080"
       PROFILES_DIR: /app/profiles
-      ALLOWED_ORIGINS: ${FRONTEND_URL:-http://localhost:3000}
+      ALLOWED_ORIGINS: ${FRONTEND_URL:-https://platform.pushable.ai},https://pushable.ai
       SCREENSHOT_INTERVAL_MS: "200"
       SCREENSHOT_QUALITY: "60"
       SCREENSHOT_WIDTH: "1920"
       SCREENSHOT_HEIGHT: "1080"
       CAPSOLVER_API_KEY: ${CAPSOLVER_API_KEY:-CAP-EE4E7B31B78FB28FB7488B481872E8EF41ED238F170D21EF8420588FFEC5D2F5}
       CAPSOLVER_EXTENSION_ENABLED: ${CAPSOLVER_EXTENSION_ENABLED:-true}
+      BROWSER_PUBLIC_URL: ${BROWSER_PUBLIC_URL:-wss://browser.pushable.ai}
     volumes:
       - browser_profiles:/app/profiles
       - browser_extensions:/app/extensions
@@ -86,8 +87,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile.prod
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
-        NEXT_PUBLIC_BROWSER_WS_URL: ${NEXT_PUBLIC_BROWSER_WS_URL:-ws://localhost:8080}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.pushable.ai}
+        NEXT_PUBLIC_BROWSER_WS_URL: ${NEXT_PUBLIC_BROWSER_WS_URL:-wss://browser.pushable.ai}
     restart: unless-stopped
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
@@ -101,7 +102,7 @@ services:
       context: ./public-frontend
       dockerfile: Dockerfile.prod
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.pushable.ai}
     restart: unless-stopped
     ports:
       - "${PUBLIC_FRONTEND_PORT:-3001}:3001"
@@ -121,6 +122,7 @@ services:
       BRIDGE_PORT: "3001"
       BACKEND_URL: http://backend:4000
       BRIDGE_API_KEY: ${BRIDGE_API_KEY:-}
+      EXTENSION_BRIDGE_PUBLIC_URL: ${EXTENSION_BRIDGE_PUBLIC_URL:-wss://ws.pushable.ai}
     depends_on:
       - backend
 
@@ -129,7 +131,7 @@ services:
       context: ./admin-panel
       dockerfile: Dockerfile.prod
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.pushable.ai}
     restart: unless-stopped
     ports:
       - "${ADMIN_PANEL_PORT:-3002}:3002"
@@ -137,7 +139,7 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-abhishek0003}@postgres:5432/${POSTGRES_DB:-pushable_ai}
       AUTH_SECRET: ${AUTH_SECRET:-pushable-admin-secret-key-change-in-prod}
-      ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-false}
+      ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-true}
     depends_on:
       - backend
 

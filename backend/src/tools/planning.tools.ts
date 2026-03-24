@@ -54,7 +54,8 @@ export function buildPlanningTools(
         new DynamicStructuredTool({
             name: "update_todo",
             description:
-                "Update the status of a todo in your plan. Call this as you start and complete each step.",
+                "Update the status of a todo in your plan. You MUST call this TWICE per step: " +
+                "once with 'in_progress' BEFORE starting, and once with 'completed' AFTER finishing. Never skip this.",
             schema: z.object({
                 id: z.string().describe("The todo ID to update"),
                 status: z.enum(["in_progress", "completed"]).describe("New status"),

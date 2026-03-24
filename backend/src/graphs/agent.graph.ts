@@ -1217,9 +1217,19 @@ Rules:
                 const icon = t.status === "completed" ? "done" : t.status === "in_progress" ? "..." : " ";
                 return `${i + 1}. [${icon}] ${t.title}${t.result ? ` → ${t.result}` : ""}`;
             }).join("\n");
+            const nextPending = currentTodos.find((t) => t.status === "pending");
+            const inProgress = currentTodos.find((t) => t.status === "in_progress");
+            let instruction = "";
+            if (inProgress) {
+                instruction = `Step "${inProgress.title}" is in_progress. Complete it, then call \`update_todo("${inProgress.id}", "completed", "<result>")\` immediately.`;
+            } else if (nextPending) {
+                instruction = `Next step: "${nextPending.title}". Call \`update_todo("${nextPending.id}", "in_progress")\` NOW before doing anything else, then execute it.`;
+            } else {
+                instruction = `All steps completed. Summarize results to the user.`;
+            }
             systemPromptParts.push(
                 `## Current Plan (${completed}/${currentTodos.length} completed)\n${todoLines}\n\n` +
-                `Continue executing the next pending step. Update each todo as you work on it.`
+                `**IMPORTANT:** ${instruction} You MUST call update_todo before and after each step — never skip it.`
             );
         }
 

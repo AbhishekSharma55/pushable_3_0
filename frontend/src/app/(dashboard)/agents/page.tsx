@@ -57,7 +57,7 @@ import { getAgents, deleteAgent, updateAgent } from '@/lib/api/agents';
 import { getSessions, createSession, getMessages, deleteSession } from '@/lib/api/sessions';
 import { API_URL } from '@/lib/constants';
 import { getToken } from '@/lib/auth';
-import { parseArtifact } from '@/lib/artifact-parser';
+import { parseArtifact, detectStreamingArtifact } from '@/lib/artifact-parser';
 import type { Artifact } from '@/lib/artifact-parser';
 import { ArtifactPanel, FileIcon } from '@/components/artifact';
 import { downloadArtifact } from '@/lib/artifact-download';
@@ -1206,10 +1206,31 @@ export default function AgentsPage() {
                                                         // Helper to render assistant text content
                                                         const renderAssistantText = (text: string, isStreaming?: boolean) => {
                                                             const sanitized = stripToolCallXml(text);
-                                                            const { artifact, cleanMessage } = isStreaming
-                                                                ? { artifact: null, cleanMessage: sanitized }
-                                                                : parseArtifact(sanitized);
-                                                            if (!cleanMessage && !artifact && !isStreaming) return null;
+                                                            let artifact: Artifact | null = null;
+                                                            let cleanMessage: string = sanitized;
+                                                            let isArtifactStreaming = false;
+                                                            let streamingArtifactType: string | undefined;
+                                                            let streamingArtifactFilename: string | undefined;
+
+                                                            if (isStreaming) {
+                                                                // During streaming: detect artifact tag and hide raw XML
+                                                                const detected = detectStreamingArtifact(sanitized);
+                                                                cleanMessage = detected.cleanMessage;
+                                                                isArtifactStreaming = detected.isArtifactStreaming;
+                                                                streamingArtifactType = detected.type;
+                                                                streamingArtifactFilename = detected.filename;
+                                                                // If the closed artifact was detected in one chunk during streaming
+                                                                if (!detected.isArtifactStreaming && detected.type) {
+                                                                    const parsed = parseArtifact(sanitized);
+                                                                    artifact = parsed.artifact;
+                                                                    cleanMessage = parsed.cleanMessage;
+                                                                }
+                                                            } else {
+                                                                const parsed = parseArtifact(sanitized);
+                                                                artifact = parsed.artifact;
+                                                                cleanMessage = parsed.cleanMessage;
+                                                            }
+                                                            if (!cleanMessage && !artifact && !isArtifactStreaming && !isStreaming) return null;
                                                             return (
                                                                 <div className="flex gap-3">
                                                                     <div className="flex h-7 w-7 items-center justify-center rounded-full bg-muted flex-shrink-0 mt-0.5"><Bot className="h-3.5 w-3.5 text-muted-foreground" /></div>
@@ -1263,6 +1284,20 @@ export default function AgentsPage() {
                                                                                             <button className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors flex-shrink-0" onClick={() => downloadArtifact(artifact)} title="Download">
                                                                                                 <Download className="h-3.5 w-3.5" />
                                                                                             </button>
+                                                                                        </div>
+                                                                                    )}
+                                                                                    {isArtifactStreaming && !artifact && (
+                                                                                        <div className={`flex items-center gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5 animate-pulse ${cleanMessage ? 'mt-3' : ''}`}>
+                                                                                            {streamingArtifactType ? (
+                                                                                                <FileIcon type={streamingArtifactType as Artifact['type']} className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                                                                                            ) : (
+                                                                                                <Loader2 className="h-5 w-5 text-muted-foreground flex-shrink-0 animate-spin" />
+                                                                                            )}
+                                                                                            <div className="flex-1 min-w-0">
+                                                                                                <p className="text-sm font-medium truncate">{streamingArtifactFilename || 'Generating artifact...'}</p>
+                                                                                                <p className="text-[11px] text-muted-foreground">{streamingArtifactType?.toUpperCase() || 'ARTIFACT'}</p>
+                                                                                            </div>
+                                                                                            <Loader2 className="h-4 w-4 text-muted-foreground animate-spin flex-shrink-0" />
                                                                                         </div>
                                                                                     )}
                                                                                 </>

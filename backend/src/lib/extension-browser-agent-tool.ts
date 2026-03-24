@@ -42,7 +42,8 @@ export function buildExtensionBrowserAgentTool(
     workspaceId: string,
     modelMultiplier: number,
     temperature: number,
-    onEvent?: BrowserAgentEventEmitter
+    onEvent?: BrowserAgentEventEmitter,
+    browserModelId?: string
 ): DynamicStructuredTool | null {
     // Get extension browser tools
     let extTools: DynamicStructuredTool[];
@@ -125,9 +126,10 @@ export function buildExtensionBrowserAgentTool(
             );
 
             try {
-                // Always use Gemini Flash for browser agent — optimised for speed
-                const BROWSER_AGENT_MODEL = "google/gemini-3-flash-preview";
-                const { llm } = createLLM({ modelId: BROWSER_AGENT_MODEL, temperature });
+                // Use model from admin panel system_settings, fallback to Gemini Flash
+                const resolvedModel = browserModelId || "google/gemini-3-flash-preview";
+                logger.info({ modelId: resolvedModel }, "Extension browser agent creating LLM with model");
+                const { llm } = createLLM({ modelId: resolvedModel, temperature });
                 const llmWithTools = llm.bindTools(wrappedTools);
 
                 // --- Agent node ---

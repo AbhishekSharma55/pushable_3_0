@@ -245,6 +245,7 @@ export async function buildBrowserAgentTool(
 
             try {
                 // Fresh LLM per invocation (stateless)
+                logger.info({ modelId }, "Browser agent creating LLM with model");
                 const { llm } = createLLM({ modelId, temperature });
                 const llmWithTools = llm.bindTools(wrappedBrowserTools);
 

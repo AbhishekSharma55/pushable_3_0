@@ -114,11 +114,12 @@ class ExtensionBridgeClient {
         }
     }
 
-    /** Send a command through the bridge to the extension */
+    /** Send a command through the bridge to the extension for a specific workspace */
     async execute(
         action: string,
         params: Record<string, unknown> = {},
-        timeout?: number
+        timeout?: number,
+        workspaceId?: string
     ): Promise<CommandResult> {
         if (!this.isConnected()) {
             return {
@@ -142,7 +143,7 @@ class ExtensionBridgeClient {
 
             this.pending.set(commandId, { resolve, reject, timer });
 
-            const sent = this.send({ commandId, action, ...params });
+            const sent = this.send({ commandId, action, workspaceId, ...params });
             if (!sent) {
                 clearTimeout(timer);
                 this.pending.delete(commandId);
@@ -217,8 +218,12 @@ function getExtensionBridgeClient(): ExtensionBridgeClient {
 
 // --- LangGraph Tools ---
 
-export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
+export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructuredTool[] {
     const client = getExtensionBridgeClient();
+
+    /** Execute a command scoped to this workspace */
+    const exec = (action: string, params: Record<string, unknown> = {}, timeout?: number) =>
+        exec(action, params, timeout, workspaceId);
 
     const safe = async (fn: () => Promise<string>): Promise<string> => {
         try {
@@ -251,7 +256,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
                     );
                 }
                 // Try a quick command to see if extension is actually connected
-                const result = await client.execute("getTabList", {}, 5000);
+                const result = await exec("getTabList", {}, 5000);
                 if (result.success) {
                     const tabs = Array.isArray(result.data)
                         ? result.data.length
@@ -279,7 +284,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
                 url: z.string().describe("The URL to navigate to"),
             }),
             func: async ({ url }: { url: string }) =>
-                safe(async () => fmt(await client.execute("navigate", { url }))),
+                safe(async () => fmt(await exec("navigate", { url }))),
         }),
 
         new DynamicStructuredTool({
@@ -293,7 +298,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             }),
             func: async ({ selector }: { selector: string }) =>
                 safe(async () =>
-                    fmt(await client.execute("click", { selector }))
+                    fmt(await exec("click", { selector }))
                 ),
         }),
 
@@ -309,7 +314,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             }),
             func: async ({ selector, text }: { selector: string; text: string }) =>
                 safe(async () =>
-                    fmt(await client.execute("type", { selector, text }))
+                    fmt(await exec("type", { selector, text }))
                 ),
         }),
 
@@ -330,7 +335,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             func: async ({ selector, text, delay }: { selector: string; text: string; delay: number }) =>
                 safe(async () =>
                     fmt(
-                        await client.execute("typeChar", {
+                        await exec("typeChar", {
                             selector,
                             text,
                             delay,
@@ -346,7 +351,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             schema: z.object({}),
             func: async () =>
                 safe(async () =>
-                    fmt(await client.execute("getPageInfo", {}))
+                    fmt(await exec("getPageInfo", {}))
                 ),
         }),
 
@@ -357,7 +362,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             schema: z.object({}),
             func: async () =>
                 safe(async () =>
-                    fmt(await client.execute("getElements", {}))
+                    fmt(await exec("getElements", {}))
                 ),
         }),
 
@@ -368,7 +373,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             schema: z.object({}),
             func: async () =>
                 safe(async () => {
-                    const r = await client.execute("screenshot", {});
+                    const r = await exec("screenshot", {});
                     if (!r.success) return `Error: ${r.error}`;
                     return "Screenshot captured.";
                 }),
@@ -389,7 +394,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             }),
             func: async ({ y, selector }: { y: number; selector?: string }) =>
                 safe(async () =>
-                    fmt(await client.execute("scroll", { y, selector }))
+                    fmt(await exec("scroll", { y, selector }))
                 ),
         }),
 
@@ -406,7 +411,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             func: async ({ selector, timeout }: { selector: string; timeout: number }) =>
                 safe(async () =>
                     fmt(
-                        await client.execute("waitForElement", {
+                        await exec("waitForElement", {
                             selector,
                             timeout,
                         })
@@ -423,7 +428,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             }),
             func: async ({ key }: { key: string }) =>
                 safe(async () =>
-                    fmt(await client.execute("keyPress", { key }))
+                    fmt(await exec("keyPress", { key }))
                 ),
         }),
 
@@ -435,7 +440,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             }),
             func: async ({ script }: { script: string }) =>
                 safe(async () =>
-                    fmt(await client.execute("evaluate", { script }))
+                    fmt(await exec("evaluate", { script }))
                 ),
         }),
 
@@ -448,7 +453,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             }),
             func: async ({ url }: { url?: string }) =>
                 safe(async () =>
-                    fmt(await client.execute("newTab", { url }))
+                    fmt(await exec("newTab", { url }))
                 ),
         }),
 
@@ -460,7 +465,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             }),
             func: async ({ tabId }: { tabId: number }) =>
                 safe(async () =>
-                    fmt(await client.execute("closeTab", { tabId }))
+                    fmt(await exec("closeTab", { tabId }))
                 ),
         }),
 
@@ -470,7 +475,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             schema: z.object({}),
             func: async () =>
                 safe(async () =>
-                    fmt(await client.execute("getTabList", {}))
+                    fmt(await exec("getTabList", {}))
                 ),
         }),
 
@@ -482,7 +487,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             }),
             func: async ({ tabId }: { tabId: number }) =>
                 safe(async () =>
-                    fmt(await client.execute("switchTab", { tabId }))
+                    fmt(await exec("switchTab", { tabId }))
                 ),
         }),
 
@@ -492,7 +497,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             schema: z.object({}),
             func: async () =>
                 safe(async () =>
-                    fmt(await client.execute("goBack", {}))
+                    fmt(await exec("goBack", {}))
                 ),
         }),
 
@@ -502,7 +507,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             schema: z.object({}),
             func: async () =>
                 safe(async () =>
-                    fmt(await client.execute("reload", {}))
+                    fmt(await exec("reload", {}))
                 ),
         }),
 
@@ -517,7 +522,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             }),
             func: async ({ selector, value }: { selector: string; value: string }) =>
                 safe(async () =>
-                    fmt(await client.execute("select", { selector, value }))
+                    fmt(await exec("select", { selector, value }))
                 ),
         }),
 
@@ -531,7 +536,7 @@ export function buildExtensionBrowserTools(): DynamicStructuredTool[] {
             }),
             func: async ({ selector }: { selector: string }) =>
                 safe(async () =>
-                    fmt(await client.execute("hover", { selector }))
+                    fmt(await exec("hover", { selector }))
                 ),
         }),
     ];

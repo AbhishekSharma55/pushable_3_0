@@ -1,8 +1,11 @@
 /**
- * Extension Bridge — WebSocket Server
+ * Extension Bridge — WebSocket Server (Workspace-Isolated)
  *
- * Creates a WebSocket server that the Chrome Browser Agent extension connects to.
- * Handles connection lifecycle, heartbeat, API key auth, and message routing.
+ * Each Chrome extension connects with a workspace API key.
+ * Commands from the backend include a workspaceId and are routed ONLY
+ * to the extension that belongs to that workspace.
+ *
+ * This prevents cross-workspace browser manipulation.
  */
 
 import { WebSocketServer, WebSocket } from 'ws';
@@ -17,13 +20,20 @@ import type {
   BridgeStatusMessage,
 } from './types.js';
 
+interface ExtensionConnection {
+  socket: WebSocket;
+  workspaceId: string;
+  lastPong: number;
+}
+
 export class BridgeServer extends EventEmitter {
   private wss: WebSocketServer | null = null;
-  private extensionClient: WebSocket | null = null;
+  /** Map of workspaceId → extension connection (one extension per workspace) */
+  private extensions: Map<string, ExtensionConnection> = new Map();
   private backendClient: WebSocket | null = null;
-  private frontendClients: Set<WebSocket> = new Set();
+  /** Map of workspaceId → Set of frontend viewer sockets */
+  private frontendClients: Map<string, Set<WebSocket>> = new Map();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  private lastPong: number = 0;
   private config: Required<Omit<BridgeConfig, 'backendUrl' | 'apiKey'>> & {
     apiKey?: string;
     backendUrl?: string;
@@ -70,16 +80,18 @@ export class BridgeServer extends EventEmitter {
   /** Stop the server and disconnect */
   stop(): void {
     this.stopHeartbeat();
-    if (this.extensionClient) {
-      try { this.extensionClient.close(); } catch (_) { /* ignore */ }
-      this.extensionClient = null;
+    for (const [, ext] of this.extensions) {
+      try { ext.socket.close(); } catch (_) { /* ignore */ }
     }
+    this.extensions.clear();
     if (this.backendClient) {
       try { this.backendClient.close(); } catch (_) { /* ignore */ }
       this.backendClient = null;
     }
-    for (const client of this.frontendClients) {
-      try { client.close(); } catch (_) { /* ignore */ }
+    for (const [, clients] of this.frontendClients) {
+      for (const client of clients) {
+        try { client.close(); } catch (_) { /* ignore */ }
+      }
     }
     this.frontendClients.clear();
     if (this.wss) {
@@ -89,18 +101,30 @@ export class BridgeServer extends EventEmitter {
     this.log('🛑 Bridge server stopped');
   }
 
-  /** Send a JSON message to the connected extension */
-  send(message: Record<string, unknown>): boolean {
-    if (!this.extensionClient || this.extensionClient.readyState !== WebSocket.OPEN) {
-      return false;
+  /** Send a JSON message to the extension for a specific workspace */
+  send(message: Record<string, unknown>, workspaceId?: string): boolean {
+    // If workspaceId provided, route to that workspace's extension
+    if (workspaceId) {
+      const ext = this.extensions.get(workspaceId);
+      if (!ext || ext.socket.readyState !== WebSocket.OPEN) return false;
+      try {
+        ext.socket.send(JSON.stringify(message));
+        return true;
+      } catch (err) {
+        this.emit('error', err instanceof Error ? err : new Error(String(err)));
+        return false;
+      }
     }
-    try {
-      this.extensionClient.send(JSON.stringify(message));
-      return true;
-    } catch (err) {
-      this.emit('error', err instanceof Error ? err : new Error(String(err)));
-      return false;
+    // Legacy: no workspaceId — send to first connected extension (backward compat)
+    for (const [, ext] of this.extensions) {
+      if (ext.socket.readyState === WebSocket.OPEN) {
+        try {
+          ext.socket.send(JSON.stringify(message));
+          return true;
+        } catch (_) { /* try next */ }
+      }
     }
+    return false;
   }
 
   /** Send a JSON message to the connected backend */
@@ -116,26 +140,40 @@ export class BridgeServer extends EventEmitter {
     }
   }
 
-  /** Broadcast a raw JSON string buffer to all connected frontend UI clients */
-  private broadcastToFrontend(data: string): void {
-    for (const client of this.frontendClients) {
-      if (client.readyState === WebSocket.OPEN) {
-        try {
-          client.send(data);
-        } catch (_) { /* ignore dead sockets */ }
+  /** Broadcast to frontend clients for a specific workspace */
+  private broadcastToFrontend(data: string, workspaceId?: string): void {
+    if (workspaceId) {
+      const clients = this.frontendClients.get(workspaceId);
+      if (!clients) return;
+      for (const client of clients) {
+        if (client.readyState === WebSocket.OPEN) {
+          try { client.send(data); } catch (_) { /* ignore */ }
+        }
+      }
+    } else {
+      // Legacy: broadcast to all
+      for (const [, clients] of this.frontendClients) {
+        for (const client of clients) {
+          if (client.readyState === WebSocket.OPEN) {
+            try { client.send(data); } catch (_) { /* ignore */ }
+          }
+        }
       }
     }
   }
 
-  /** Check if an extension is currently connected */
-  isConnected(): boolean {
-    return this.extensionClient !== null && this.extensionClient.readyState === WebSocket.OPEN;
+  /** Check if an extension is currently connected for a workspace */
+  isConnected(workspaceId?: string): boolean {
+    if (workspaceId) {
+      const ext = this.extensions.get(workspaceId);
+      return ext !== undefined && ext.socket.readyState === WebSocket.OPEN;
+    }
+    return this.extensions.size > 0;
   }
 
   /** Get current connection state */
   getState(): ConnectionState {
-    if (this.extensionClient && this.extensionClient.readyState === WebSocket.OPEN) return 'connected';
-    if (this.extensionClient && this.extensionClient.readyState === WebSocket.CONNECTING) return 'connecting';
+    if (this.extensions.size > 0) return 'connected';
     return 'disconnected';
   }
 
@@ -144,48 +182,11 @@ export class BridgeServer extends EventEmitter {
   private async handleConnection(socket: WebSocket, req: IncomingMessage): Promise<void> {
     const url = new URL(req.url || '/', `http://localhost:${this.config.port}`);
     const key = url.searchParams.get('key') || '';
-    const role = url.searchParams.get('role'); // e.g. 'backend'
+    const role = url.searchParams.get('role'); // e.g. 'backend', 'frontend'
+    const queryWorkspaceId = url.searchParams.get('workspaceId') || '';
 
-    // API key validation
-    let isAuthorized = false;
-
-    // 1. Dynamic Validation if backend URL is provided
-    if (this.config.backendUrl && key) {
-      try {
-        const res = await fetch(`${this.config.backendUrl}/api/internal/extension/validate-key?key=${key}`);
-        if (res.ok) {
-          const body = await res.json();
-          if (body.valid) isAuthorized = true;
-        }
-      } catch (err) {
-        this.log(`⚠️ Failed to validate API key via backend: ${err}`);
-      }
-    }
-
-    // 2. Static Validation fallback
-    if (!isAuthorized && this.config.apiKey && key === this.config.apiKey) {
-      isAuthorized = true;
-    }
-
-    // Backend and frontend roles connect from internal Docker network — skip key validation for them
-    if (role === 'backend' || role === 'frontend') {
-      isAuthorized = true;
-    }
-
-    // Reject if neither validation method passed (authentication enforced if static key OR backend URL is configured)
-    const authRequired = !!this.config.apiKey || !!this.config.backendUrl;
-    if (authRequired && !isAuthorized) {
-      this.log(`🚫 Connection rejected: invalid API key (Role: ${role || 'extension'})`);
-      // Delay closing by 50ms so the HTTP Upgrade response has time to flush to the client.
-      // Otherwise Chrome receives a TCP RST and surfaces a 1006 error instead of our 4001 code.
-      setTimeout(() => {
-        socket.close(4001, 'Invalid API key');
-      }, 50);
-      return;
-    }
-
+    // --- Backend connection (internal Docker network) ---
     if (role === 'backend') {
-      // Handle Pushable Backend connection
       if (this.backendClient && this.backendClient.readyState === WebSocket.OPEN) {
         this.log('ℹ️  Replacing existing backend connection');
         try { this.backendClient.close(1000, 'Replaced'); } catch (_) { /* ignore */ }
@@ -196,17 +197,30 @@ export class BridgeServer extends EventEmitter {
       socket.on('message', (data: Buffer | string) => {
         try {
           const msg = JSON.parse(data.toString());
-          // The backend sends commands. Forward them directly to the extension.
-          if (this.extensionClient && this.extensionClient.readyState === WebSocket.OPEN) {
-            this.extensionClient.send(data.toString());
-          } else {
-            // Extension isn't connected; send an error back instantly so the agent doesn't hang
+          const targetWorkspaceId = msg.workspaceId as string | undefined;
+
+          if (!targetWorkspaceId) {
+            // No workspaceId in command — reject
             this.sendToBackend({
               type: 'result',
               commandId: msg.commandId,
               success: false,
               action: msg.action,
-              error: 'Chrome Extension is not connected to the bridge',
+              error: 'No workspaceId in command — cannot route to extension',
+            });
+            return;
+          }
+
+          const ext = this.extensions.get(targetWorkspaceId);
+          if (ext && ext.socket.readyState === WebSocket.OPEN) {
+            ext.socket.send(data.toString());
+          } else {
+            this.sendToBackend({
+              type: 'result',
+              commandId: msg.commandId,
+              success: false,
+              action: msg.action,
+              error: 'Chrome Extension is not connected for this workspace',
             });
           }
         } catch (err) {
@@ -223,17 +237,28 @@ export class BridgeServer extends EventEmitter {
       return;
     }
 
+    // --- Frontend Live View connection ---
     if (role === 'frontend') {
-      // Handle Frontend Live View connection
-      this.frontendClients.add(socket);
-      this.log(`👀 Frontend UI connected (Total: ${this.frontendClients.size})`);
+      const wsId = queryWorkspaceId;
+      if (!wsId) {
+        this.log(`🚫 Frontend connection rejected: no workspaceId`);
+        setTimeout(() => socket.close(4002, 'workspaceId required'), 50);
+        return;
+      }
+
+      let clients = this.frontendClients.get(wsId);
+      if (!clients) {
+        clients = new Set();
+        this.frontendClients.set(wsId, clients);
+      }
+      clients.add(socket);
+      this.log(`👀 Frontend UI connected for workspace ${wsId.substring(0, 8)}... (Total: ${clients.size})`);
 
       socket.on('message', (data: Buffer | string) => {
         try {
-          // A user clicked/typed on the live view video feed in the dashboard.
-          // Forward that command directly into the extension.
-          if (this.extensionClient && this.extensionClient.readyState === WebSocket.OPEN) {
-            this.extensionClient.send(data.toString());
+          const ext = this.extensions.get(wsId);
+          if (ext && ext.socket.readyState === WebSocket.OPEN) {
+            ext.socket.send(data.toString());
           }
         } catch (err) {
           this.log(`⚠️ Invalid message from frontend UI: ${err}`);
@@ -241,25 +266,66 @@ export class BridgeServer extends EventEmitter {
       });
 
       socket.on('close', () => {
-        this.frontendClients.delete(socket);
-        this.log(`👁️ Frontend UI disconnected (Total: ${this.frontendClients.size})`);
+        const c = this.frontendClients.get(wsId);
+        if (c) {
+          c.delete(socket);
+          this.log(`👁️ Frontend UI disconnected for workspace ${wsId.substring(0, 8)}... (Total: ${c.size})`);
+          if (c.size === 0) this.frontendClients.delete(wsId);
+        }
       });
       return;
     }
 
-    // Default: Handle Chrome Extension connection
-    if (this.extensionClient && this.extensionClient.readyState === WebSocket.OPEN) {
-      this.log('⚠️  Replacing existing extension connection with new one');
-      try { this.extensionClient.close(1000, 'Replaced by new connection'); } catch (_) { /* ignore */ }
+    // --- Chrome Extension connection ---
+    // Extension MUST provide an API key
+    if (!key) {
+      this.log(`🚫 Connection rejected: no API key provided`);
+      setTimeout(() => socket.close(4001, 'API key is required'), 50);
+      return;
     }
 
-    this.extensionClient = socket;
-    this.lastPong = Date.now();
-    this.log('✅ Chrome Extension connected');
+    // Validate API key and get workspaceId
+    let workspaceId: string | null = null;
 
-    // Track WebSocket-level pong responses (browser handles these even when service worker is suspended)
+    // 1. Dynamic validation via backend
+    if (this.config.backendUrl) {
+      try {
+        const res = await fetch(`${this.config.backendUrl}/api/internal/extension/validate-key?key=${key}`);
+        if (res.ok) {
+          const body = await res.json();
+          if (body.valid && body.workspaceId) {
+            workspaceId = body.workspaceId;
+          }
+        }
+      } catch (err) {
+        this.log(`⚠️ Failed to validate API key via backend: ${err}`);
+      }
+    }
+
+    // 2. Static key fallback (no workspace isolation possible)
+    if (!workspaceId && this.config.apiKey && key === this.config.apiKey) {
+      workspaceId = 'static-key';
+    }
+
+    if (!workspaceId) {
+      this.log(`🚫 Connection rejected: invalid API key`);
+      setTimeout(() => socket.close(4001, 'Invalid API key'), 50);
+      return;
+    }
+
+    // Replace existing extension for this workspace if any
+    const existing = this.extensions.get(workspaceId);
+    if (existing && existing.socket.readyState === WebSocket.OPEN) {
+      this.log(`⚠️  Replacing existing extension for workspace ${workspaceId.substring(0, 8)}...`);
+      try { existing.socket.close(1000, 'Replaced by new connection'); } catch (_) { /* ignore */ }
+    }
+
+    const conn: ExtensionConnection = { socket, workspaceId, lastPong: Date.now() };
+    this.extensions.set(workspaceId, conn);
+    this.log(`✅ Chrome Extension connected for workspace ${workspaceId.substring(0, 8)}... (Total extensions: ${this.extensions.size})`);
+
     socket.on('pong', () => {
-      this.lastPong = Date.now();
+      conn.lastPong = Date.now();
     });
 
     socket.on('message', (data: Buffer | string) => {
@@ -267,18 +333,20 @@ export class BridgeServer extends EventEmitter {
         const msgStr = data.toString();
         const msg = JSON.parse(msgStr) as ExtensionMessage;
 
-        // Update lastPong on any message (extension is clearly alive)
-        this.lastPong = Date.now();
+        conn.lastPong = Date.now();
 
-        // Forward back to backend if connected (the backend sent the command)
+        // Inject workspaceId into the message so backend knows which workspace it came from
+        const enrichedMsg = JSON.stringify({ ...msg, workspaceId });
+
+        // Forward to backend
         if (this.backendClient && this.backendClient.readyState === WebSocket.OPEN) {
-           this.backendClient.send(msgStr);
+          this.backendClient.send(enrichedMsg);
         }
 
-        // Broadcast to all connected frontend dashboards (Live View + Result logs)
-        this.broadcastToFrontend(msgStr);
+        // Broadcast to frontend viewers for THIS workspace only
+        this.broadcastToFrontend(msgStr, workspaceId);
 
-        // Process locally for the internal programmatic API
+        // Process locally
         this.handleMessage(msg);
       } catch (err) {
         this.emit('error', new Error(`Invalid message from extension: ${err}`));
@@ -286,9 +354,10 @@ export class BridgeServer extends EventEmitter {
     });
 
     socket.on('close', () => {
-      if (this.extensionClient === socket) {
-        this.extensionClient = null;
-        this.log('❌ Chrome Extension disconnected');
+      const ext = this.extensions.get(workspaceId!);
+      if (ext && ext.socket === socket) {
+        this.extensions.delete(workspaceId!);
+        this.log(`❌ Chrome Extension disconnected for workspace ${workspaceId!.substring(0, 8)}... (Total extensions: ${this.extensions.size})`);
         this.emit('disconnected');
       }
     });
@@ -315,30 +384,21 @@ export class BridgeServer extends EventEmitter {
         }
         break;
       case 'pong':
-        this.lastPong = Date.now();
         break;
       default:
-        // Unknown message type - ignore
         break;
     }
   }
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
-    // Use WebSocket-level ping/pong instead of app-level messages.
-    // This works even when Chrome's Manifest V3 service worker is suspended,
-    // because the browser's WebSocket implementation handles pong frames natively.
     this.heartbeatTimer = setInterval(() => {
-      if (!this.extensionClient || this.extensionClient.readyState !== WebSocket.OPEN) return;
-
-      // Use WebSocket protocol-level ping (handled by browser, not service worker JS)
-      try {
-        this.extensionClient.ping();
-      } catch (_) { /* ignore */ }
+      for (const [, ext] of this.extensions) {
+        if (ext.socket.readyState === WebSocket.OPEN) {
+          try { ext.socket.ping(); } catch (_) { /* ignore */ }
+        }
+      }
     }, this.config.heartbeatInterval);
-
-    // Listen for pong at the WebSocket protocol level
-    // Note: we set this up per-connection in handleConnection instead
   }
 
   private stopHeartbeat(): void {

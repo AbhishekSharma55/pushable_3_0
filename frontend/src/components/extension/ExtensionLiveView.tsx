@@ -26,10 +26,11 @@ export function ExtensionLiveView({ workspaceId }: { workspaceId: string }) {
                     return;
                 }
 
-                // Append role=frontend so the bridge accepts us
+                // Append role=frontend + workspaceId so the bridge routes frames correctly
                 const url = new URL(settings.wsUrl);
                 url.searchParams.set('role', 'frontend');
                 url.searchParams.set('key', settings.apiKey);
+                url.searchParams.set('workspaceId', workspaceId);
 
                 const ws = new WebSocket(url.toString());
                 wsRef.current = ws;

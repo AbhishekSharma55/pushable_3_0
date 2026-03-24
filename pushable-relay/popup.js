@@ -39,7 +39,12 @@ connectBtn.addEventListener('click', async () => {
   const apiKey    = apiKeyEl.value.trim();
 
   if (!serverUrl) {
-    setStatus('disconnected', 'Enter server URL', 'Server URL is required to connect');
+    setStatus('error', 'Server URL required', 'Enter the WebSocket server URL to connect');
+    return;
+  }
+
+  if (!apiKey) {
+    setStatus('error', 'API Key required', 'Enter your workspace API key from Extension Settings');
     return;
   }
 

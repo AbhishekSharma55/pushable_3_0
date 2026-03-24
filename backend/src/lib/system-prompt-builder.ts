@@ -366,13 +366,19 @@ IMPORTANT:
             blocks.push(`## Extension Browser Agent (PRIMARY — User's Real Browser)
 
 You have access to the user's REAL Chrome browser through the Extension Browser Agent.
-This is your PRIMARY and DEFAULT browser — always use the \`extension_browser_agent\` tool for ALL browsing tasks.
+This is your PRIMARY and DEFAULT browser — ALWAYS use \`extension_browser_agent\` for ANY browsing task.
 
-Use the \`extension_browser_agent\` tool to delegate any web browsing task. Simply describe what you want done in natural language:
+**CRITICAL BEHAVIOR:**
+- When the user asks you to open a website, browse, search, click, interact with any web page → IMMEDIATELY use \`extension_browser_agent\`. Do NOT ask which browser to use. Do NOT wait to be told "use extension". This IS your browser.
+- The extension IS already connected. Do NOT waste time checking the connection unless a previous command failed.
+- For follow-up tasks in the same conversation (e.g. "now search for X", "click on that", "go back"), give instructions that reference the current state. The browser remembers its tabs and state between calls.
+- You do NOT need to say "open a new tab" unless the user specifically wants a new tab. If a tab is already open, work in it.
+
+Use the \`extension_browser_agent\` tool by describing what you want in natural language:
 - "Go to google.com and search for 'LangChain documentation'"
 - "Navigate to linkedin.com/in/username and extract their job title and company"
 - "Log into dashboard.example.com, go to settings, and change the timezone to UTC"
-- "Scrape the first 10 product names and prices from example-store.com/products"
+- "Search YouTube for 'artificial intelligence' and list the top 5 results"
 
 The extension browser agent will autonomously:
 - Navigate websites using the user's real Chrome browser (with their logged-in sessions)
@@ -381,17 +387,13 @@ The extension browser agent will autonomously:
 - Handle multi-step workflows (login flows, checkout, etc.)
 - Report results clearly
 
-WHEN TO USE:
-- For ALL web browsing tasks — this is your default browser
-- When interacting with any website
-- When the user asks to browse, navigate, click, type, or interact with web pages
-- When scraping data from websites
-
 HOW TO USE:
 - Give clear, specific instructions in the \`instruction\` field
 - Include target URLs when you know them
 - Describe the expected outcome or data you need
-- The extension browser agent handles all low-level interactions internally — you don't need to specify CSS selectors or individual clicks`);
+- For NEW tasks: say "Open youtube.com and search for X" — the browser agent will open it in a new tab automatically
+- For FOLLOW-UP tasks: say "Click the first video" or "Now search for Y" — the browser agent will find and switch to the existing tab automatically
+- The extension browser agent handles all low-level interactions internally — you don't need to specify tabs, CSS selectors, or individual clicks`);
 
             if (capabilities.hasBrowser) {
                 blocks.push(`## Internal Browser Agent (FALLBACK ONLY)
@@ -496,11 +498,11 @@ When deciding how to complete a task, follow this order:
    → If yes: delegate with full context
 
 6. BROWSER — Can only be done by interacting with a website?
-   → If yes: use \`extension_browser_agent\` (Chrome extension) as the PRIMARY browser
-   → Only fall back to \`browser_agent\` (internal) if the extension is disconnected
+   → Use \`extension_browser_agent\` IMMEDIATELY. Do not ask the user which browser. Do not mention "extension" or "Chrome extension" in your response — just do the task.
+   → Only fall back to \`browser_agent\` (internal) if extension_browser_agent explicitly returns a connection error.
 
 Never skip steps. A task that can be done with a tool should never reach the browser.
-When browsing IS needed, ALWAYS prefer extension_browser_agent over browser_agent.`);
+When browsing IS needed, use extension_browser_agent directly and silently — it is your default and only browser.`);
     }
 
     // --- BLOCK 5: System Level Access ---

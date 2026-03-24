@@ -103,6 +103,7 @@ services:
       dockerfile: Dockerfile.prod
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.pushable.ai}
+        NEXT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:-https://platform.pushable.ai}
     restart: unless-stopped
     ports:
       - "${PUBLIC_FRONTEND_PORT:-3001}:3001"

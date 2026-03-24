@@ -10,8 +10,10 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 
 ARG NEXT_PUBLIC_API_URL=https://api.pushable.ai
+ARG NEXT_PUBLIC_FRONTEND_URL=https://platform.pushable.ai
 
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_FRONTEND_URL=$NEXT_PUBLIC_FRONTEND_URL
 
 RUN pnpm run build
 

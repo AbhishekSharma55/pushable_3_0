@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { agentService } from "../services/agent.service.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
+import { invalidateGraphCache } from "../graphs/agent.graph.ts";
 
 const createAgentSchema = z.object({
     name: z.string().min(1, "Name is required"),
@@ -81,6 +82,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
         const { id } = request.params as { id: string };
         const body = updateAgentSchema.parse(request.body);
         const agent = await agentService.updateAgent(id, workspaceId, body);
+        invalidateGraphCache(id, workspaceId);
         return { data: agent };
     });
 
@@ -89,6 +91,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const { id } = request.params as { id: string };
         await agentService.deleteAgent(id, workspaceId);
+        invalidateGraphCache(id, workspaceId);
         return reply.status(204).send();
     });
 
@@ -97,6 +100,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const { id } = request.params as { id: string };
         const body = systemPermissionsSchema.parse(request.body);
+        invalidateGraphCache(id, workspaceId);
         const agent = await agentService.updateSystemPermissions(
             id,
             workspaceId,

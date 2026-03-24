@@ -345,6 +345,19 @@ export default function AgentsPage() {
                         const approvalMsg = [...hydrated].reverse().find((m) => m.approvalRequest);
                         if (approvalMsg?.approvalRequest) {
                             setPendingApproval({ msgId: approvalMsg.id, request: approvalMsg.approvalRequest });
+                        } else {
+                            // Fallback: approvalRequest wasn't persisted in message metadata.
+                            // Show a generic confirmation card on the last assistant message.
+                            const lastAssistant = [...hydrated].reverse().find((m) => m.role === 'assistant');
+                            if (lastAssistant) {
+                                const fallbackRequest: ApprovalRequest = {
+                                    type: 'confirmation',
+                                    question: 'This action requires your approval to proceed.',
+                                };
+                                lastAssistant.approvalRequest = fallbackRequest;
+                                setMessages([...hydrated]);
+                                setPendingApproval({ msgId: lastAssistant.id, request: fallbackRequest });
+                            }
                         }
                     }
                 }
@@ -798,6 +811,19 @@ export default function AgentsPage() {
                     if (approvalMsg?.approvalRequest) {
                         setPendingApproval({ msgId: approvalMsg.id, request: approvalMsg.approvalRequest });
                         setSending(false);
+                    } else {
+                        // Fallback: approvalRequest wasn't persisted in message metadata
+                        const lastAssistant = [...hydrated].reverse().find((m) => m.role === 'assistant');
+                        if (lastAssistant) {
+                            const fallbackRequest: ApprovalRequest = {
+                                type: 'confirmation',
+                                question: 'This action requires your approval to proceed.',
+                            };
+                            lastAssistant.approvalRequest = fallbackRequest;
+                            setMessages([...hydrated]);
+                            setPendingApproval({ msgId: lastAssistant.id, request: fallbackRequest });
+                            setSending(false);
+                        }
                     }
                     return;
                 }

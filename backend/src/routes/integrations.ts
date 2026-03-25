@@ -1,7 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { integrationService } from "../services/integration.service.ts";
+import { integrationRepository } from "../repositories/integration.repository.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
+import { getStore } from "../graphs/agent.graph.ts";
+import { logger } from "../lib/logger.ts";
 
 const connectSchema = z.object({
     toolkitSlug: z.string().min(1),
@@ -196,5 +199,117 @@ export async function integrationRoutes(fastify: FastifyInstance) {
             workspaceId
         );
         return { data: integrations };
+    });
+
+    // GET /integrations/:id/learnings — fetch tool learnings for an integration's toolkit
+    fastify.get("/integrations/:id/learnings", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { id } = request.params as { id: string };
+
+        // Look up the integration to get its toolkit slug
+        const integration = await integrationRepository.findById(id, workspaceId);
+        if (!integration) {
+            throw new AppError("Integration not found", 404, "NOT_FOUND");
+        }
+
+        const store = await getStore();
+        // Search across all tool_learnings namespaces for this workspace
+        // and filter by toolkit slug prefix (e.g. "GMAIL_" for gmail toolkit)
+        const toolkitSlug = integration.composioToolkitSlug.toUpperCase();
+
+        try {
+            // List all tool_learnings namespaces for this workspace
+            const namespaces = await store.listNamespaces({
+                prefix: [workspaceId, "tool_learnings"],
+                limit: 100,
+            });
+
+            const learnings: Array<{
+                key: string;
+                tool: string;
+                learning: string;
+                extractedAt: string;
+                sourceAgentId?: string;
+            }> = [];
+
+            // Search each namespace that matches the toolkit prefix
+            for (const ns of namespaces) {
+                const toolName = ns[ns.length - 1];
+                // Match tools belonging to this integration's toolkit
+                // e.g. toolkit "gmail" matches tools like "GMAIL_SEND_EMAIL", "GMAIL_LIST_EMAILS"
+                // Also include exact Composio meta-tools if they reference this toolkit
+                const toolUpper = toolName.toUpperCase();
+                if (
+                    toolUpper.startsWith(toolkitSlug + "_") ||
+                    toolUpper === toolkitSlug ||
+                    toolUpper === `COMPOSIO_${toolkitSlug}`
+                ) {
+                    const items = await store.search(ns, { limit: 50 });
+                    for (const item of items) {
+                        learnings.push({
+                            key: `${ns.join("/")}/${item.key}`,
+                            tool: toolName,
+                            learning: item.value.learning as string,
+                            extractedAt: (item.value.extractedAt as string) || "",
+                            sourceAgentId: item.value.sourceAgentId as string | undefined,
+                        });
+                    }
+                }
+            }
+
+            // Also check COMPOSIO_MULTI_EXECUTE_TOOL learnings that mention this toolkit
+            try {
+                const composioNs = [workspaceId, "tool_learnings", "COMPOSIO_MULTI_EXECUTE_TOOL"];
+                const composioItems = await store.search(composioNs, { limit: 50 });
+                for (const item of composioItems) {
+                    const learning = (item.value.learning as string) || "";
+                    if (learning.toUpperCase().includes(toolkitSlug)) {
+                        learnings.push({
+                            key: `${composioNs.join("/")}/${item.key}`,
+                            tool: "COMPOSIO_MULTI_EXECUTE_TOOL",
+                            learning,
+                            extractedAt: (item.value.extractedAt as string) || "",
+                            sourceAgentId: item.value.sourceAgentId as string | undefined,
+                        });
+                    }
+                }
+            } catch {
+                // Non-fatal — namespace may not exist yet
+            }
+
+            return { data: learnings };
+        } catch (error) {
+            logger.warn({ error, id, workspaceId }, "Failed to fetch tool learnings");
+            return { data: [] };
+        }
+    });
+
+    // DELETE /integrations/learnings/:key — delete a specific tool learning
+    fastify.delete("/integrations/learnings", async (request, reply) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { key } = request.query as { key: string };
+
+        if (!key) {
+            throw new AppError("key query parameter is required", 400, "MISSING_KEY");
+        }
+
+        // Parse the key back into namespace + item key
+        // Format: "workspaceId/tool_learnings/TOOL_NAME/uuid"
+        const parts = key.split("/");
+        if (parts.length < 4 || parts[0] !== workspaceId) {
+            throw new AppError("Invalid learning key", 400, "INVALID_KEY");
+        }
+
+        const namespace = parts.slice(0, -1);
+        const itemKey = parts[parts.length - 1];
+
+        try {
+            const store = await getStore();
+            await store.delete(namespace, itemKey);
+            return reply.status(204).send();
+        } catch (error) {
+            logger.warn({ error, key, workspaceId }, "Failed to delete tool learning");
+            throw new AppError("Failed to delete learning", 500, "DELETE_FAILED");
+        }
     });
 }

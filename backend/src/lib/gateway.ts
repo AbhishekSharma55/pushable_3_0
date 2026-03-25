@@ -48,7 +48,7 @@ export function createLLM(options: CreateLLMOptions) {
         temperature,
         streaming = true,
         maxRetries = 3,
-        effort = "low",
+        effort = "high",
     } = options;
 
     const useClaudeDirect =

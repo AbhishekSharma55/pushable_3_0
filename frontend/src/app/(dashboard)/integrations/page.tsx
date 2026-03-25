@@ -13,6 +13,8 @@ import {
     Pencil,
     Shield,
     Lock,
+    Brain,
+    X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -49,8 +51,10 @@ import {
     updateIntegration,
     getToolkitActions,
     updateToolPermissions,
+    getToolLearnings,
+    deleteToolLearning,
 } from '@/lib/api/integrations';
-import type { ToolkitAction, ToolPermissions } from '@/lib/api/integrations';
+import type { ToolkitAction, ToolPermissions, ToolLearning } from '@/lib/api/integrations';
 import { getVaultStatus, connectVault, disconnectVault } from '@/lib/api/vault';
 import type { VaultStatus } from '@/lib/api/vault';
 import type { Integration, Toolkit } from '@/types';
@@ -96,6 +100,13 @@ export default function IntegrationsPage() {
     const [selectedTools, setSelectedTools] = useState<Set<string>>(new Set());
     const [savingPerms, setSavingPerms] = useState(false);
     const [actionSearch, setActionSearch] = useState('');
+
+    // Learnings dialog state
+    const [learningsDialogOpen, setLearningsDialogOpen] = useState(false);
+    const [learningsIntegration, setLearningsIntegration] = useState<Integration | null>(null);
+    const [learnings, setLearnings] = useState<ToolLearning[]>([]);
+    const [loadingLearnings, setLoadingLearnings] = useState(false);
+    const [deletingLearningKey, setDeletingLearningKey] = useState<string | null>(null);
 
     // Bitwarden state
     const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
@@ -370,6 +381,34 @@ export default function IntegrationsPage() {
         }
     };
 
+    const handleOpenLearnings = async (integration: Integration) => {
+        setLearningsIntegration(integration);
+        setLearningsDialogOpen(true);
+        setLoadingLearnings(true);
+        try {
+            const result = await getToolLearnings(workspace!.id, integration.id);
+            setLearnings(result);
+        } catch {
+            toast.error('Failed to load learnings');
+        } finally {
+            setLoadingLearnings(false);
+        }
+    };
+
+    const handleDeleteLearning = async (key: string) => {
+        if (!workspace) return;
+        try {
+            setDeletingLearningKey(key);
+            await deleteToolLearning(workspace.id, key);
+            setLearnings(prev => prev.filter(l => l.key !== key));
+            toast.success('Learning deleted');
+        } catch {
+            toast.error('Failed to delete learning');
+        } finally {
+            setDeletingLearningKey(null);
+        }
+    };
+
     const handleSelectBitwarden = () => {
         console.log('🔐 Bitwarden button clicked');
         setBitwardenDialogOpen(true);
@@ -601,6 +640,13 @@ export default function IntegrationsPage() {
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-1">
+                                    <button
+                                        className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                        onClick={() => handleOpenLearnings(integration)}
+                                        title="Tool Learnings"
+                                    >
+                                        <Brain className="h-4 w-4" />
+                                    </button>
                                     <button
                                         className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                                         onClick={() => handleOpenPermissions(integration)}
@@ -947,6 +993,83 @@ export default function IntegrationsPage() {
                                 <Loader2 className="h-4 w-4 animate-spin" />
                             ) : null}
                             Connect Vault
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Tool Learnings Dialog */}
+            <Dialog open={learningsDialogOpen} onOpenChange={setLearningsDialogOpen}>
+                <DialogContent className="sm:max-w-xl max-h-[80vh] flex flex-col">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2">
+                            <Brain className="h-5 w-5 text-violet-500" />
+                            Tool Learnings — {learningsIntegration?.connectionLabel || learningsIntegration?.name}
+                        </DialogTitle>
+                        <DialogDescription>
+                            Lessons automatically learned from past conversations. These apply to all agents using this integration.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <div className="flex-1 overflow-y-auto min-h-0 -mx-1 px-1 space-y-2 py-2">
+                        {loadingLearnings ? (
+                            <div className="space-y-3">
+                                {Array.from({ length: 3 }).map((_, i) => (
+                                    <div key={i} className="rounded-lg border bg-card p-3 space-y-2">
+                                        <Skeleton className="h-4 w-3/4" />
+                                        <Skeleton className="h-3 w-1/2" />
+                                    </div>
+                                ))}
+                            </div>
+                        ) : learnings.length === 0 ? (
+                            <div className="flex flex-col items-center justify-center h-40 text-center">
+                                <Brain className="h-8 w-8 text-muted-foreground/40 mb-2" />
+                                <p className="text-sm text-muted-foreground">No learnings yet</p>
+                                <p className="text-xs text-muted-foreground/60 mt-1">
+                                    Learnings are automatically extracted when agents use this integration and encounter corrections or discover better approaches.
+                                </p>
+                            </div>
+                        ) : (
+                            learnings.map((learning) => (
+                                <div
+                                    key={learning.key}
+                                    className="group rounded-lg border bg-card p-3 hover:bg-accent/50 transition-colors"
+                                >
+                                    <div className="flex items-start justify-between gap-2">
+                                        <div className="flex-1 min-w-0">
+                                            <p className="text-sm">{learning.learning}</p>
+                                            <div className="flex items-center gap-2 mt-1.5">
+                                                <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-mono">
+                                                    {learning.tool}
+                                                </Badge>
+                                                {learning.extractedAt && (
+                                                    <span className="text-[10px] text-muted-foreground">
+                                                        {new Date(learning.extractedAt).toLocaleDateString()}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <button
+                                            className="p-1 rounded-md opacity-0 group-hover:opacity-100 hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-all"
+                                            onClick={() => handleDeleteLearning(learning.key)}
+                                            disabled={deletingLearningKey === learning.key}
+                                            title="Delete learning"
+                                        >
+                                            {deletingLearningKey === learning.key ? (
+                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                            ) : (
+                                                <X className="h-3.5 w-3.5" />
+                                            )}
+                                        </button>
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => setLearningsDialogOpen(false)}>
+                            Close
                         </Button>
                     </DialogFooter>
                 </DialogContent>

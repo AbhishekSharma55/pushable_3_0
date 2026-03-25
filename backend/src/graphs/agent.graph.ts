@@ -5,6 +5,7 @@ import { SystemMessage, AIMessage, HumanMessage, RemoveMessage, ToolMessage, typ
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { PostgresStore } from "@langchain/langgraph-checkpoint-postgres/store";
+import { OpenAIEmbeddings } from "@langchain/openai";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { z } from "zod";
 import { randomUUID } from "crypto";
@@ -176,65 +177,232 @@ function buildToolUsageSummary(messages: BaseMessage[]): string {
 
 /**
  * Quick scan of conversation messages for correction signals.
- * Returns true if user corrections or tool failures are detected,
- * indicating the reflection node should run a deeper analysis.
+ * Returns true when the reflection node should run a deeper LLM analysis.
+ *
+ * Detects three categories:
+ *  1. User corrections — phrases that indicate the user is correcting the agent
+ *  2. Multiple tool failures — 2+ distinct tool errors in the conversation
+ *  3. Tool self-correction — same tool retried with different args (fail→succeed),
+ *     or different tool succeeded after a prior tool failed
  */
 function detectCorrectionSignals(messages: BaseMessage[]): boolean {
-    const correctionPatterns = [
-        /no[,.]?\s+(do|use|try|that'?s|it'?s|i\s+meant|i\s+said|not\s+that)/i,
-        /that'?s\s+(wrong|incorrect|not\s+right|not\s+what)/i,
-        /i\s+meant/i,
-        /don'?t\s+do\s+(that|it\s+that\s+way)/i,
-        /instead[,.]?\s+(do|use|try)/i,
-        /wrong\s+(way|approach|method)/i,
-        /stop\s+(doing|using)/i,
-        /actually[,.]?\s+(i\s+want|do\s+it|use)/i,
-        /not\s+like\s+that/i,
-        /please\s+(fix|correct|change)/i,
+    // ── 1. User correction phrases ─────────────────────────────────────
+    // Each pattern is anchored with word boundaries (\b) where possible to
+    // avoid false positives on substrings (e.g. "notice" matching "not ice").
+    // Grouped by intent so it's easy to audit coverage.
+    const correctionPatterns: RegExp[] = [
+        // Direct negation / rejection
+        /\bno[,.\s]+(?:do(?:n'?t)?|use|try|that|not|i\s)/i,
+        /\bnot?\s+(?:like\s+that|what\s+i|that\s+way|correct|right|this\s+way)/i,
+        /\bthat(?:'?s|\s+is)\s+(?:wrong|incorrect|not\s+(?:right|correct|what|how))/i,
+        /\bthis\s+is\s+(?:wrong|incorrect|not\s+(?:right|correct|what|how))/i,
+
+        // User clarifies intent ("I meant X", "I said X", NOT just "I need X")
+        /\bi\s+(?:meant|said|asked\s+for|wanted)\b/i,
+        /\bwhat\s+i\s+(?:meant|want(?:ed)?|need(?:ed)?|asked)\b/i,
+        /\bi\s+didn'?t\s+(?:mean|say|ask|want)\b/i,
+
+        // User redirects approach
+        /\b(?:instead|rather)[,\s]+(?:do|use|try|of)\b/i,
+        /\bdon'?t\s+(?:do|use|send|call|run|delete|create|make|add|remove)\b/i,
+        /\bstop\s+(?:doing|using|sending|calling|running|trying)\b/i,
+        /\bplease\s+(?:fix|correct|change|update|redo|undo|revert|retry)\b/i,
+        /\bcan\s+you\s+(?:fix|correct|change|redo|undo|revert|retry)\b/i,
+
+        // User signals the agent was wrong
+        /\bwrong\s+(?:way|approach|method|tool|param(?:eter)?|format|file|url|path|endpoint)\b/i,
+        /\byou(?:'?re|\s+are)\s+(?:wrong|mistaken|confused|doing\s+it\s+wrong)\b/i,
+        /\bthat(?:'?s|\s+is)\s+(?:the\s+)?(?:old|outdated|deprecated|broken)\b/i,
+
+        // User overrides with the right answer
+        /\bactually[,\s]+(?:i\s+want|it(?:'?s|\s+is|\s+should)|do\s+it|use|the\s+(?:right|correct))\b/i,
+        /\bthe\s+(?:correct|right|proper)\s+(?:way|approach|method|param|format|url|path|tool)\b/i,
+        /\byou\s+should(?:'?ve|\s+have)?\s+(?:used|done|called|tried)\b/i,
+        /\bnext\s+time[,\s]+(?:do|use|try|make\s+sure|remember)\b/i,
+
+        // Explicit correction markers
+        /\bcorrection\s*:/i,
+        /\bfyi\s*:/i,
+        /\bnote\s*:\s*(?:it|the|you|that|this|don)/i,
+        /\bfor\s+(?:future|next\s+time)\b/i,
     ];
 
+    // ── 2. Tool call tracking structures ───────────────────────────────
+    // Map tool_call_id → { name, argsKey } from AIMessages
+    const toolCallMap = new Map<string, { name: string; argsKey: string }>();
+    // Track per-tool outcomes: tool name → { failedArgsKeys, succeededArgsKeys }
+    const toolOutcomes = new Map<string, { failed: Set<string>; succeeded: Set<string> }>();
     let toolFailureCount = 0;
 
     for (const msg of messages) {
+        // Check human messages for correction phrases
         if (msg instanceof HumanMessage) {
             const content = typeof msg.content === "string" ? msg.content : "";
-            if (correctionPatterns.some((p) => p.test(content))) {
+            if (content.length > 0 && correctionPatterns.some((p) => p.test(content))) {
                 return true;
             }
         }
-        if (msg instanceof ToolMessage) {
-            const content = typeof msg.content === "string" ? msg.content : "";
-            if (content.startsWith("Error:") || content.startsWith("Error ") || content.includes('"error"')) {
+
+        // Index tool calls from AI messages
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawToolCalls = (msg as any).tool_calls;
+        if (Array.isArray(rawToolCalls)) {
+            for (const tc of rawToolCalls as Array<{ id?: string; name: string; args?: Record<string, unknown> }>) {
+                if (tc.id) {
+                    // Create a stable key from sorted args to compare parameters
+                    const argsKey = tc.args
+                        ? JSON.stringify(Object.keys(tc.args).sort())
+                        : "{}";
+                    toolCallMap.set(tc.id, { name: tc.name, argsKey });
+                }
+            }
+        }
+
+        // Match tool results to their calls and track outcomes
+        if (msg instanceof ToolMessage && msg.tool_call_id) {
+            const callInfo = toolCallMap.get(msg.tool_call_id);
+            if (!callInfo) continue;
+
+            const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+            const isError =
+                content.startsWith("Error:") ||
+                content.startsWith("Error ") ||
+                content.includes('"error"') ||
+                content.includes('"Error"') ||
+                content.includes("ECONNREFUSED") ||
+                content.includes("ETIMEDOUT") ||
+                content.includes("401") ||
+                content.includes("403") ||
+                content.includes("404") ||
+                content.includes("500") ||
+                /\bnot\s+found\b/i.test(content) ||
+                /\bfailed\b/i.test(content) ||
+                /\bunauthorized\b/i.test(content) ||
+                /\bforbidden\b/i.test(content) ||
+                /\binvalid\b/i.test(content.slice(0, 200)); // Only check start to avoid false positives in data
+
+            if (isError) {
                 toolFailureCount++;
+            }
+
+            // Track per-tool outcomes
+            if (!toolOutcomes.has(callInfo.name)) {
+                toolOutcomes.set(callInfo.name, { failed: new Set(), succeeded: new Set() });
+            }
+            const outcomes = toolOutcomes.get(callInfo.name)!;
+            if (isError) {
+                outcomes.failed.add(callInfo.argsKey);
+            } else {
+                outcomes.succeeded.add(callInfo.argsKey);
             }
         }
     }
 
-    // Only trigger for multiple tool failures (single failure is normal)
-    return toolFailureCount >= 2;
+    // ── 3. Multiple tool failures ──────────────────────────────────────
+    if (toolFailureCount >= 2) {
+        return true;
+    }
+
+    // ── 4. Tool self-correction detection ──────────────────────────────
+    // Pattern A: Same tool called with different args — first failed, later succeeded.
+    // This means the agent discovered the right parameters through trial.
+    for (const [, outcomes] of toolOutcomes) {
+        if (outcomes.failed.size > 0 && outcomes.succeeded.size > 0) {
+            // Check that the failed and succeeded calls used different args
+            // (identical args means a transient error, not a discovery)
+            for (const failedArgs of outcomes.failed) {
+                for (const succeededArgs of outcomes.succeeded) {
+                    if (failedArgs !== succeededArgs) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Pattern B: Different tools tried for the same intent — one failed, another succeeded.
+    // Detected when we have both tool failures and tool successes across different tool names.
+    const toolsWithFailures = new Set<string>();
+    const toolsWithSuccesses = new Set<string>();
+    for (const [name, outcomes] of toolOutcomes) {
+        if (outcomes.failed.size > 0) toolsWithFailures.add(name);
+        if (outcomes.succeeded.size > 0) toolsWithSuccesses.add(name);
+    }
+    // If different tools failed vs succeeded, the agent discovered the right tool
+    if (toolsWithFailures.size > 0 && toolsWithSuccesses.size > 0) {
+        for (const successTool of toolsWithSuccesses) {
+            if (!toolsWithFailures.has(successTool)) {
+                // A tool that only succeeded exists alongside a tool that only failed
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 /**
- * Load procedural memory (agent-level learnings from past reflections)
- * from the LangGraph PostgresStore.
+ * Load tool-scoped procedural memory from LangGraph PostgresStore.
+ * Queries each tool's namespace with semantic search (when embeddings are configured)
+ * to find learnings relevant to the current user message.
+ * Learnings are workspace-wide — any agent using the same tool benefits.
  */
 async function loadProceduralMemory(
     store: PostgresStore,
     workspaceId: string,
-    agentId: string,
+    toolNames: string[],
+    userMessage?: string,
 ): Promise<string> {
     try {
-        const namespace = [workspaceId, agentId, "procedural_memory"];
-        const items = await store.search(namespace, { limit: 50 });
-        if (items.length === 0) return "";
+        if (toolNames.length === 0) return "";
 
-        const learnings = items
-            .map((item) => `- ${item.value.learning}`)
-            .join("\n");
+        // Deduplicate tool names and query each tool's namespace
+        const uniqueTools = [...new Set(toolNames)];
+        const allLearnings: Array<{ tool: string; learning: string }> = [];
+
+        // Query tool namespaces in parallel (with semantic search when available)
+        const searchPromises = uniqueTools.map(async (toolName) => {
+            const namespace = [workspaceId, "tool_learnings", toolName];
+            try {
+                const searchOpts: { limit: number; query?: string } = { limit: 5 };
+                // Use semantic search if we have a user message and embeddings are configured
+                if (userMessage) {
+                    searchOpts.query = userMessage;
+                }
+                const items = await store.search(namespace, searchOpts);
+                return items.map((item) => ({
+                    tool: toolName,
+                    learning: item.value.learning as string,
+                }));
+            } catch {
+                // Individual tool namespace query failure is non-fatal
+                return [];
+            }
+        });
+
+        const results = await Promise.all(searchPromises);
+        for (const items of results) {
+            allLearnings.push(...items);
+        }
+
+        if (allLearnings.length === 0) return "";
+
+        // Group by tool for clearer prompt injection
+        const byTool = new Map<string, string[]>();
+        for (const { tool, learning } of allLearnings) {
+            if (!byTool.has(tool)) byTool.set(tool, []);
+            byTool.get(tool)!.push(learning);
+        }
+
+        const sections = [...byTool.entries()]
+            .map(([tool, learnings]) =>
+                `**${tool}:**\n${learnings.map((l) => `- ${l}`).join("\n")}`
+            )
+            .join("\n\n");
 
         return (
             `## Learned Instructions (from past experience)\n` +
-            `These are lessons this agent learned from previous conversations. FOLLOW THEM:\n${learnings}`
+            `These are lessons learned from previous conversations. They apply to ALL agents using these tools. FOLLOW THEM:\n\n${sections}`
         );
     } catch (error) {
         logger.warn({ error }, "Failed to load procedural memory");
@@ -458,9 +626,31 @@ let storeInstance: PostgresStore | null = null;
 
 export async function getStore(): Promise<PostgresStore> {
     if (!storeInstance) {
-        storeInstance = PostgresStore.fromConnString(
-            process.env.DATABASE_URL!
-        );
+        // Configure vector search for procedural memory when OpenRouter is available
+        if (process.env.OPENROUTER_KEY) {
+            storeInstance = PostgresStore.fromConnString(
+                process.env.DATABASE_URL!,
+                {
+                    index: {
+                        dims: 1536,
+                        embed: new OpenAIEmbeddings({
+                            model: "text-embedding-3-small",
+                            configuration: {
+                                baseURL: "https://openrouter.ai/api/v1",
+                                apiKey: process.env.OPENROUTER_KEY,
+                                defaultHeaders: {
+                                    "HTTP-Referer": "https://pushable.ai",
+                                    "X-Title": "Pushable AI",
+                                },
+                            },
+                        }),
+                        fields: ["learning"], // Only embeds items with a "learning" field (procedural memory)
+                    },
+                },
+            );
+        } else {
+            storeInstance = PostgresStore.fromConnString(process.env.DATABASE_URL!);
+        }
         await storeInstance.setup();
     }
     return storeInstance;
@@ -1351,14 +1541,15 @@ export async function createAgentGraph(
             modelMultiplier,
         });
 
-        // Prepare KB query input before Promise.all
-        const lastUserMsg = allowedKbIds.length > 0
-            ? [...state.messages].reverse().find((m) => m instanceof HumanMessage)
-            : null;
+        // Extract latest user message for KB query and procedural memory semantic search
+        const lastUserMsg = [...state.messages].reverse().find((m) => m instanceof HumanMessage);
         const lastUserMsgContent =
             lastUserMsg && typeof lastUserMsg.content === "string"
                 ? lastUserMsg.content
                 : null;
+
+        // Collect tool names for procedural memory lookup
+        const agentToolNames = langchainTools.map((t) => t.name);
 
         // --- Run credit check, memories, notebook, procedural memory, and KB query in PARALLEL ---
         const [creditCheck, memories, notebookSection, proceduralMemorySection, kbResults] = await Promise.all([
@@ -1374,8 +1565,8 @@ export async function createAgentGraph(
             userId
                 ? loadNotebookEntries({ store, workspaceId, agentId, userId })
                 : Promise.resolve(""),
-            loadProceduralMemory(store, workspaceId, agentId),
-            lastUserMsgContent
+            loadProceduralMemory(store, workspaceId, agentToolNames, lastUserMsgContent ?? undefined),
+            lastUserMsgContent && allowedKbIds.length > 0
                 ? kbService
                       .queryKB(allowedKbIds, lastUserMsgContent, workspaceId, 5)
                       .catch((error) => {
@@ -1646,6 +1837,63 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
                 }
             }
 
+            // --- Detect "tools unavailable" hallucination and retry ---
+            // Claude sometimes hallucinates that tools are "temporarily unavailable"
+            // or "experiencing a platform issue" instead of actually calling them.
+            // When this is detected and tools ARE available, re-invoke with a correction.
+            const postRecoveryToolCalls = (response as AIMessage).tool_calls ?? [];
+            if (
+                postRecoveryToolCalls.length === 0 &&
+                langchainTools.length > 0 &&
+                responseContent.length > 0 &&
+                stepCount <= 2 // Only retry on early turns to avoid infinite loops
+            ) {
+                const toolUnavailablePatterns = [
+                    /tools?\s+(?:are|is)\s+(?:currently\s+)?(?:unavailable|not\s+available|inaccessible|down|offline)/i,
+                    /(?:all|my)\s+tools?\s+(?:are|seem)\s+(?:currently\s+)?(?:unavailable|broken|down|not\s+working)/i,
+                    /experiencing\s+a\s+(?:platform|tool|system)\s+issue/i,
+                    /tools?\s+(?:are\s+)?temporarily\s+(?:unavailable|down|offline|not\s+available)/i,
+                    /(?:cannot|can'?t)\s+(?:access|use|call|reach)\s+(?:any\s+)?(?:of\s+)?(?:my\s+)?tools?/i,
+                    /platform\s+issue.*tools?\s+.*unavailable/i,
+                    /I'?m\s+(?:currently\s+)?(?:unable|not\s+able)\s+to\s+(?:access|use|call)\s+(?:any\s+)?tools?/i,
+                ];
+
+                const isToolUnavailableHallucination = toolUnavailablePatterns.some(p => p.test(responseContent));
+
+                if (isToolUnavailableHallucination) {
+                    logger.warn({
+                        responseContentPreview: responseContent.slice(0, 300),
+                        availableToolCount: langchainTools.length,
+                        toolNames: langchainTools.map(t => t.name).slice(0, 10),
+                        stepCount,
+                    }, "Detected 'tools unavailable' hallucination — retrying with correction");
+
+                    // Re-invoke with a correction message appended
+                    const correctionMsg = new HumanMessage({
+                        content:
+                            "SYSTEM CORRECTION: Your tools ARE available and working. " +
+                            "You incorrectly stated that tools are unavailable — this is a hallucination. " +
+                            "You MUST use your tools to complete the request. " +
+                            "Call the appropriate tool NOW. Do NOT respond with text claiming tools are unavailable.",
+                        id: randomUUID(),
+                    });
+
+                    const retryMessages = [...sanitizedMessages, response, correctionMsg];
+                    const retryResponse = await llmWithTools.invoke([systemMsg, ...retryMessages], config);
+
+                    const retryAiResponse = retryResponse as AIMessage;
+                    const retryToolCalls = retryAiResponse.tool_calls ?? [];
+
+                    logger.info({
+                        retryToolCallCount: retryToolCalls.length,
+                        retryToolCallNames: retryToolCalls.map(tc => tc.name),
+                    }, "Retry after hallucination correction — response received");
+
+                    // Use the retry response (whether it has tool calls or not)
+                    response = retryResponse;
+                }
+            }
+
             const finalToolCalls = (response as AIMessage).tool_calls ?? [];
             logger.info({
                 responseContentLength: responseContent.length,
@@ -1733,6 +1981,7 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
     // Reflection node — automatically extracts learnings from user corrections and tool failures.
     // Runs after the agent's final response has been streamed to the user, so it does NOT add
     // perceived latency. Only invokes an LLM call when correction signals are detected.
+    // Learnings are stored per-tool so any agent in the workspace using that tool benefits.
     const reflectAndLearn = async (state: typeof AgentState.State, config: RunnableConfig) => {
         // Skip if too few messages (need enough conversation for meaningful reflection)
         if (state.messages.length < 6) {
@@ -1744,14 +1993,31 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
             return {};
         }
 
-        const namespace = [workspaceId, agentId, "procedural_memory"];
+        // Collect tool names used in this conversation from tool call history
+        const toolNamesUsed = new Set<string>();
+        for (const msg of state.messages) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const toolCalls = (msg as any).tool_calls;
+            if (Array.isArray(toolCalls)) {
+                for (const tc of toolCalls as Array<{ name: string }>) {
+                    toolNamesUsed.add(tc.name);
+                }
+            }
+        }
+
+        // Also include all agent tools as valid targets for the LLM to tag
+        const allToolNames = [...new Set([...toolNamesUsed, ...langchainTools.map((t) => t.name)])];
 
         try {
-            // Load existing learnings to avoid duplicates
-            const existing = await store.search(namespace, { limit: 50 });
-            const existingLearnings = existing
-                .map((item) => item.value.learning as string)
-                .filter(Boolean);
+            // Load existing learnings across all tool namespaces to avoid duplicates
+            const existingLearnings: string[] = [];
+            for (const toolName of toolNamesUsed) {
+                const namespace = [workspaceId, "tool_learnings", toolName];
+                const items = await store.search(namespace, { limit: 20 });
+                for (const item of items) {
+                    existingLearnings.push(`[${toolName}] ${item.value.learning}`);
+                }
+            }
 
             const existingBlock = existingLearnings.length > 0
                 ? `Existing learnings (DO NOT duplicate these):\n${existingLearnings.map((l) => `- ${l}`).join("\n")}`
@@ -1763,13 +2029,14 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
                 `2. Tool call failures that were later resolved with a different approach\n` +
                 `3. Misunderstandings that were clarified by the user\n\n` +
                 `${existingBlock}\n\n` +
-                `Output ONLY new learnings as a JSON array of strings. Each learning should be:\n` +
-                `- A specific, actionable instruction the agent should follow in future conversations\n` +
-                `- Written as a rule: "When X, do Y" or "Always/Never do X when Y"\n` +
-                `- NOT a generic platitude — it must be grounded in what actually happened\n\n` +
-                `Examples:\n` +
-                `["When user asks to send email via Gmail, use GMAIL_SEND_EMAIL with html_message param, not plain body",` +
-                ` "User prefers data exported as CSV, not JSON"]\n\n` +
+                `Tools available in this conversation: ${allToolNames.join(", ")}\n\n` +
+                `Output ONLY new learnings as a JSON array of objects with "tool" and "learning" fields.\n` +
+                `- "tool": the exact tool name the learning applies to (must be from the list above)\n` +
+                `- "learning": a specific, actionable instruction written as "When X, do Y" or "Always/Never do X when Y"\n` +
+                `- Each learning must be grounded in what actually happened — no generic platitudes\n\n` +
+                `Example output:\n` +
+                `[{"tool": "COMPOSIO_MULTI_EXECUTE_TOOL", "learning": "When sending Gmail, use GMAIL_SEND_EMAIL slug with html_message param, not plain body"},` +
+                ` {"tool": "google_sheets_read", "learning": "Always specify sheet name explicitly — default sheet may not be the first tab"}]\n\n` +
                 `If there are NO genuinely new learnings, output: []`
             );
 
@@ -1781,23 +2048,35 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
             const match = content.match(/\[[\s\S]*\]/);
             if (!match) return {};
 
-            const learnings: string[] = JSON.parse(match[0]);
+            const learnings = JSON.parse(match[0]) as Array<{ tool: string; learning: string }>;
             if (!Array.isArray(learnings) || learnings.length === 0) return {};
 
-            // Save each new learning to the Store
-            for (const learning of learnings) {
-                if (typeof learning === "string" && learning.trim().length > 10) {
-                    await store.put(namespace, randomUUID(), {
-                        learning: learning.trim(),
-                        extractedAt: new Date().toISOString(),
-                        messageCount: state.messages.length,
-                    });
+            // Save each learning under its tool's namespace
+            let savedCount = 0;
+            for (const entry of learnings) {
+                if (
+                    typeof entry.tool === "string" &&
+                    typeof entry.learning === "string" &&
+                    entry.learning.trim().length > 10
+                ) {
+                    const namespace = [workspaceId, "tool_learnings", entry.tool];
+                    await store.put(
+                        namespace,
+                        randomUUID(),
+                        {
+                            learning: entry.learning.trim(),
+                            extractedAt: new Date().toISOString(),
+                            sourceAgentId: agentId,
+                        },
+                        ["learning"], // Embed the learning field for semantic search
+                    );
+                    savedCount++;
                 }
             }
 
             logger.info(
-                { agentId, workspaceId, newLearnings: learnings.length },
-                "Reflection node: extracted new procedural learnings"
+                { agentId, workspaceId, newLearnings: savedCount, tools: [...toolNamesUsed] },
+                "Reflection node: extracted tool-scoped procedural learnings"
             );
         } catch (error) {
             // Non-fatal — reflection failure should never break the conversation

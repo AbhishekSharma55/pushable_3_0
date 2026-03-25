@@ -86,3 +86,22 @@ export const updateToolPermissions = (
         permissions,
         { headers: { 'x-workspace-id': workspaceId } }
     ).then(r => r.data.data);
+
+export interface ToolLearning {
+    key: string;
+    tool: string;
+    learning: string;
+    extractedAt: string;
+    sourceAgentId?: string;
+}
+
+export const getToolLearnings = (workspaceId: string, integrationId: string): Promise<ToolLearning[]> =>
+    apiClient.get(`/api/integrations/${integrationId}/learnings`, {
+        headers: { 'x-workspace-id': workspaceId },
+    }).then(r => r.data.data);
+
+export const deleteToolLearning = (workspaceId: string, key: string) =>
+    apiClient.delete(`/api/integrations/learnings`, {
+        headers: { 'x-workspace-id': workspaceId },
+        params: { key },
+    });

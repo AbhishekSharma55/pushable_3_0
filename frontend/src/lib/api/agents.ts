@@ -28,3 +28,9 @@ export const deleteAgent = (workspaceId: string, id: string) =>
 
 export const updateSystemPermissions = (workspaceId: string, id: string, data: SystemPermissionsInput) =>
     apiClient.put(`/api/agents/${id}/system-permissions`, data, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
+export const getAgentDebugContext = (workspaceId: string, agentId: string) =>
+    apiClient.get(`/api/agents/${agentId}/debug/context`, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data) as Promise<{
+        memories: Array<{ id: string; content: string; category: string; createdAt: string }>;
+        notebook: Array<{ key: string; value: string; description: string | null; updatedAt: string | null }>;
+    }>;

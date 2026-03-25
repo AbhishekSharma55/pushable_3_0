@@ -2,7 +2,9 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { agentService } from "../services/agent.service.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
-import { invalidateGraphCache } from "../graphs/agent.graph.ts";
+import { invalidateGraphCache, getStore } from "../graphs/agent.graph.ts";
+import { memoryRepository } from "../repositories/memory.repository.ts";
+import { logger } from "../lib/logger.ts";
 
 const createAgentSchema = z.object({
     name: z.string().min(1, "Name is required"),
@@ -107,5 +109,52 @@ export async function agentRoutes(fastify: FastifyInstance) {
             body
         );
         return { data: agent };
+    });
+
+    // GET /agents/:id/debug/context — returns memories and notebook for debug panel
+    fastify.get("/agents/:id/debug/context", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { id: agentId } = request.params as { id: string };
+        const user = request.user as { userId: string };
+
+        const [memories, notebookEntries] = await Promise.all([
+            memoryRepository
+                .findByUser(workspaceId, agentId, user.userId)
+                .catch((err) => {
+                    logger.warn({ err }, "Debug: failed to load memories");
+                    return [];
+                }),
+            (async () => {
+                try {
+                    const store = await getStore();
+                    const namespace = [workspaceId, agentId, user.userId, "notebook"];
+                    const items = await store.search(namespace, { limit: 100 });
+                    return (items || []).map((item) => {
+                        const data = item.value as { value: string; description?: string; updatedAt?: string };
+                        return {
+                            key: item.key,
+                            value: data.value,
+                            description: data.description || null,
+                            updatedAt: data.updatedAt || null,
+                        };
+                    });
+                } catch (err) {
+                    logger.warn({ err }, "Debug: failed to load notebook entries");
+                    return [];
+                }
+            })(),
+        ]);
+
+        return {
+            data: {
+                memories: memories.map((m) => ({
+                    id: m.id,
+                    content: m.content,
+                    category: m.category,
+                    createdAt: m.createdAt,
+                })),
+                notebook: notebookEntries,
+            },
+        };
     });
 }

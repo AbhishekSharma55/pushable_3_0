@@ -57,7 +57,7 @@ export async function buildAgentCallerTool(
 
                 const result = await graph.invoke(
                     { messages: [new HumanMessage(message)] },
-                    { configurable: { thread_id: threadId } }
+                    { configurable: { thread_id: threadId }, recursionLimit: 30 }
                 );
 
                 const messages = result.messages;

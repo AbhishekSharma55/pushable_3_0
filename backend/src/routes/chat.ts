@@ -1,16 +1,18 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { HumanMessage } from "@langchain/core/messages";
-import { Command } from "@langchain/langgraph";
+import { Command, GraphRecursionError } from "@langchain/langgraph";
 import { sessionService } from "../services/session.service.ts";
 import { messageRepository } from "../repositories/message.repository.ts";
 import { runRepository } from "../repositories/run.repository.ts";
-import { createAgentGraph } from "../graphs/agent.graph.ts";
+import { createAgentGraph, getAgentDebugInfo } from "../graphs/agent.graph.ts";
 import { runEventBus, type SSEEvent } from "../lib/run-event-bus.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
 import { logger } from "../lib/logger.ts";
 import { stripToolCallXml, stripToolCallXmlFinal } from "../lib/sanitize-llm-output.ts";
 import type { BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
+
+const AGENT_RECURSION_LIMIT = 50; // Safety net behind step_count-based graceful termination
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -402,6 +404,16 @@ async function executeRun(
             sessionId
         );
 
+        // Emit debug info for the frontend debug panel
+        const debugInfo = getAgentDebugInfo(agentId, workspaceId);
+        if (debugInfo) {
+            runEventBus.emit(runId, {
+                type: "debug",
+                data: { debug: debugInfo },
+                timestamp: Date.now(),
+            });
+        }
+
         logger.info({ runId, sessionId }, "Starting graph stream for run");
 
         const stream = await graph.stream(
@@ -409,7 +421,7 @@ async function executeRun(
             {
                 configurable: { thread_id: sessionId },
                 streamMode: "messages",
-                recursionLimit: 100,
+                recursionLimit: AGENT_RECURSION_LIMIT,
             }
         );
 
@@ -464,6 +476,28 @@ async function executeRun(
             runEventBus.complete(runId);
         }
     } catch (error) {
+        // GraphRecursionError means the step_count-based graceful termination
+        // didn't fire (edge case). Treat the run as completed with whatever
+        // content was streamed, rather than failing the entire run.
+        if (error instanceof GraphRecursionError) {
+            logger.warn({ runId, error: error.message }, "Run hit recursion limit — completing gracefully with streamed content");
+
+            const streamResult = { content: "", toolCalls: [] as StreamToolCall[], segments: [] as StreamSegment[], thinking: "" };
+            if (streamResult.content || streamResult.toolCalls.length > 0) {
+                await messageRepository.create({
+                    workspaceId,
+                    sessionId,
+                    role: "assistant",
+                    content: streamResult.content || "I reached the maximum processing steps for this request. Here is what I gathered so far — please review the tool results above.",
+                    tokenCount: 0,
+                    metadata: { toolCalls: streamResult.toolCalls, segments: streamResult.segments },
+                }).catch((e) => logger.error({ e, runId }, "Failed to save fallback message"));
+            }
+            await runRepository.updateStatus(runId, "completed").catch((e) => logger.error({ e, runId }, "Failed to update run status"));
+            runEventBus.complete(runId);
+            return;
+        }
+
         logger.error({ error, runId }, "Run execution failed");
         runEventBus.fail(
             runId,
@@ -510,7 +544,7 @@ async function resumeRun(
             {
                 configurable: { thread_id: sessionId },
                 streamMode: "messages",
-                recursionLimit: 100,
+                recursionLimit: AGENT_RECURSION_LIMIT,
             }
         );
 
@@ -549,6 +583,13 @@ async function resumeRun(
             runEventBus.complete(runId);
         }
     } catch (error) {
+        if (error instanceof GraphRecursionError) {
+            logger.warn({ runId, error: error.message }, "Resumed run hit recursion limit — completing gracefully");
+            await runRepository.updateStatus(runId, "completed").catch((e) => logger.error({ e, runId }, "Failed to update run status"));
+            runEventBus.complete(runId);
+            return;
+        }
+
         logger.error({ error, runId }, "Run resume failed");
         runEventBus.fail(
             runId,

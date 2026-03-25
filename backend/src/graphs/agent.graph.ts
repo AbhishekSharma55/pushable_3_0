@@ -55,6 +55,204 @@ import type {
 
 const SUMMARIZE_THRESHOLD = 30; // Trigger summarization when messages exceed this count
 const KEEP_MESSAGES = 10; // Keep the last N messages after summarization
+const MAX_TOOL_ITERATIONS = 25; // Maximum agent→tool cycles before graceful termination
+
+/**
+ * Scans conversation history and builds a concise summary of tool call outcomes.
+ * This helps the LLM avoid repeating failed tool calls and reuse successful patterns.
+ * Returns an empty string if there are no tool calls in history.
+ */
+function buildToolUsageSummary(messages: BaseMessage[]): string {
+    const toolResults: Array<{
+        name: string;
+        args: Record<string, unknown>;
+        succeeded: boolean;
+        resultPreview: string;
+    }> = [];
+
+    // Build a map of tool_call_id → tool call info from AIMessages
+    const toolCallMap = new Map<string, { name: string; args: Record<string, unknown> }>();
+    for (const msg of messages) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawToolCalls = (msg as any).tool_calls;
+        if (Array.isArray(rawToolCalls)) {
+            for (const tc of rawToolCalls as Array<{ id?: string; name: string; args: Record<string, unknown> }>) {
+                if (tc.id) {
+                    toolCallMap.set(tc.id, { name: tc.name, args: tc.args || {} });
+                }
+            }
+        }
+    }
+
+    // Match ToolMessages to their originating tool calls
+    for (const msg of messages) {
+        if (msg instanceof ToolMessage && msg.tool_call_id) {
+            const callInfo = toolCallMap.get(msg.tool_call_id);
+            if (!callInfo) continue;
+
+            const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+            const succeeded = !content.startsWith("Error:") && !content.startsWith("Error ") && !content.includes('"error"');
+            toolResults.push({
+                name: callInfo.name,
+                args: callInfo.args,
+                succeeded,
+                resultPreview: content.slice(0, 150),
+            });
+        }
+    }
+
+    if (toolResults.length === 0) return "";
+
+    // Group by tool name and build summary
+    const failedTools: string[] = [];
+    const succeededTools: string[] = [];
+    // Track specific Composio tool slugs that worked vs failed
+    const composioExecutions: Array<{ slug: string; succeeded: boolean; preview: string }> = [];
+
+    for (const result of toolResults) {
+        const entry = `${result.name}(${summarizeArgs(result.args)})`;
+        if (result.succeeded) {
+            succeededTools.push(entry);
+        } else {
+            failedTools.push(`${entry} → ${result.resultPreview}`);
+        }
+
+        // Track COMPOSIO_MULTI_EXECUTE_TOOL calls specifically
+        if (result.name === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+            const slug = (result.args.tool_slug || result.args.action || "") as string;
+            if (slug) {
+                composioExecutions.push({
+                    slug,
+                    succeeded: result.succeeded,
+                    preview: result.resultPreview,
+                });
+            }
+        }
+    }
+
+    const parts: string[] = [];
+    parts.push(`## Tool Usage History (This Conversation)`);
+    parts.push(`You have made ${toolResults.length} tool call(s) so far. Review this before making new calls.\n`);
+
+    if (failedTools.length > 0) {
+        parts.push(`**FAILED tool calls (DO NOT repeat these with the same parameters):**`);
+        // Deduplicate failed tools
+        const uniqueFailed = [...new Set(failedTools)];
+        for (const f of uniqueFailed.slice(0, 10)) {
+            parts.push(`- ✗ ${f}`);
+        }
+        parts.push("");
+    }
+
+    if (succeededTools.length > 0) {
+        parts.push(`**SUCCEEDED tool calls (reuse these patterns):**`);
+        const uniqueSucceeded = [...new Set(succeededTools)];
+        for (const s of uniqueSucceeded.slice(0, 10)) {
+            parts.push(`- ✓ ${s}`);
+        }
+        parts.push("");
+    }
+
+    if (composioExecutions.length > 0) {
+        const worked = composioExecutions.filter(e => e.succeeded).map(e => e.slug);
+        const failed = composioExecutions.filter(e => !e.succeeded).map(e => e.slug);
+        if (worked.length > 0) {
+            parts.push(`**Working Composio tool slugs:** ${[...new Set(worked)].join(", ")}`);
+        }
+        if (failed.length > 0) {
+            parts.push(`**Failed Composio tool slugs (avoid these):** ${[...new Set(failed)].join(", ")}`);
+        }
+        parts.push("");
+    }
+
+    parts.push(`**RULES based on history above:**`);
+    parts.push(`- If a tool call failed, do NOT call it again with the same parameters.`);
+    parts.push(`- If a tool call succeeded, reuse the EXACT same tool and pattern for similar tasks.`);
+    parts.push(`- If you already discovered the right Composio tool slug, use it directly — do NOT call COMPOSIO_SEARCH_TOOLS again for the same action.`);
+    parts.push(`- Minimize total tool calls. Be precise and intentional.`);
+
+    return parts.join("\n");
+}
+
+/**
+ * Quick scan of conversation messages for correction signals.
+ * Returns true if user corrections or tool failures are detected,
+ * indicating the reflection node should run a deeper analysis.
+ */
+function detectCorrectionSignals(messages: BaseMessage[]): boolean {
+    const correctionPatterns = [
+        /no[,.]?\s+(do|use|try|that'?s|it'?s|i\s+meant|i\s+said|not\s+that)/i,
+        /that'?s\s+(wrong|incorrect|not\s+right|not\s+what)/i,
+        /i\s+meant/i,
+        /don'?t\s+do\s+(that|it\s+that\s+way)/i,
+        /instead[,.]?\s+(do|use|try)/i,
+        /wrong\s+(way|approach|method)/i,
+        /stop\s+(doing|using)/i,
+        /actually[,.]?\s+(i\s+want|do\s+it|use)/i,
+        /not\s+like\s+that/i,
+        /please\s+(fix|correct|change)/i,
+    ];
+
+    let toolFailureCount = 0;
+
+    for (const msg of messages) {
+        if (msg instanceof HumanMessage) {
+            const content = typeof msg.content === "string" ? msg.content : "";
+            if (correctionPatterns.some((p) => p.test(content))) {
+                return true;
+            }
+        }
+        if (msg instanceof ToolMessage) {
+            const content = typeof msg.content === "string" ? msg.content : "";
+            if (content.startsWith("Error:") || content.startsWith("Error ") || content.includes('"error"')) {
+                toolFailureCount++;
+            }
+        }
+    }
+
+    // Only trigger for multiple tool failures (single failure is normal)
+    return toolFailureCount >= 2;
+}
+
+/**
+ * Load procedural memory (agent-level learnings from past reflections)
+ * from the LangGraph PostgresStore.
+ */
+async function loadProceduralMemory(
+    store: PostgresStore,
+    workspaceId: string,
+    agentId: string,
+): Promise<string> {
+    try {
+        const namespace = [workspaceId, agentId, "procedural_memory"];
+        const items = await store.search(namespace, { limit: 50 });
+        if (items.length === 0) return "";
+
+        const learnings = items
+            .map((item) => `- ${item.value.learning}`)
+            .join("\n");
+
+        return (
+            `## Learned Instructions (from past experience)\n` +
+            `These are lessons this agent learned from previous conversations. FOLLOW THEM:\n${learnings}`
+        );
+    } catch (error) {
+        logger.warn({ error }, "Failed to load procedural memory");
+        return "";
+    }
+}
+
+/** Summarize tool args into a short string for the usage summary */
+function summarizeArgs(args: Record<string, unknown>): string {
+    const entries = Object.entries(args);
+    if (entries.length === 0) return "";
+    const parts = entries.slice(0, 3).map(([k, v]) => {
+        const val = typeof v === "string" ? v.slice(0, 50) : JSON.stringify(v)?.slice(0, 50);
+        return `${k}=${val}`;
+    });
+    if (entries.length > 3) parts.push("...");
+    return parts.join(", ");
+}
 
 /**
  * Sanitize message history to ensure proper tool call/response pairing.
@@ -238,6 +436,10 @@ const AgentState = Annotation.Root({
         reducer: (_curr: Todo[], update: Todo[]) => update,
         default: () => [],
     }),
+    step_count: Annotation<number>({
+        reducer: (_curr: number, update: number) => update,
+        default: () => 0,
+    }),
 });
 
 let checkpointerInstance: PostgresSaver | null = null;
@@ -254,7 +456,7 @@ async function getCheckpointer(): Promise<PostgresSaver> {
 
 let storeInstance: PostgresStore | null = null;
 
-async function getStore(): Promise<PostgresStore> {
+export async function getStore(): Promise<PostgresStore> {
     if (!storeInstance) {
         storeInstance = PostgresStore.fromConnString(
             process.env.DATABASE_URL!
@@ -341,6 +543,50 @@ interface GraphCacheEntry {
     timestamp: number;
 }
 
+// ── Debug info cache ─────────────────────────────────────────────────────────
+// Stores debug metadata (system prompt, tools, model, capabilities) per agent
+// so the chat route can emit it to the frontend for the debug panel.
+
+export interface AgentDebugInfo {
+    agentName: string;
+    agentId: string;
+    modelId: string;
+    modelDisplayName: string;
+    temperature: number;
+    systemPrompt: string;
+    tools: Array<{ name: string; description: string; type: string }>;
+    capabilities: {
+        kbCount: number;
+        skillCount: number;
+        toolCount: number;
+        mcpServerCount: number;
+        hasBrowser: boolean;
+        hasExtensionBrowser: boolean;
+        connectedAgentCount: number;
+        composioIntegrationCount: number;
+        channelCount: number;
+        systemLevelAccess: boolean;
+    };
+    kbs: Array<{ name: string; description: string | null; documentCount: number }>;
+    skills: Array<{ name: string; description: string | null }>;
+    mcpServers: Array<{ name: string; toolNames: string[] }>;
+    connectedAgents: Array<{ name: string; role: string }>;
+    composioIntegrations: Array<{ app: string; connectionLabel: string }>;
+    channels: Array<{ name: string; channelType: string }>;
+    timestamp: number;
+}
+
+const debugInfoCache = new Map<string, AgentDebugInfo>();
+
+/** Get cached debug info for an agent (populated during graph creation) */
+export function getAgentDebugInfo(agentId: string, workspaceId: string): AgentDebugInfo | null {
+    const prefix = `${agentId}:${workspaceId}:`;
+    for (const [key, info] of debugInfoCache) {
+        if (key.startsWith(prefix)) return info;
+    }
+    return null;
+}
+
 const graphCache = new Map<string, GraphCacheEntry>();
 const GRAPH_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes
 
@@ -350,6 +596,7 @@ setInterval(() => {
     for (const [key, entry] of graphCache) {
         if (now - entry.timestamp > GRAPH_CACHE_TTL_MS * 2) {
             graphCache.delete(key);
+            debugInfoCache.delete(key);
         }
     }
 }, GRAPH_CACHE_TTL_MS).unref();
@@ -1044,6 +1291,40 @@ export async function createAgentGraph(
         "Agent graph created"
     );
 
+    // Populate debug info cache for the debug panel
+    debugInfoCache.set(cacheKey, {
+        agentName: agent.name,
+        agentId,
+        modelId,
+        modelDisplayName: resolvedModel.displayName,
+        temperature: agentTemperature,
+        systemPrompt: baseSystemPrompt,
+        tools: langchainTools.map((t) => ({
+            name: t.name,
+            description: t.description || "",
+            type: t.name.startsWith("agent_") ? "agent" : "tool",
+        })),
+        capabilities: {
+            kbCount: kbCapabilities.length,
+            skillCount: skillCapabilities.length,
+            toolCount: toolCapabilities.length,
+            mcpServerCount: mcpServerCapabilities.length,
+            hasBrowser,
+            hasExtensionBrowser: browserType === "extension" && hasBrowser,
+            connectedAgentCount: connectedAgents.length,
+            composioIntegrationCount: composioIntegrations.length,
+            channelCount: channelInfos.length,
+            systemLevelAccess: agent.systemLevelAccess,
+        },
+        kbs: kbCapabilities,
+        skills: skillCapabilities,
+        mcpServers: mcpServerCapabilities.map((m) => ({ name: m.name, toolNames: m.toolNames })),
+        connectedAgents: connectedAgents.map((a) => ({ name: a.name, role: a.role })),
+        composioIntegrations: composioIntegrations.map((i) => ({ app: i.app, connectionLabel: i.connectionLabel })),
+        channels: channelInfos.map((c) => ({ name: c.name, channelType: c.channelType })),
+        timestamp: Date.now(),
+    });
+
     // Bind tools to LLM
     const llmWithTools = langchainTools.length > 0
         ? llm.bindTools(langchainTools)
@@ -1062,6 +1343,9 @@ export async function createAgentGraph(
         // Sync planning state from graph state
         currentTodos = state.todos || [];
 
+        // Track iteration count for graceful termination
+        const stepCount = (state.step_count ?? 0) + 1;
+
         const estimatedCost = calculateCreditCost({
             action: "chat_message",
             modelMultiplier,
@@ -1076,8 +1360,8 @@ export async function createAgentGraph(
                 ? lastUserMsg.content
                 : null;
 
-        // --- Run credit check, memories, notebook, and KB query in PARALLEL ---
-        const [creditCheck, memories, notebookSection, kbResults] = await Promise.all([
+        // --- Run credit check, memories, notebook, procedural memory, and KB query in PARALLEL ---
+        const [creditCheck, memories, notebookSection, proceduralMemorySection, kbResults] = await Promise.all([
             checkCredits(workspaceId, estimatedCost),
             userId
                 ? memoryRepository
@@ -1090,6 +1374,7 @@ export async function createAgentGraph(
             userId
                 ? loadNotebookEntries({ store, workspaceId, agentId, userId })
                 : Promise.resolve(""),
+            loadProceduralMemory(store, workspaceId, agentId),
             lastUserMsgContent
                 ? kbService
                       .queryKB(allowedKbIds, lastUserMsgContent, workspaceId, 5)
@@ -1118,6 +1403,11 @@ export async function createAgentGraph(
         // 0a. Inject notebook (persistent working context) — placed early so it survives compression
         if (notebookSection) {
             systemPromptParts.push(notebookSection);
+        }
+
+        // 0a2. Inject procedural memory (agent-level learnings from past reflections)
+        if (proceduralMemorySection) {
+            systemPromptParts.push(proceduralMemorySection);
         }
 
         // 0b. Inject long-term memories for this user
@@ -1221,15 +1511,16 @@ Rules:
             const inProgress = currentTodos.find((t) => t.status === "in_progress");
             let instruction = "";
             if (inProgress) {
-                instruction = `Step "${inProgress.title}" is in_progress. Complete it, then call \`update_todo("${inProgress.id}", "completed", "<result>")\` immediately.`;
+                instruction = `Step "${inProgress.title}" is in_progress. Complete it and call \`update_todo("${inProgress.id}", "completed", "<result>")\` when done.`;
             } else if (nextPending) {
-                instruction = `Next step: "${nextPending.title}". Call \`update_todo("${nextPending.id}", "in_progress")\` NOW before doing anything else, then execute it.`;
+                instruction = `Next step: "${nextPending.title}". Execute it and update its status as you progress.`;
             } else {
                 instruction = `All steps completed. Summarize results to the user.`;
             }
             systemPromptParts.push(
                 `## Current Plan (${completed}/${currentTodos.length} completed)\n${todoLines}\n\n` +
-                `**IMPORTANT:** ${instruction} You MUST call update_todo before and after each step — never skip it.`
+                `${instruction}\n` +
+                `Tip: You can combine \`update_todo\` with other tool calls in the same turn to be efficient.`
             );
         }
 
@@ -1273,6 +1564,7 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
 - You **discovered** an API endpoint, URL, or service address → save it
 - You are **working through data** and need to track position (e.g. last row processed) → save it
 - You found a **name-to-ID mapping** you'll need again (e.g. "Leads Sheet" → "1Bxi...") → save it
+- You **successfully used a Composio tool slug** → save the slug + parameter pattern (e.g. key: \`composio_gmail_list\`, value: \`"slug: GMAIL_LIST_EMAILS, params: {max_results, label_ids, q}"\`) so you can skip COMPOSIO_SEARCH_TOOLS next time
 - Any **operational reference** you'd lose if the conversation restarted → save it
 
 ### Before searching for resources:
@@ -1283,6 +1575,25 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
 ### Key format:
 - Use descriptive snake_case keys: \`leads_sheet_id\`, \`email_template_doc_id\`, \`crm_api_base\`
 - Include a brief description when saving so future-you knows what it's for`);
+        }
+
+        // 7. Inject tool usage history so LLM avoids repeating mistakes
+        const toolUsageSummary = buildToolUsageSummary(state.messages);
+        if (toolUsageSummary) {
+            systemPromptParts.push(toolUsageSummary);
+        }
+
+        // Inject step budget awareness when approaching the limit
+        const isApproachingLimit = stepCount >= MAX_TOOL_ITERATIONS - 3;
+        if (isApproachingLimit) {
+            const remaining = MAX_TOOL_ITERATIONS - stepCount;
+            systemPromptParts.push(
+                `## ⚠️ STEP BUDGET WARNING\n` +
+                `You have used ${stepCount} of ${MAX_TOOL_ITERATIONS} tool iterations. ` +
+                `You have ${remaining} iteration(s) remaining.\n` +
+                `Wrap up your current work NOW. Provide your best response with the information gathered so far. ` +
+                `Only call a tool if it is the FINAL action needed to complete the task.`
+            );
         }
 
         const systemMsg = new SystemMessage(systemPromptParts.join("\n\n"));
@@ -1296,6 +1607,8 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
                 toolCount: langchainTools.length,
                 isClaudeDirect,
                 modelId,
+                stepCount,
+                maxToolIterations: MAX_TOOL_ITERATIONS,
                 lastMessageType: state.messages[state.messages.length - 1]?.constructor?.name,
             }, "Invoking LLM");
             response = await llmWithTools.invoke([systemMsg, ...sanitizedMessages], config);
@@ -1340,6 +1653,7 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
                 responseToolCallCount: finalToolCalls.length,
                 responseToolCallNames: finalToolCalls.map(tc => tc.name),
                 wasRecovered: finalToolCalls.length > 0 && responseToolCalls.length === 0,
+                stepCount,
             }, "LLM response received");
         } catch (error: unknown) {
             logger.error({ error, isClaudeDirect, modelId }, "LLM invocation error details");
@@ -1362,7 +1676,7 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
             logger.warn({ err }, "Chat message credit deduction failed")
         );
 
-        return { messages: [response], todos: currentTodos };
+        return { messages: [response], todos: currentTodos, step_count: stepCount };
     };
 
     // Summarization node — compresses older messages into a summary
@@ -1416,20 +1730,109 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
         return { summary: summaryContent, messages: deleteMessages };
     };
 
-    // Route function — decides: tools, summarize, or end
+    // Reflection node — automatically extracts learnings from user corrections and tool failures.
+    // Runs after the agent's final response has been streamed to the user, so it does NOT add
+    // perceived latency. Only invokes an LLM call when correction signals are detected.
+    const reflectAndLearn = async (state: typeof AgentState.State, config: RunnableConfig) => {
+        // Skip if too few messages (need enough conversation for meaningful reflection)
+        if (state.messages.length < 6) {
+            return {};
+        }
+
+        // Quick scan — skip the expensive LLM call if no corrections/failures detected
+        if (!detectCorrectionSignals(state.messages)) {
+            return {};
+        }
+
+        const namespace = [workspaceId, agentId, "procedural_memory"];
+
+        try {
+            // Load existing learnings to avoid duplicates
+            const existing = await store.search(namespace, { limit: 50 });
+            const existingLearnings = existing
+                .map((item) => item.value.learning as string)
+                .filter(Boolean);
+
+            const existingBlock = existingLearnings.length > 0
+                ? `Existing learnings (DO NOT duplicate these):\n${existingLearnings.map((l) => `- ${l}`).join("\n")}`
+                : "(no existing learnings yet)";
+
+            const reflectionPrompt = new SystemMessage(
+                `You are a reflection engine. Analyze this conversation and extract SPECIFIC, ACTIONABLE learnings from:\n` +
+                `1. User corrections ("no, do it this way", "that's wrong", "I meant...")\n` +
+                `2. Tool call failures that were later resolved with a different approach\n` +
+                `3. Misunderstandings that were clarified by the user\n\n` +
+                `${existingBlock}\n\n` +
+                `Output ONLY new learnings as a JSON array of strings. Each learning should be:\n` +
+                `- A specific, actionable instruction the agent should follow in future conversations\n` +
+                `- Written as a rule: "When X, do Y" or "Always/Never do X when Y"\n` +
+                `- NOT a generic platitude — it must be grounded in what actually happened\n\n` +
+                `Examples:\n` +
+                `["When user asks to send email via Gmail, use GMAIL_SEND_EMAIL with html_message param, not plain body",` +
+                ` "User prefers data exported as CSV, not JSON"]\n\n` +
+                `If there are NO genuinely new learnings, output: []`
+            );
+
+            const sanitized = sanitizeMessagesForProvider(state.messages);
+            const response = await llm.invoke([reflectionPrompt, ...sanitized], config);
+            const content = typeof response.content === "string" ? response.content : "";
+
+            // Parse JSON array from response
+            const match = content.match(/\[[\s\S]*\]/);
+            if (!match) return {};
+
+            const learnings: string[] = JSON.parse(match[0]);
+            if (!Array.isArray(learnings) || learnings.length === 0) return {};
+
+            // Save each new learning to the Store
+            for (const learning of learnings) {
+                if (typeof learning === "string" && learning.trim().length > 10) {
+                    await store.put(namespace, randomUUID(), {
+                        learning: learning.trim(),
+                        extractedAt: new Date().toISOString(),
+                        messageCount: state.messages.length,
+                    });
+                }
+            }
+
+            logger.info(
+                { agentId, workspaceId, newLearnings: learnings.length },
+                "Reflection node: extracted new procedural learnings"
+            );
+        } catch (error) {
+            // Non-fatal — reflection failure should never break the conversation
+            logger.warn({ error, agentId }, "Reflection node: failed to extract learnings");
+        }
+
+        return {};
+    };
+
+    // Route function — decides: tools, final_answer, summarize, or end
     const shouldContinue = (state: typeof AgentState.State) => {
         const lastMessage = state.messages[state.messages.length - 1];
-        if (
-            lastMessage &&
+        const hasToolCalls = lastMessage &&
             "tool_calls" in lastMessage &&
             (lastMessage as AIMessage).tool_calls &&
-            (lastMessage as AIMessage).tool_calls!.length > 0
-        ) {
+            (lastMessage as AIMessage).tool_calls!.length > 0;
+
+        // Check step budget BEFORE routing to tools
+        if (hasToolCalls && (state.step_count ?? 0) >= MAX_TOOL_ITERATIONS) {
+            logger.warn({
+                route: "final_answer",
+                stepCount: state.step_count,
+                maxToolIterations: MAX_TOOL_ITERATIONS,
+                pendingToolCalls: (lastMessage as AIMessage).tool_calls!.map(tc => tc.name),
+            }, "shouldContinue → final_answer (step budget exhausted, LLM still requesting tools)");
+            return "final_answer";
+        }
+
+        if (hasToolCalls) {
             logger.info({
                 route: "tools",
                 toolCallCount: (lastMessage as AIMessage).tool_calls!.length,
                 toolCallNames: (lastMessage as AIMessage).tool_calls!.map(tc => tc.name),
                 messageCount: state.messages.length,
+                stepCount: state.step_count,
             }, "shouldContinue → tools");
             return "tools";
         }
@@ -1438,12 +1841,44 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
             logger.info({ route: "summarize", messageCount: state.messages.length }, "shouldContinue → summarize");
             return "summarize_conversation";
         }
+        // Route through reflection node to extract learnings before ending
         logger.info({
-            route: "__end__",
+            route: "reflect_and_learn",
             messageCount: state.messages.length,
+            stepCount: state.step_count,
             lastMessageType: lastMessage?.constructor?.name,
-        }, "shouldContinue → __end__");
-        return "__end__";
+        }, "shouldContinue → reflect_and_learn");
+        return "reflect_and_learn";
+    };
+
+    // Final answer node — invoked when step budget is exhausted.
+    // Calls the LLM WITHOUT tools so it MUST produce a text response
+    // synthesizing everything gathered during the run.
+    const finalAnswerNode = async (state: typeof AgentState.State, config: RunnableConfig) => {
+        logger.info({
+            stepCount: state.step_count,
+            messageCount: state.messages.length,
+        }, "Final answer node: generating summary response (step budget exhausted)");
+
+        const sanitizedMessages = sanitizeMessagesForProvider(state.messages);
+
+        // Build a minimal system prompt for the final answer
+        const finalSystemMsg = new SystemMessage(
+            `You are ${agent.name}. You were working on a task and have reached the maximum number of processing steps.\n\n` +
+            `Review the entire conversation above — including all tool results you have gathered — and provide your FINAL answer to the user.\n` +
+            `Synthesize all the information you collected into a clear, complete response.\n` +
+            `If the task is partially complete, clearly state what was accomplished and what remains.\n` +
+            (state.summary ? `\nConversation summary (earlier messages): ${state.summary}\n` : "")
+        );
+
+        // Use the LLM WITHOUT tools bound — forces a text-only response
+        const response = await llm.invoke([finalSystemMsg, ...sanitizedMessages], config);
+
+        logger.info({
+            responseLength: typeof response.content === "string" ? response.content.length : 0,
+        }, "Final answer node: response generated");
+
+        return { messages: [response], step_count: state.step_count };
     };
 
     // --- Custom HITL tool node (replaces ToolNode) ---
@@ -1532,7 +1967,9 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
 
     const graph = new StateGraph(AgentState)
         .addNode("agent", agentNode)
-        .addNode("summarize_conversation", summarizeConversation);
+        .addNode("summarize_conversation", summarizeConversation)
+        .addNode("final_answer", finalAnswerNode)
+        .addNode("reflect_and_learn", reflectAndLearn);
 
     if (langchainTools.length > 0) {
         graph
@@ -1540,12 +1977,16 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
             .addEdge("__start__", "agent")
             .addConditionalEdges("agent", shouldContinue)
             .addEdge("tools", "agent")
-            .addEdge("summarize_conversation", "__end__");
+            .addEdge("final_answer", "reflect_and_learn")
+            .addEdge("summarize_conversation", "reflect_and_learn")
+            .addEdge("reflect_and_learn", "__end__");
     } else {
         graph
             .addEdge("__start__", "agent")
             .addConditionalEdges("agent", shouldContinue)
-            .addEdge("summarize_conversation", "__end__");
+            .addEdge("final_answer", "reflect_and_learn")
+            .addEdge("summarize_conversation", "reflect_and_learn")
+            .addEdge("reflect_and_learn", "__end__");
     }
 
     const checkpointer = await getCheckpointer();

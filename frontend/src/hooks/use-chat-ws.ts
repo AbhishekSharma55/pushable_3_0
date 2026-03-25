@@ -5,7 +5,7 @@ import { getMessages, sendChat, getActiveRun, createSession, approveRun } from '
 import { parseSessionIdFromKey } from './use-sessions';
 import { useActiveWorkspace } from './use-active-workspace';
 import { getToken } from '@/lib/auth';
-import { API_URL } from '@/lib/constants';
+import { API_URL, LOGGING_ENABLED } from '@/lib/constants';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -35,6 +35,45 @@ interface StreamSegment {
     type: 'text' | 'tools';
     content?: string;
     toolCalls?: StreamToolCall[];
+}
+
+// ─── Debug / Logging Types ──────────────────────────────────────────────────
+
+export interface AgentDebugInfo {
+    agentName: string;
+    agentId: string;
+    modelId: string;
+    modelDisplayName: string;
+    temperature: number;
+    systemPrompt: string;
+    tools: Array<{ name: string; description: string; type: string }>;
+    capabilities: {
+        kbCount: number;
+        skillCount: number;
+        toolCount: number;
+        mcpServerCount: number;
+        hasBrowser: boolean;
+        hasExtensionBrowser: boolean;
+        connectedAgentCount: number;
+        composioIntegrationCount: number;
+        channelCount: number;
+        systemLevelAccess: boolean;
+    };
+    kbs: Array<{ name: string; description: string | null; documentCount: number }>;
+    skills: Array<{ name: string; description: string | null }>;
+    mcpServers: Array<{ name: string; toolNames: string[] }>;
+    connectedAgents: Array<{ name: string; role: string }>;
+    composioIntegrations: Array<{ app: string; connectionLabel: string }>;
+    channels: Array<{ name: string; channelType: string }>;
+    timestamp: number;
+}
+
+export interface DebugLogEntry {
+    id: string;
+    timestamp: number;
+    type: 'debug' | 'content' | 'toolCall' | 'thinkingContent' | 'approvalRequest' | 'error' | 'browserAgentThinking' | 'system';
+    summary: string;
+    data?: unknown;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -79,7 +118,9 @@ async function connectSSE(
     onApprovalRequest: (payload: unknown) => void,
     onThinkingContent: (chunk: string) => void,
     onError: (error: string) => void,
-    onDone: () => void
+    onDone: () => void,
+    onDebug?: (info: AgentDebugInfo) => void,
+    onRawEvent?: (type: string, data: unknown) => void
 ): Promise<void> {
     const token = getToken();
     const url = `${API_URL}/api/runs/${runId}/events`;
@@ -123,11 +164,17 @@ async function connectSSE(
 
                 try {
                     const data = JSON.parse(payload);
+                    if (data.debug && onDebug) onDebug(data.debug as AgentDebugInfo);
                     if (data.content) onContent(data.content as string);
                     if (data.toolCall) onToolCall(data.toolCall as StreamToolCall);
                     if (data.approvalRequest) onApprovalRequest(data.approvalRequest);
                     if (data.thinkingContent) onThinkingContent(data.thinkingContent as string);
                     if (data.error) onError(data.error as string);
+                    // Emit raw event for debug log
+                    if (onRawEvent) {
+                        const eventType = data.debug ? 'debug' : data.content ? 'content' : data.toolCall ? 'toolCall' : data.approvalRequest ? 'approvalRequest' : data.thinkingContent ? 'thinkingContent' : data.browserAgentThinking ? 'browserAgentThinking' : data.error ? 'error' : 'unknown';
+                        onRawEvent(eventType, data);
+                    }
                 } catch {
                     // Skip malformed JSON
                 }
@@ -218,6 +265,10 @@ export function useChatWs(sessionKey: string) {
     const [isLoading, setIsLoading] = useState(false);
     const [historyLoaded, setHistoryLoaded] = useState(false);
     const [resolvedSessionId, setResolvedSessionId] = useState<string | null>(null);
+
+    // Debug / logging state (only populated when NEXT_PUBLIC_LOGGING=true)
+    const [debugInfo, setDebugInfo] = useState<AgentDebugInfo | null>(null);
+    const [debugLogs, setDebugLogs] = useState<DebugLogEntry[]>([]);
 
     // Refs
     const sessionIdRef = useRef<string | null>(null);
@@ -320,8 +371,51 @@ export function useChatWs(sessionKey: string) {
                         setIsLoading(false);
                         activeRunIdRef.current = null;
                         thinkingIdRef.current = null;
+
+                        // Add "run complete" log entry
+                        if (LOGGING_ENABLED) {
+                            setDebugLogs((prev) => [...prev, {
+                                id: generateId(),
+                                timestamp: Date.now(),
+                                type: 'system',
+                                summary: 'Run completed',
+                            }]);
+                        }
                     }
-                }
+                },
+                // onDebug (logging only)
+                LOGGING_ENABLED ? (info) => {
+                    setDebugInfo(info);
+                    setDebugLogs((prev) => [...prev, {
+                        id: generateId(),
+                        timestamp: Date.now(),
+                        type: 'debug',
+                        summary: `Agent "${info.agentName}" | Model: ${info.modelDisplayName} | Tools: ${info.tools.length}`,
+                        data: info,
+                    }]);
+                } : undefined,
+                // onRawEvent (logging only)
+                LOGGING_ENABLED ? (type, data) => {
+                    if (type === 'debug') return; // Already handled above
+                    let summary = type;
+                    if (type === 'content') summary = `Content chunk (${((data as Record<string, string>).content || '').length} chars)`;
+                    else if (type === 'toolCall') {
+                        const tc = (data as Record<string, StreamToolCall>).toolCall;
+                        summary = `Tool: ${tc?.name} [${tc?.status}]`;
+                    }
+                    else if (type === 'thinkingContent') summary = 'Thinking content chunk';
+                    else if (type === 'approvalRequest') summary = 'Approval request received';
+                    else if (type === 'error') summary = `Error: ${(data as Record<string, string>).error}`;
+                    else if (type === 'browserAgentThinking') summary = 'Browser agent thinking';
+
+                    setDebugLogs((prev) => [...prev, {
+                        id: generateId(),
+                        timestamp: Date.now(),
+                        type: type as DebugLogEntry['type'],
+                        summary,
+                        data,
+                    }]);
+                } : undefined
             ).catch(() => {
                 // SSE failed entirely — polling fallback will pick it up
                 console.warn('[SSE] connection failed, relying on polling fallback');
@@ -396,6 +490,8 @@ export function useChatWs(sessionKey: string) {
         setResolvedSessionId(null);
         activeRunIdRef.current = null;
         thinkingIdRef.current = null;
+        setDebugInfo(null);
+        setDebugLogs([]);
 
         const sessionId = parseSessionIdFromKey(sessionKey);
         if (!sessionId) {
@@ -469,6 +565,17 @@ export function useChatWs(sessionKey: string) {
                 { id: generateId(), role: 'user', content: text, status: 'done' },
             ]);
 
+            // Log the outgoing message
+            if (LOGGING_ENABLED) {
+                setDebugLogs((prev) => [...prev, {
+                    id: generateId(),
+                    timestamp: Date.now(),
+                    type: 'system',
+                    summary: `User message sent (${text.length} chars)`,
+                    data: { message: text },
+                }]);
+            }
+
             setIsLoading(true);
 
             try {
@@ -510,5 +617,5 @@ export function useChatWs(sessionKey: string) {
         [workspaceId, watchRun]
     );
 
-    return { messages, sendMessage, sendApproval, isLoading, historyLoaded, sessionId: resolvedSessionId };
+    return { messages, sendMessage, sendApproval, isLoading, historyLoaded, sessionId: resolvedSessionId, debugInfo, debugLogs };
 }

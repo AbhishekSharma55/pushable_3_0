@@ -28,6 +28,7 @@ import {
     Cloud,
     Chrome,
     ChevronRight,
+    Bug,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -55,7 +56,10 @@ import { CreateAgentSheet } from '@/components/agents/create-agent-sheet';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
 import { getAgents, deleteAgent, updateAgent } from '@/lib/api/agents';
 import { getSessions, createSession, getMessages, deleteSession } from '@/lib/api/sessions';
-import { API_URL } from '@/lib/constants';
+import { API_URL, LOGGING_ENABLED } from '@/lib/constants';
+import { DebugLogPanel } from '@/components/chat/debug-log-panel';
+import { Sheet, SheetContent } from '@/components/ui/sheet';
+import type { AgentDebugInfo, DebugLogEntry } from '@/hooks/use-chat-ws';
 import { getToken } from '@/lib/auth';
 import { parseArtifact, parseAllArtifacts, detectStreamingArtifact } from '@/lib/artifact-parser';
 import type { Artifact } from '@/lib/artifact-parser';
@@ -212,6 +216,12 @@ export default function AgentsPage() {
     const [activeArtifact, setActiveArtifact] = useState<Artifact | null>(null);
     const [pendingApproval, setPendingApproval] = useState<{ msgId: string; request: ApprovalRequest } | null>(null);
 
+    // Debug log state (only used when NEXT_PUBLIC_LOGGING=true)
+    const [debugInfo, setDebugInfo] = useState<AgentDebugInfo | null>(null);
+    const [debugLogs, setDebugLogs] = useState<DebugLogEntry[]>([]);
+    const [showDebugPanel, setShowDebugPanel] = useState(false);
+    const debugLogId = useCallback(() => `dl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, []);
+
     // Browser preview state
     const [browserProfile, setBrowserProfile] = useState<BrowserProfile | null>(null);
     const [browserWsUrl, setBrowserWsUrl] = useState<string | null>(null);
@@ -310,6 +320,8 @@ export default function AgentsPage() {
         if (!workspace || !activeSession) {
             setMessages([]);
             setPendingApproval(null);
+            setDebugInfo(null);
+            setDebugLogs([]);
             return;
         }
         const load = async () => {
@@ -693,6 +705,23 @@ export default function AgentsPage() {
                 }
                 try {
                     const parsed = JSON.parse(data);
+                    // Debug logging
+                    if (LOGGING_ENABLED) {
+                        if (parsed.debug) {
+                            const info = parsed.debug as AgentDebugInfo;
+                            setDebugInfo(info);
+                            setDebugLogs((prev) => [...prev, { id: debugLogId(), timestamp: Date.now(), type: 'debug', summary: `Agent "${info.agentName}" | Model: ${info.modelDisplayName} | Tools: ${info.tools.length}`, data: info }]);
+                        } else {
+                            const evtType = parsed.content ? 'content' : parsed.toolCall ? 'toolCall' : parsed.thinkingContent ? 'thinkingContent' : parsed.approvalRequest ? 'approvalRequest' : parsed.error ? 'error' : 'system';
+                            let summary = evtType;
+                            if (evtType === 'content') summary = `Content chunk (${(parsed.content || '').length} chars)`;
+                            else if (evtType === 'toolCall') summary = `Tool: ${parsed.toolCall?.name} [${parsed.toolCall?.status}]`;
+                            else if (evtType === 'thinkingContent') summary = 'Thinking content chunk';
+                            else if (evtType === 'approvalRequest') summary = 'Approval request received';
+                            else if (evtType === 'error') summary = `Error: ${parsed.error}`;
+                            setDebugLogs((prev) => [...prev, { id: debugLogId(), timestamp: Date.now(), type: evtType as DebugLogEntry['type'], summary, data: parsed }]);
+                        }
+                    }
                     if (parsed.content) {
                         sseDeliveredRef.current = true;
                         fullContent += parsed.content;
@@ -844,6 +873,10 @@ export default function AgentsPage() {
         setChatInput('');
         setSending(true);
         sseDeliveredRef.current = false;
+
+        if (LOGGING_ENABLED) {
+            setDebugLogs((prev) => [...prev, { id: debugLogId(), timestamp: Date.now(), type: 'system', summary: `User message sent (${content.length} chars)`, data: { message: content } }]);
+        }
 
         const userMsg: ChatMessage = {
             id: `temp-user-${Date.now()}`, sessionId: activeSession.id,
@@ -1183,6 +1216,18 @@ export default function AgentsPage() {
                                                     {showBrowserPreview ? 'Hide' : 'Show'} Extension
                                                 </Button>
                                             )}
+                                            {/* Debug panel toggle */}
+                                            {LOGGING_ENABLED && (
+                                                <Button
+                                                    size="sm"
+                                                    variant="outline"
+                                                    className={cn("gap-1.5 text-xs h-8", showDebugPanel && "bg-orange-500/10 border-orange-500/30 text-orange-600 hover:bg-orange-500/20")}
+                                                    onClick={() => setShowDebugPanel(!showDebugPanel)}
+                                                >
+                                                    <Bug className="h-3.5 w-3.5" />
+                                                    {showDebugPanel ? 'Hide' : 'Show'} Debug
+                                                </Button>
+                                            )}
                                         </>
                                     )}
                                     {viewMode === 'settings' && (
@@ -1197,8 +1242,8 @@ export default function AgentsPage() {
                             {/* Chat view */}
                             {viewMode === 'chat' && (
                                 activeSession ? (
-                                    <div className="flex-1 flex min-h-0">
-                                        <div className={`flex flex-col ${showBrowserPreview && (browserWsUrl || selectedAgent?.browserType === 'extension') ? 'w-1/2' : 'flex-1'}`}>
+                                    <div className="flex-1 flex min-h-0 min-w-0 overflow-hidden">
+                                        <div className="flex flex-col flex-1 min-w-0">
                                         <div className="flex-1 overflow-y-auto">
                                             <div className="max-w-5xl mx-auto px-4 py-6 space-y-6">
                                                 {loadingMessages ? (
@@ -1411,7 +1456,7 @@ export default function AgentsPage() {
 
                                         {/* Browser preview column — Cloud */}
                                         {showBrowserPreview && browserWsUrl && browserSessionId && (selectedAgent?.browserType || 'cloud') === 'cloud' && (
-                                            <div className="w-1/2 border-l border-border p-3 overflow-y-auto">
+                                            <div className="flex-1 min-w-0 border-l border-border p-3 overflow-y-auto">
                                                 <BrowserPreview
                                                     wsUrl={browserWsUrl}
                                                     sessionId={browserSessionId}
@@ -1428,9 +1473,18 @@ export default function AgentsPage() {
 
                                         {/* Browser preview column — Extension */}
                                         {showBrowserPreview && selectedAgent?.browserType === 'extension' && workspace && (
-                                            <div className="w-1/2 border-l border-border p-3 overflow-y-auto">
+                                            <div className="flex-1 min-w-0 border-l border-border p-3 overflow-y-auto">
                                                 <ExtensionLiveView workspaceId={workspace.id} />
                                             </div>
+                                        )}
+
+                                        {/* Debug log panel (Sheet overlay) */}
+                                        {LOGGING_ENABLED && (
+                                            <Sheet open={showDebugPanel} onOpenChange={setShowDebugPanel}>
+                                                <SheetContent side="right" className="w-[420px] sm:max-w-[420px] p-0 gap-0" showCloseButton={false}>
+                                                    <DebugLogPanel debugInfo={debugInfo} debugLogs={debugLogs} agentId={selectedAgent?.id} workspaceId={workspace?.id} />
+                                                </SheetContent>
+                                            </Sheet>
                                         )}
                                     </div>
                                 ) : (

@@ -35,6 +35,7 @@ import {
   Settings2,
   Brain,
   Sparkles,
+  Bug,
 } from "lucide-react";
 import {
   Select,
@@ -52,7 +53,9 @@ import { useAgents, type Agent } from "@/hooks/use-agents";
 import { TextShimmer } from "@/components/ui/text-shimmer";
 import { BrowserPreview } from "@/components/browser/browser-preview";
 import { getBrowserSession } from "@/lib/api/sessions";
-import { BROWSER_WS_URL } from "@/lib/constants";
+import { BROWSER_WS_URL, LOGGING_ENABLED } from "@/lib/constants";
+import { DebugLogPanel } from "@/components/chat/debug-log-panel";
+import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { useActiveWorkspace } from "@/hooks/use-active-workspace";
 import { getAgentAvatarMeta } from "@/lib/agent-avatar";
 
@@ -937,7 +940,10 @@ export function ChatComponent({
   // ── Chat hook (must be declared before browser polling) ──
   const [value, setValue] = useState("");
   const [sendCount, setSendCount] = useState(0);
-  const { messages, sendMessage, isLoading, historyLoaded, sessionId: chatSessionId } = useChatWs(currentSessionKey);
+  const { messages, sendMessage, isLoading, historyLoaded, sessionId: chatSessionId, debugInfo, debugLogs } = useChatWs(currentSessionKey);
+
+  // ── Debug panel state ──
+  const [showDebugPanel, setShowDebugPanel] = useState(false);
 
   // ── Browser preview state ──
   const { workspace } = useActiveWorkspace();
@@ -1081,17 +1087,33 @@ export function ChatComponent({
       {/* ── Chat column ── */}
       <div className={cn("flex flex-col min-w-0 h-full", browserSession ? "flex-1" : "flex-1")}>
         {/* Header */}
-        <ChatHeader
-          session={currentSession}
-          agent={currentAgent}
-          sessionKey={currentSessionKey}
-          sessions={agentSessions}
-          onSessionChange={(key) => setCurrentSessionKey(key)}
-          onCreateSession={() => {
-            const newKey = `agent:${currentAgentId}:new-${Date.now()}`;
-            setCurrentSessionKey(newKey);
-          }}
-        />
+        <div className="relative">
+          <ChatHeader
+            session={currentSession}
+            agent={currentAgent}
+            sessionKey={currentSessionKey}
+            sessions={agentSessions}
+            onSessionChange={(key) => setCurrentSessionKey(key)}
+            onCreateSession={() => {
+              const newKey = `agent:${currentAgentId}:new-${Date.now()}`;
+              setCurrentSessionKey(newKey);
+            }}
+          />
+          {LOGGING_ENABLED && (
+            <button
+              onClick={() => setShowDebugPanel(!showDebugPanel)}
+              className={cn(
+                "absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors",
+                showDebugPanel
+                  ? "bg-orange-500/10 border-orange-500/30 text-orange-600 hover:bg-orange-500/20"
+                  : "bg-background border-border text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              )}
+            >
+              <Bug className="h-3.5 w-3.5" />
+              {showDebugPanel ? "Hide" : "Show"} Debug
+            </button>
+          )}
+        </div>
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto py-6 px-5 space-y-4">
@@ -1174,6 +1196,15 @@ export function ChatComponent({
             onClose={() => setBrowserSession(null)}
           />
         </div>
+      )}
+
+      {/* ── Debug log panel (Sheet overlay) ── */}
+      {LOGGING_ENABLED && (
+        <Sheet open={showDebugPanel} onOpenChange={setShowDebugPanel}>
+          <SheetContent side="right" className="w-[420px] sm:max-w-[420px] p-0 gap-0" showCloseButton={false}>
+            <DebugLogPanel debugInfo={debugInfo} debugLogs={debugLogs} agentId={currentAgentId} workspaceId={workspace?.id} />
+          </SheetContent>
+        </Sheet>
       )}
       </div>
     </div>

@@ -4,3 +4,4 @@ export const TOKEN_KEY = 'pushable_token';
 export const USER_KEY = 'pushable_user';
 export const WORKSPACES_KEY = 'pushable_workspaces';
 export const ACTIVE_WORKSPACE_KEY = 'pushable_active_workspace';
+export const LOGGING_ENABLED = process.env.NEXT_PUBLIC_LOGGING === 'true';

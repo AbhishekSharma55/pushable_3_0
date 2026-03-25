@@ -120,10 +120,12 @@ async function connectSSE(
     onError: (error: string) => void,
     onDone: () => void,
     onDebug?: (info: AgentDebugInfo) => void,
-    onRawEvent?: (type: string, data: unknown) => void
+    onRawEvent?: (type: string, data: unknown) => void,
+    fromIndex?: number
 ): Promise<void> {
     const token = getToken();
-    const url = `${API_URL}/api/runs/${runId}/events`;
+    const baseUrl = `${API_URL}/api/runs/${runId}/events`;
+    const url = fromIndex ? `${baseUrl}?from=${fromIndex}` : baseUrl;
 
     try {
         const response = await fetch(url, {
@@ -278,8 +280,19 @@ export function useChatWs(sessionKey: string) {
 
     // ── Watch a run: try SSE, fall back to polling ───────────────────────────
 
+    /**
+     * Options for reconnecting to an in-progress run.
+     * Populated from the streaming snapshot returned by the active-run endpoint.
+     */
+    interface ReconnectOptions {
+        initialContent: string;
+        initialToolCalls: StreamToolCall[];
+        initialThinking: string;
+        fromEventIndex: number;
+    }
+
     const watchRun = useCallback(
-        (runId: string, sessionId: string) => {
+        (runId: string, sessionId: string, reconnect?: ReconnectOptions) => {
             if (!workspaceId) return;
 
             // Abort any previous watcher
@@ -288,19 +301,28 @@ export function useChatWs(sessionKey: string) {
             abortRef.current = abort;
             activeRunIdRef.current = runId;
 
-            // Add thinking placeholder
+            // Add thinking placeholder — pre-populated with snapshot data on reconnect
             const thinkingId = generateId();
             thinkingIdRef.current = thinkingId;
             setMessages((prev) => [
                 ...prev,
-                { id: thinkingId, role: 'assistant', content: '', status: 'thinking' },
+                {
+                    id: thinkingId,
+                    role: 'assistant',
+                    content: reconnect?.initialContent ?? '',
+                    status: 'thinking',
+                    metadata: {
+                        ...(reconnect?.initialToolCalls?.length ? { toolCalls: reconnect.initialToolCalls } : {}),
+                        ...(reconnect?.initialThinking ? { thinking: reconnect.initialThinking } : {}),
+                    },
+                },
             ]);
 
             setIsLoading(true);
 
             let sseSucceeded = false;
 
-            // Try SSE first
+            // Try SSE first (with offset to skip already-seen events on reconnect)
             connectSSE(
                 runId,
                 workspaceId,
@@ -415,7 +437,9 @@ export function useChatWs(sessionKey: string) {
                         summary,
                         data,
                     }]);
-                } : undefined
+                } : undefined,
+                // fromIndex — skip already-seen events on reconnect
+                reconnect?.fromEventIndex
             ).catch(() => {
                 // SSE failed entirely — polling fallback will pick it up
                 console.warn('[SSE] connection failed, relying on polling fallback');
@@ -429,20 +453,35 @@ export function useChatWs(sessionKey: string) {
                 workspaceId,
                 runId,
                 abort.signal,
-                // onMessages — replace all messages with fresh DB data
+                // onMessages — update historical messages but preserve the thinking placeholder
                 (freshMessages) => {
                     if (abort.signal.aborted) return;
                     // Only use polling messages if SSE hasn't delivered content
                     if (!sseSucceeded) {
-                        // Remove the thinking placeholder and replace with real messages
-                        setMessages(freshMessages);
+                        setMessages((prev) => {
+                            // Preserve the thinking placeholder so SSE events
+                            // (or snapshot data) aren't wiped by polling
+                            const thinkingMsg = prev.find((m) => m.id === thinkingId);
+                            if (thinkingMsg) {
+                                return [...freshMessages, thinkingMsg];
+                            }
+                            return freshMessages;
+                        });
                     }
                 },
                 // onDone
                 () => {
                     if (abort.signal.aborted) return;
                     if (!sseSucceeded) {
-                        // SSE didn't work — polling delivered the result
+                        // SSE didn't work — load final messages from DB
+                        // (the run has completed, so the assistant message is persisted)
+                        getMessages(workspaceId, sessionId)
+                            .then((dbMsgs) => {
+                                if (!abort.signal.aborted) {
+                                    setMessages(mapDbMessages(dbMsgs as Array<Record<string, unknown>>));
+                                }
+                            })
+                            .catch(() => {});
                         setIsLoading(false);
                         activeRunIdRef.current = null;
                         thinkingIdRef.current = null;
@@ -511,12 +550,31 @@ export function useChatWs(sessionKey: string) {
                 if (cancelled) return;
                 setMessages(mapDbMessages(dbMessages as Array<Record<string, unknown>>));
 
-                // Check for active run (handles page refresh during execution)
+                // Check for active run (handles page refresh / reconnection during execution)
                 const activeRun = await getActiveRun(workspaceId, sessionId);
                 if (cancelled) return;
 
                 if (activeRun) {
-                    watchRun((activeRun as Record<string, unknown>).id as string, sessionId);
+                    const runData = activeRun as Record<string, unknown>;
+                    const streamingState = runData.streamingState as {
+                        content: string;
+                        toolCalls: StreamToolCall[];
+                        thinking: string;
+                        eventCount: number;
+                    } | null | undefined;
+
+                    if (streamingState && streamingState.eventCount > 0) {
+                        // Reconnection: use snapshot for immediate display,
+                        // SSE will pick up only new events from the offset
+                        watchRun(runData.id as string, sessionId, {
+                            initialContent: streamingState.content,
+                            initialToolCalls: streamingState.toolCalls as StreamToolCall[],
+                            initialThinking: streamingState.thinking,
+                            fromEventIndex: streamingState.eventCount,
+                        });
+                    } else {
+                        watchRun(runData.id as string, sessionId);
+                    }
                 }
             } catch {
                 // Session might not exist yet

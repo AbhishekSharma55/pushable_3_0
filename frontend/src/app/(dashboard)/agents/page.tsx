@@ -244,6 +244,7 @@ export default function AgentsPage() {
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const reconnectAbortRef = useRef<AbortController | null>(null);
 
     const scrollToBottom = useCallback(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -317,6 +318,10 @@ export default function AgentsPage() {
 
     // Load messages when session changes
     useEffect(() => {
+        // Abort any in-flight reconnection from a previous session
+        reconnectAbortRef.current?.abort();
+        reconnectAbortRef.current = null;
+
         if (!workspace || !activeSession) {
             setMessages([]);
             setPendingApproval(null);
@@ -344,7 +349,7 @@ export default function AgentsPage() {
                 });
                 setMessages(hydrated);
 
-                // Check for active interrupted run (handles page refresh during HITL)
+                // Check for active run (handles page refresh / tab switch during execution)
                 const token = getToken();
                 const runRes = await fetch(`${API_URL}/api/sessions/${activeSession.id}/active-run`, {
                     headers: { Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
@@ -352,7 +357,70 @@ export default function AgentsPage() {
                 const runData = await runRes.json();
                 if (runData.data) {
                     const runStatus = runData.data.status as string;
-                    if (runStatus === 'interrupted') {
+
+                    if (runStatus === 'in_progress' || runStatus === 'queued') {
+                        // Reconnect to an in-progress run: show snapshot immediately,
+                        // then resume SSE streaming for live updates.
+                        const snapshot = runData.data.streamingState as {
+                            content: string;
+                            toolCalls: ToolCallEvent[];
+                            thinking: string;
+                            eventCount: number;
+                        } | null | undefined;
+
+                        const assistantMsgId = `reconnect-${Date.now()}`;
+                        const snapshotSegments: ChatSegment[] = [];
+                        if (snapshot?.toolCalls?.length) {
+                            snapshotSegments.push({ type: 'tools', toolCalls: snapshot.toolCalls });
+                        }
+                        if (snapshot?.content) {
+                            snapshotSegments.push({ type: 'text', content: snapshot.content });
+                        }
+
+                        const assistantMsg: ChatMessage = {
+                            id: assistantMsgId,
+                            sessionId: activeSession.id,
+                            role: 'assistant',
+                            content: snapshot?.content ?? '',
+                            tokenCount: 0,
+                            createdAt: new Date().toISOString(),
+                            isStreaming: true,
+                            toolCalls: snapshot?.toolCalls ?? [],
+                            segments: snapshotSegments,
+                            thinking: snapshot?.thinking ?? undefined,
+                        };
+                        setMessages([...hydrated, assistantMsg]);
+                        setSending(true);
+                        sseDeliveredRef.current = false;
+
+                        // Abort any previous reconnection
+                        reconnectAbortRef.current?.abort();
+                        const abortController = new AbortController();
+                        reconnectAbortRef.current = abortController;
+
+                        const runId = runData.data.id as string;
+                        const sseUrl = snapshot?.eventCount
+                            ? `${API_URL}/api/runs/${runId}/events?from=${snapshot.eventCount}`
+                            : `${API_URL}/api/runs/${runId}/events`;
+
+                        // Start polling fallback
+                        pollForCompletion(activeSession.id, assistantMsgId, abortController.signal).catch(() => {});
+
+                        // Reconnect SSE (with offset to skip already-seen events)
+                        readSSE(
+                            sseUrl,
+                            { Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
+                            assistantMsgId,
+                            abortController.signal,
+                            snapshot?.eventCount ? { fullContent: snapshot.content, segments: snapshotSegments } : undefined
+                        ).then(() => {
+                            abortController.abort(); // Stop polling — SSE delivered
+                        }).catch(() => {
+                            // SSE failed — polling will deliver
+                        }).finally(() => {
+                            setSending(false);
+                        });
+                    } else if (runStatus === 'interrupted') {
                         // Restore approval state: find the last assistant message with approvalRequest
                         const approvalMsg = [...hydrated].reverse().find((m) => m.approvalRequest);
                         if (approvalMsg?.approvalRequest) {
@@ -677,7 +745,8 @@ export default function AgentsPage() {
         url: string,
         headers: Record<string, string>,
         assistantMsgId: string,
-        signal: AbortSignal
+        signal: AbortSignal,
+        initialState?: { fullContent: string; segments: ChatSegment[] }
     ) => {
         const response = await fetch(url, { headers, signal });
         if (!response.ok || !response.body) throw new Error(`SSE failed: ${response.status}`);
@@ -685,9 +754,9 @@ export default function AgentsPage() {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
-        let fullContent = '';
-        const segments: ChatSegment[] = [];
-        let lastSegmentType: 'text' | 'tools' | null = null;
+        let fullContent = initialState?.fullContent ?? '';
+        const segments: ChatSegment[] = initialState?.segments ? [...initialState.segments] : [];
+        let lastSegmentType: 'text' | 'tools' | null = segments.length > 0 ? segments[segments.length - 1].type : null;
 
         while (true) {
             const { done, value } = await reader.read();

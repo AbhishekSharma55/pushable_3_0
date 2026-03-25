@@ -178,6 +178,46 @@ class RunEventBus {
         return this.runs.has(runId);
     }
 
+    /**
+     * Build a snapshot of accumulated state from buffered events.
+     * Used by the active-run endpoint so the frontend can display
+     * intermediate tool calls / content immediately on reconnect.
+     */
+    getSnapshot(runId: string): {
+        content: string;
+        toolCalls: Record<string, unknown>[];
+        thinking: string;
+        eventCount: number;
+    } | null {
+        const state = this.get(runId);
+        if (!state || state.events.length === 0) return null;
+
+        let content = "";
+        let thinking = "";
+        const toolCallMap = new Map<string, Record<string, unknown>>();
+
+        for (const event of state.events) {
+            const data = event.data;
+            if (typeof data.content === "string") {
+                content += data.content;
+            }
+            if (typeof data.thinkingContent === "string") {
+                thinking += data.thinkingContent;
+            }
+            if (data.toolCall && typeof (data.toolCall as Record<string, unknown>).id === "string") {
+                const tc = data.toolCall as Record<string, unknown>;
+                toolCallMap.set(tc.id as string, tc);
+            }
+        }
+
+        return {
+            content,
+            toolCalls: [...toolCallMap.values()],
+            thinking,
+            eventCount: state.events.length,
+        };
+    }
+
     /** Get the count of buffered events (for offset-based replay). */
     getEventCount(runId: string): number {
         return this.get(runId)?.events.length ?? 0;

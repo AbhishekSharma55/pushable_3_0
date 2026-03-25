@@ -696,11 +696,15 @@ export async function chatRoutes(fastify: FastifyInstance) {
     // SSE endpoint. Replays buffered events, then streams live events.
     // Supports reconnection: if client disconnects and reconnects, it gets
     // the full event history + any new events.
+    // Accepts optional `?from=N` query param to skip the first N events
+    // (used when the frontend already has a snapshot from active-run).
     fastify.get("/runs/:runId/events", async (request, reply) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const { runId } = request.params as { runId: string };
+        const { from } = request.query as { from?: string };
+        const fromIndex = from ? parseInt(from, 10) : 0;
 
-        logger.info({ runId }, "SSE endpoint hit");
+        logger.info({ runId, fromIndex }, "SSE endpoint hit");
 
         // Verify run belongs to workspace
         const run = await runRepository.findById(runId, workspaceId);
@@ -751,28 +755,30 @@ export async function chatRoutes(fastify: FastifyInstance) {
             }
         }
 
-        // Subscribe to the event bus (replays buffered + streams live)
+        // Subscribe to the event bus.
+        // When fromIndex > 0 (reconnection with snapshot), skip already-seen events.
         let eventCount = 0;
-        const unsubscribe = runEventBus.subscribe(
-            runId,
-            // onEvent: write SSE event to client
-            (event: SSEEvent) => {
-                eventCount++;
-                if (!res.destroyed) {
-                    res.write(`data: ${JSON.stringify(event.data)}\n\n`);
-                }
-            },
-            // onDone: send [DONE] and close
-            () => {
-                logger.info({ runId, eventCount }, "SSE: sending [DONE]");
-                if (!res.destroyed) {
-                    res.write(`data: [DONE]\n\n`);
-                    res.end();
-                }
-            }
-        );
 
-        logger.info({ runId, eventCount }, "SSE: subscribed to event bus");
+        const writeEvent = (event: SSEEvent) => {
+            eventCount++;
+            if (!res.destroyed) {
+                res.write(`data: ${JSON.stringify(event.data)}\n\n`);
+            }
+        };
+
+        const writeDone = () => {
+            logger.info({ runId, eventCount, fromIndex }, "SSE: sending [DONE]");
+            if (!res.destroyed) {
+                res.write(`data: [DONE]\n\n`);
+                res.end();
+            }
+        };
+
+        const unsubscribe = fromIndex > 0
+            ? runEventBus.subscribeFrom(runId, fromIndex, (event) => writeEvent(event), writeDone)
+            : runEventBus.subscribe(runId, writeEvent, writeDone);
+
+        logger.info({ runId, eventCount, fromIndex }, "SSE: subscribed to event bus");
 
         // Clean up subscription when client disconnects
         request.raw.on("close", () => {
@@ -784,11 +790,17 @@ export async function chatRoutes(fastify: FastifyInstance) {
     // ── GET /sessions/:sessionId/active-run ──────────────────────────────────
     // Returns the active run for a session (if any).
     // Frontend uses this on page refresh to reconnect.
+    // Includes a streaming snapshot from the RunEventBus so the frontend can
+    // immediately display intermediate tool calls / content on reconnect.
     fastify.get("/sessions/:sessionId/active-run", async (request) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const { sessionId } = request.params as { sessionId: string };
 
         const run = await runRepository.findActiveBySession(sessionId, workspaceId);
+        if (run) {
+            const streamingState = runEventBus.getSnapshot(run.id);
+            return { data: { ...run, streamingState: streamingState ?? undefined } };
+        }
         return { data: run };
     });
 

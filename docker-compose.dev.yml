@@ -105,6 +105,9 @@ services:
     environment:
       BRIDGE_PORT: "3001"
       BRIDGE_API_KEY: ""
+      BACKEND_URL: http://backend:4000
+    depends_on:
+      - backend
     volumes:
       - ./extension-bridge/src:/app/src
 

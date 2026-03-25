@@ -213,6 +213,7 @@ export class BridgeServer extends EventEmitter {
 
           const ext = this.extensions.get(targetWorkspaceId);
           if (ext && ext.socket.readyState === WebSocket.OPEN) {
+            this.log(`📤 → Extension [${msg.action}] cmdId=${(msg.commandId as string)?.slice(0,8)}... selector=${(msg.selector as string)?.slice(0,50) || '-'} text=${(msg.text as string)?.slice(0,30) || '-'}`);
             ext.socket.send(data.toString());
           } else {
             this.sendToBackend({
@@ -337,6 +338,12 @@ export class BridgeServer extends EventEmitter {
 
         // Inject workspaceId into the message so backend knows which workspace it came from
         const enrichedMsg = JSON.stringify({ ...msg, workspaceId });
+
+        // Log results from extension
+        if (msg.type === 'result') {
+          const ok = (msg as any).success ? '✅' : '❌';
+          this.log(`📥 ← Extension ${ok} [${(msg as any).action}] cmdId=${((msg as any).commandId as string)?.slice(0,8)}... ${(msg as any).success ? '' : 'error=' + ((msg as any).error || '').slice(0, 80)}`);
+        }
 
         // Forward to backend
         if (this.backendClient && this.backendClient.readyState === WebSocket.OPEN) {

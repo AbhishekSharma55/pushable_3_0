@@ -223,7 +223,7 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
 
     /** Execute a command scoped to this workspace */
     const exec = (action: string, params: Record<string, unknown> = {}, timeout?: number) =>
-        exec(action, params, timeout, workspaceId);
+        client.execute(action, params, timeout, workspaceId);
 
     const safe = async (fn: () => Promise<string>): Promise<string> => {
         try {

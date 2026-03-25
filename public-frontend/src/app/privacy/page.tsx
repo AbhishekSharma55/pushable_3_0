@@ -14,7 +14,7 @@ export default function PrivacyPage() {
         <div className="ey rev">Legal</div>
         <h1 className="rev d1">Privacy Policy</h1>
         <p className="page-date rev d2">
-          Last updated: June 2024
+          Last updated: March 2026
         </p>
       </div>
 
@@ -103,7 +103,7 @@ export default function PrivacyPage() {
         <h2>Contact Us</h2>
         <p>
           If you have any questions, contact us at:{" "}
-          <a href="mailto:support@pushable.ai">support@pushable.ai</a>
+          <a href="mailto:info@pushable.ai">info@pushable.ai</a>
         </p>
       </div>
     </PageShell>

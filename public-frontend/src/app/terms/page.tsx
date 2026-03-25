@@ -14,7 +14,7 @@ export default function TermsPage() {
         <div className="ey rev">Legal</div>
         <h1 className="rev d1">Terms and Conditions</h1>
         <p className="page-date rev d2">
-          Last updated: [Add Date]
+          Last updated: March 2026
         </p>
       </div>
 
@@ -82,7 +82,7 @@ export default function TermsPage() {
         <h2>Contact</h2>
         <p>
           For any queries, contact:{" "}
-          <a href="mailto:support@pushable.ai">support@pushable.ai</a>
+          <a href="mailto:info@pushable.ai">info@pushable.ai</a>
         </p>
       </div>
     </PageShell>

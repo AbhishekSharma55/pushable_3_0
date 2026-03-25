@@ -32,6 +32,8 @@ interface CreateLLMOptions {
     temperature: number;
     streaming?: boolean;
     maxRetries?: number;
+    /** Controls how much compute the model uses: "low" | "medium" | "high". Default: "medium". */
+    effort?: "low" | "medium" | "high";
 }
 
 /**
@@ -46,6 +48,7 @@ export function createLLM(options: CreateLLMOptions) {
         temperature,
         streaming = true,
         maxRetries = 3,
+        effort = "low",
     } = options;
 
     const useClaudeDirect =
@@ -72,6 +75,7 @@ export function createLLM(options: CreateLLMOptions) {
                     clientOptions: {
                         baseURL: cliProxyUrl,
                     },
+                    outputConfig: { effort },
                 });
 
             return {
@@ -100,6 +104,7 @@ export function createLLM(options: CreateLLMOptions) {
                 streaming,
                 maxRetries,
                 anthropicApiKey: apiKey,
+                outputConfig: { effort },
             });
 
         return {

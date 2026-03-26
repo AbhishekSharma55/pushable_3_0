@@ -343,6 +343,15 @@ export class BridgeServer extends EventEmitter {
         if (msg.type === 'result') {
           const ok = (msg as any).success ? '✅' : '❌';
           this.log(`📥 ← Extension ${ok} [${(msg as any).action}] cmdId=${((msg as any).commandId as string)?.slice(0,8)}... ${(msg as any).success ? '' : 'error=' + ((msg as any).error || '').slice(0, 80)}`);
+          // Log snapshot data for getElements/getPageInfo
+          if ((msg as any).success && ((msg as any).action === 'getElements' || (msg as any).action === 'getPageInfo')) {
+            const data = (msg as any).data;
+            if (data?.snapshot) {
+              this.log(`📋 SNAPSHOT:\n${(data.snapshot as string).slice(0, 2000)}`);
+            } else {
+              this.log(`📋 DATA KEYS: ${Object.keys(data || {}).join(', ')} | DATA SIZE: ${JSON.stringify(data || '').length} bytes`);
+            }
+          }
         }
 
         // Forward to backend

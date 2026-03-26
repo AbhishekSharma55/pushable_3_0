@@ -237,9 +237,13 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
         if (!r.success)
             return `Error: ${r.error || "Unknown error"}`;
         if (r.data === undefined || r.data === null) return "Success";
+        // If data has a snapshot field (from getElements/getPageInfo), return it directly
+        if (typeof r.data === "object" && r.data !== null && "snapshot" in (r.data as Record<string, unknown>)) {
+            return (r.data as Record<string, unknown>).snapshot as string;
+        }
         return typeof r.data === "string"
             ? r.data
-            : JSON.stringify(r.data, null, 2);
+            : JSON.stringify(r.data);
     };
 
     return [
@@ -290,11 +294,11 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
         new DynamicStructuredTool({
             name: "ext_browser_click",
             description:
-                "[CRITICAL: USE THIS TOOL instead of browser_click when using the Chrome extension] Click an element in Chrome by CSS selector.",
+                "Click an element in Chrome. Use [data-psh-id=\"N\"] selectors from get_elements. Works with shadow DOM.",
             schema: z.object({
                 selector: z
                     .string()
-                    .describe("CSS selector of element to click"),
+                    .describe('Element selector, e.g. [data-psh-id="5"]'),
             }),
             func: async ({ selector }: { selector: string }) =>
                 safe(async () =>
@@ -305,11 +309,11 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
         new DynamicStructuredTool({
             name: "ext_browser_type",
             description:
-                "[CRITICAL: USE THIS TOOL instead of browser_type when using the Chrome extension] Type text into an input field in Chrome.",
+                "Type text into an input/textarea/contenteditable in Chrome. Use [data-psh-id=\"N\"] selectors.",
             schema: z.object({
                 selector: z
                     .string()
-                    .describe("CSS selector of the input field"),
+                    .describe('Element selector, e.g. [data-psh-id="3"]'),
                 text: z.string().describe("Text to type"),
             }),
             func: async ({ selector, text }: { selector: string; text: string }) =>
@@ -347,7 +351,7 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
         new DynamicStructuredTool({
             name: "ext_browser_get_page_info",
             description:
-                "Get page URL, title, text, inputs, buttons, and links from Chrome.",
+                "Get a compact snapshot of the page: URL, title, visible text, and all interactive elements with their [data-psh-id] selectors. Returns a text snapshot — each line is one element like: [5] button \"Submit\". Use [data-psh-id=\"5\"] as the selector for click/type.",
             schema: z.object({}),
             func: async () =>
                 safe(async () =>
@@ -358,7 +362,7 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
         new DynamicStructuredTool({
             name: "ext_browser_get_elements",
             description:
-                "Get all interactive elements (inputs, buttons, links) with CSS selectors from Chrome.",
+                "Get a compact snapshot of all interactive elements on the page with [data-psh-id] selectors. Faster than get_page_info (no page text). Each element shown as: [N] role \"label\". Use [data-psh-id=\"N\"] as selector.",
             schema: z.object({}),
             func: async () =>
                 safe(async () =>

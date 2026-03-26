@@ -1,18 +1,16 @@
 /**
- * content.js — Browser automation v3.2
+ * content.js — Browser automation v4
  *
- * Critical fix: ALL synthetic events use composed:true to cross shadow DOM boundaries.
- * Without composed:true, events dispatched on shadow children stop at the shadow boundary
- * and never reach the host's event listeners (e.g. Reddit upvote, Facebook like).
+ * ARCHITECTURE:
+ * - Content script (ISOLATED world): ONLY handles scanning/observation
+ * - All interactions (click, type) happen via background.js → executeScript(MAIN world)
+ * - This separation ensures events use the page's JS constructors
  *
- * Strategy:
- * - Recursive shadow DOM traversal with depth guard
- * - Element map with data-psh-id tags for reliable re-discovery
- * - Full pointer event sequence (pointerover→click) with composed:true
- * - Smart typing: detects contenteditable, shadow inputs, placeholder→editor swaps
+ * Shadow DOM: Recursively walks open shadow roots to find ALL elements
+ * Element tagging: Every element gets data-psh-id for cross-world referencing
  */
 (() => {
-  let elementMap = new Map(); // id → { el, label, depth }
+  let elementMap = new Map();
   let nextId = 1;
 
   const SELECTORS = [
@@ -36,42 +34,66 @@
     'details > summary',
   ].join(', ');
 
-  /* ══════════════════════════════════════════════════════════════
-   *  HELPERS
-   * ══════════════════════════════════════════════════════════════ */
-
+  /* ── Visibility ── */
   function isVisible(el) {
     if (!el || typeof el.getBoundingClientRect !== 'function') return false;
     const rect = el.getBoundingClientRect();
     if (!rect.width || !rect.height) return false;
     try {
-      const style = getComputedStyle(el);
-      if (style.display === 'none') return false;
-      if (style.visibility === 'hidden') return false;
-      if (style.opacity === '0') return false;
+      const s = getComputedStyle(el);
+      if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
     } catch { return false; }
     return true;
   }
 
+  /* ── Label extraction — handles shadow DOM slotted content ── */
   function getLabel(el) {
-    const candidates = [
-      el.getAttribute('aria-label'),
-      el.getAttribute('title'),
-      el.getAttribute('placeholder'),
-      el.getAttribute('data-testid'),
-      el.getAttribute('data-click-id'),   // Reddit uses this
-      el.getAttribute('alt'),
-      el.getAttribute('name'),
-    ];
-    for (const c of candidates) {
-      if (c && c.trim()) return c.trim().replace(/[\n\r\t]+/g, ' ').slice(0, 60);
+    // 1. Check attributes first (fast, reliable)
+    for (const attr of ['aria-label', 'title', 'placeholder', 'data-testid', 'data-click-id', 'alt', 'name']) {
+      const v = el.getAttribute(attr);
+      if (v && v.trim()) return v.trim().replace(/[\n\r\t]+/g, ' ').slice(0, 60);
     }
+
+    // 2. innerText — works for most elements including slotted content
     const text = (el.innerText || '').trim();
     if (text && text.length <= 80) return text.replace(/\s+/g, ' ').slice(0, 60);
+
+    // 3. textContent — catches text nodes that innerText might miss
+    const tc = (el.textContent || '').trim();
+    if (tc && tc.length <= 80 && tc.length > 0) return tc.replace(/\s+/g, ' ').slice(0, 60);
+
+    // 4. For buttons with only SVG icons, check svg icon-name
+    try {
+      const svg = el.querySelector('svg[icon-name]');
+      if (svg) return svg.getAttribute('icon-name');
+    } catch {}
+
+    // 5. Check children's shadow roots for slotted text (Reddit's faceplate-screen-reader-content)
+    try {
+      for (const child of el.querySelectorAll('*')) {
+        if (child.shadowRoot) {
+          const slotText = (child.textContent || '').trim();
+          if (slotText && slotText.length <= 60) return slotText.replace(/\s+/g, ' ');
+        }
+        // Also check direct text content of custom elements
+        if (child.tagName.includes('-')) {
+          const ct = (child.textContent || '').trim();
+          if (ct && ct.length <= 60) return ct.replace(/\s+/g, ' ');
+        }
+      }
+    } catch {}
+
+    // 6. Input value
     if (el.value && typeof el.value === 'string') return el.value.slice(0, 60);
+
+    // 7. Check for upvote/downvote HTML attributes (Reddit specific)
+    if (el.hasAttribute('upvote')) return 'Upvote';
+    if (el.hasAttribute('downvote')) return 'Downvote';
+
     return '';
   }
 
+  /* ── Role ── */
   function getRole(el) {
     const role = el.getAttribute('role');
     if (role) return role;
@@ -86,84 +108,34 @@
     return tag;
   }
 
-  /* ══════════════════════════════════════════════════════════════
-   *  SHADOW DOM TRAVERSAL — recursive with depth guard
-   * ══════════════════════════════════════════════════════════════ */
-
+  /* ── Shadow DOM recursive collection ── */
   function collectElements(root, results, depth) {
     if (depth > 8) return;
 
-    // Query this root for interactive elements
     let nodes = [];
     try { nodes = [...root.querySelectorAll(SELECTORS)]; } catch {}
 
     for (const el of nodes) {
       if (!isVisible(el)) continue;
       const label = getLabel(el);
+      if (!label) continue;  // Skip unlabeled elements — they waste slots and confuse the LLM
       results.push({ el, label, depth });
-
-      // If this element hosts a shadow root, recurse into it
-      if (el.shadowRoot) {
-        collectElements(el.shadowRoot, results, depth + 1);
-      }
+      if (el.shadowRoot) collectElements(el.shadowRoot, results, depth + 1);
     }
 
-    // Also walk ALL elements under this root looking for shadow hosts
-    // (catches hosts that aren't in our selector list, e.g. <shreddit-vote-button>)
+    // Walk ALL elements for shadow hosts not in our selector list
     try {
       for (const el of root.querySelectorAll('*')) {
-        if (el.shadowRoot) {
-          collectElements(el.shadowRoot, results, depth + 1);
-        }
+        if (el.shadowRoot) collectElements(el.shadowRoot, results, depth + 1);
       }
     } catch {}
   }
 
-  function querySelectorDeep(selector) {
-    // Fast path
-    try {
-      const el = document.querySelector(selector);
-      if (el) return el;
-    } catch {}
-
-    // Check by data-psh-id
-    if (selector.startsWith('[data-psh-id=')) {
-      const visited = new WeakSet();
-      function search(root) {
-        if (!root || visited.has(root)) return null;
-        visited.add(root);
-        try {
-          const el = root.querySelector(selector);
-          if (el) return el;
-        } catch {}
-        try {
-          for (const child of root.querySelectorAll('*')) {
-            if (child.shadowRoot) {
-              const found = search(child.shadowRoot);
-              if (found) return found;
-            }
-          }
-        } catch {}
-        return null;
-      }
-      return search(document);
-    }
-
-    return null;
-  }
-
-  /* ══════════════════════════════════════════════════════════════
-   *  ELEMENT MAP — scan, tag, resolve
-   * ══════════════════════════════════════════════════════════════ */
-
+  /* ── Rebuild element map — ZERO DOM MODIFICATIONS ── */
+  // This is critical: setting attributes during scan triggers MutationObserver
+  // events that close dropdowns, menus, and modals on most sites.
+  // Instead, we store elements only in the JS Map and use coordinates for clicks.
   function rebuildElementMap() {
-    // Clear old tags
-    try {
-      document.querySelectorAll('[data-psh-id]').forEach(el => {
-        try { el.removeAttribute('data-psh-id'); } catch {}
-      });
-    } catch {}
-
     elementMap = new Map();
     nextId = 1;
 
@@ -178,468 +150,165 @@
       return true;
     });
 
-    // Sort by viewport position, take top 80
+    // Sort by vertical position
     unique.sort((a, b) => {
-      const ra = a.el.getBoundingClientRect();
-      const rb = b.el.getBoundingClientRect();
-      return ra.top - rb.top;
+      return a.el.getBoundingClientRect().top - b.el.getBoundingClientRect().top;
     });
 
     const tagged = [];
-    for (const item of unique.slice(0, 80)) {
+    for (const item of unique.slice(0, 60)) {
       const id = nextId++;
       elementMap.set(id, item);
-      try { item.el.setAttribute('data-psh-id', String(id)); } catch {}
       tagged.push({ id, ...item });
     }
     return tagged;
   }
 
+  /**
+   * Get nearby text context for an element (helps LLM understand what the button is for).
+   * E.g. an upvote button near "D-Ribose • 1mo ago" tells the LLM which comment it belongs to.
+   */
+  function getNearbyContext(el) {
+    // Walk up to find the nearest container with meaningful text
+    let parent = el.parentElement;
+    for (let i = 0; i < 5 && parent; i++) {
+      // Look for username, timestamp, or post title near this element
+      const texts = [];
+      // Check siblings and close relatives for context clues
+      for (const child of parent.children) {
+        if (child === el) continue;
+        const t = (child.innerText || '').trim().replace(/\s+/g, ' ');
+        if (t && t.length > 1 && t.length < 80 && !/^\d+$/.test(t)) {
+          texts.push(t.slice(0, 40));
+        }
+        if (texts.length >= 2) break;
+      }
+      if (texts.length > 0) return texts.join(' | ');
+      parent = parent.parentElement;
+    }
+    return '';
+  }
+
+  /* ── Build compact text snapshot with section grouping ── */
+  function buildSnapshot(includePageText) {
+    const tagged = rebuildElementMap();
+    const lines = [];
+    lines.push(`PAGE: ${location.href}`);
+    lines.push(`TITLE: ${document.title}`);
+
+    if (includePageText) {
+      const text = (document.body.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 1500);
+      lines.push(`TEXT: ${text}`);
+    }
+
+    // Group elements by vertical proximity (elements within 50px are in the same group)
+    lines.push(`\nELEMENTS (use [data-psh-id="N"] as selector):`);
+
+    let lastTop = -999;
+    for (const { id, el, label, depth } of tagged) {
+      const role = getRole(el);
+      const tag = el.tagName.toLowerCase();
+      const shadow = depth > 0 ? ` [shadow:${depth}]` : '';
+      const focused = (el === document.activeElement) ? ' ← focused' : '';
+      const rect = el.getBoundingClientRect();
+
+      // Insert section break for elements far apart vertically
+      if (rect.top - lastTop > 100) {
+        lines.push('---'); // visual separator between page sections
+      }
+      lastTop = rect.top;
+
+      let desc = `  [${id}] ${role} "${label}"${shadow}${focused}`;
+
+      // Inputs: show placeholder, value, type
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable) {
+        const ph = el.getAttribute('placeholder');
+        if (ph) desc += ` placeholder="${ph}"`;
+        const val = el.isContentEditable ? (el.innerText || '').trim() : (el.value || '');
+        if (val) desc += ` value="${val.slice(0, 50)}"`;
+        if (el.type && el.type !== 'text') desc += ` type=${el.type}`;
+      }
+
+      // Links: show path
+      if (tag === 'a' && el.href) {
+        try { desc += ` href=${new URL(el.href).pathname.slice(0, 60)}`; } catch {}
+      }
+
+      // Reddit/social special attributes
+      if (el.hasAttribute('upvote')) desc += ' [UPVOTE-BTN]';
+      if (el.hasAttribute('downvote')) desc += ' [DOWNVOTE-BTN]';
+      const ariaPressed = el.getAttribute('aria-pressed');
+      if (ariaPressed) desc += ` pressed=${ariaPressed}`;
+
+      // Nearby context for buttons (helps associate buttons with content)
+      if (tag === 'button' || role === 'button') {
+        const ctx = getNearbyContext(el);
+        if (ctx) desc += ` near="${ctx}"`;
+      }
+
+      lines.push(desc);
+    }
+
+    return lines.join('\n');
+  }
+
+  /* ── Resolve element from ref — Map-first, no DOM query needed ── */
   function resolveElement(ref) {
     if (ref === undefined || ref === null) return null;
-
-    // Numeric → map lookup
     if (typeof ref === 'number') {
       const entry = elementMap.get(ref);
       return entry ? entry.el : null;
     }
-
     if (typeof ref === 'string') {
       const trimmed = ref.trim();
 
-      // Numeric string → map lookup
+      // Parse [data-psh-id="N"] → lookup in Map (primary path)
+      const match = trimmed.match(/data-psh-id="(\d+)"/);
+      if (match) {
+        const id = parseInt(match[1], 10);
+        const entry = elementMap.get(id);
+        if (entry) return entry.el;
+      }
+
+      // Pure numeric string → Map lookup
       const num = parseInt(trimmed, 10);
       if (!isNaN(num) && String(num) === trimmed && elementMap.has(num)) {
         return elementMap.get(num).el;
       }
 
-      // data-psh-id selector → deep search
-      if (trimmed.startsWith('[data-psh-id=')) {
-        return querySelectorDeep(trimmed);
-      }
-
-      // CSS selector
-      try {
-        const el = document.querySelector(trimmed);
-        if (el) return el;
-      } catch {}
-
-      // Deep CSS selector (shadow DOM)
-      return querySelectorDeep(trimmed);
+      // Fallback: CSS selector (for non-scan elements)
+      try { return document.querySelector(trimmed); } catch {}
     }
     return null;
   }
 
-  /* ══════════════════════════════════════════════════════════════
-   *  PAGE INFO / GET ELEMENTS — returns tagged elements
-   * ══════════════════════════════════════════════════════════════ */
-
-  function domGetPageInfo() {
-    const tagged = rebuildElementMap();
-    const url = location.href;
-    const title = document.title;
-    const text = (document.body.innerText || '').slice(0, 3000);
-
-    const inputs = [], buttons = [], links = [];
-
-    for (const { id, el, label, depth } of tagged) {
-      const selector = `[data-psh-id="${id}"]`;
-      const tag = el.tagName.toLowerCase();
-      const shadowInfo = depth > 0 ? ` [shadow:${depth}]` : '';
-
-      if (tag === 'input' || tag === 'textarea' || tag === 'select' ||
-          el.isContentEditable || el.getAttribute('role') === 'textbox' ||
-          el.getAttribute('role') === 'combobox' || el.getAttribute('role') === 'searchbox') {
-        if (inputs.length < 30) {
-          inputs.push({
-            selector, tag, label: label + shadowInfo,
-            type: el.type || (el.isContentEditable ? 'contenteditable' : ''),
-            placeholder: el.getAttribute('placeholder') || '',
-            value: el.isContentEditable ? (el.innerText || '').slice(0, 100) : (el.value || '').slice(0, 100),
-            name: el.getAttribute('name') || '',
-            ariaLabel: el.getAttribute('aria-label') || ''
-          });
-        }
-      } else if (tag === 'a' && el.href) {
-        if (links.length < 50) {
-          links.push({ href: el.href, text: (label + shadowInfo).slice(0, 80), selector });
-        }
-      } else {
-        if (buttons.length < 40) {
-          buttons.push({
-            selector, tag, text: (label + shadowInfo).slice(0, 80),
-            role: el.getAttribute('role') || '',
-            ariaLabel: el.getAttribute('aria-label') || ''
-          });
-        }
-      }
-    }
-
-    return { url, title, text, inputs, buttons, links };
-  }
-
-  function domGetElements() {
-    const tagged = rebuildElementMap();
-    const inputs = [], clickables = [];
-
-    for (const { id, el, label, depth } of tagged) {
-      const selector = `[data-psh-id="${id}"]`;
-      const tag = el.tagName.toLowerCase();
-      const shadowInfo = depth > 0 ? ` [shadow:${depth}]` : '';
-
-      if (tag === 'input' || tag === 'textarea' || tag === 'select' ||
-          el.isContentEditable || el.getAttribute('role') === 'textbox' ||
-          el.getAttribute('role') === 'combobox') {
-        if (inputs.length < 30) {
-          inputs.push({
-            tag, selector, label: label + shadowInfo, visible: true,
-            type: el.type || (el.isContentEditable ? 'contenteditable' : ''),
-            placeholder: el.getAttribute('placeholder') || '',
-            value: el.isContentEditable ? (el.innerText || '').slice(0, 100) : (el.value || '').slice(0, 100),
-          });
-        }
-      } else {
-        if (clickables.length < 40) {
-          clickables.push({
-            tag, selector, visible: true,
-            text: (label + shadowInfo).slice(0, 80),
-            href: el.href || '',
-            role: el.getAttribute('role') || '',
-            ariaLabel: el.getAttribute('aria-label') || ''
-          });
-        }
-      }
-    }
-
-    return { inputs, clickables };
-  }
-
-  /* ══════════════════════════════════════════════════════════════
-   *  CLICK — composed:true event sequence that crosses shadow DOM
-   * ══════════════════════════════════════════════════════════════ */
-
-  function shadowSafeClick(el) {
-    const rect = el.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-
-    const baseOpts = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,     // ← CRITICAL: crosses shadow DOM boundaries
-      clientX: cx,
-      clientY: cy,
-      screenX: cx + window.screenX,
-      screenY: cy + window.screenY,
-      button: 0,
-      buttons: 1,
-      view: window,
-    };
-
-    // Full pointer+mouse event sequence — many shadow components listen for
-    // pointerdown+pointerup rather than just click
-    el.dispatchEvent(new PointerEvent('pointerover',  { ...baseOpts }));
-    el.dispatchEvent(new PointerEvent('pointerenter', { ...baseOpts, bubbles: false }));
-    el.dispatchEvent(new MouseEvent('mouseover',      baseOpts));
-    el.dispatchEvent(new MouseEvent('mouseenter',     { ...baseOpts, bubbles: false }));
-    el.dispatchEvent(new MouseEvent('mousemove',      baseOpts));
-    el.dispatchEvent(new PointerEvent('pointerdown',  baseOpts));
-    el.dispatchEvent(new MouseEvent('mousedown',      baseOpts));
-    if (typeof el.focus === 'function') el.focus();
-    el.dispatchEvent(new PointerEvent('pointerup',    baseOpts));
-    el.dispatchEvent(new MouseEvent('mouseup',        baseOpts));
-    el.dispatchEvent(new MouseEvent('click',          baseOpts));
-    el.dispatchEvent(new PointerEvent('pointerout',   baseOpts));
-    el.dispatchEvent(new MouseEvent('mouseout',       baseOpts));
-  }
-
-  function domClick(ref) {
-    const el = resolveElement(ref);
-    if (!el) return { ok: false, error: `Element not found: ${ref}` };
-
-    el.scrollIntoView({ block: 'center', behavior: 'instant' });
-
-    // Use native .click() first — triggers built-in behaviors
-    try { el.click(); } catch {}
-
-    // Then fire full composed event sequence for shadow DOM components
-    shadowSafeClick(el);
-
-    return { ok: true };
-  }
-
-  function domClickPoint(nx, ny) {
-    const px = Math.round(nx * window.innerWidth);
-    const py = Math.round(ny * window.innerHeight);
-    const el = document.elementFromPoint(px, py);
-    if (!el) return { ok: false, error: `No element at (${px}, ${py})` };
-
-    try { el.click(); } catch {}
-    shadowSafeClick(el);
-
-    return { ok: true, x: px, y: py, tag: el.tagName.toLowerCase() };
-  }
-
-  /* ══════════════════════════════════════════════════════════════
-   *  TYPE — shadow-aware, finds real editor after placeholder swap
-   * ══════════════════════════════════════════════════════════════ */
-
-  function findBestTypingTarget(originalEl) {
-    // 1. Currently focused element
-    const active = document.activeElement;
-    if (active && active !== document.body && active !== document.documentElement) {
-      if (active.isContentEditable || active.tagName === 'TEXTAREA' || active.tagName === 'INPUT') {
-        return active;
-      }
-      // Check shadow root of focused element
-      if (active.shadowRoot) {
-        const inner = active.shadowRoot.querySelector('[contenteditable="true"], textarea, input:not([type=hidden])');
-        if (inner && isVisible(inner)) return inner;
-      }
-    }
-
-    // 2. Original element if still editable
-    if (originalEl && document.body.contains(originalEl)) {
-      if (originalEl.isContentEditable || originalEl.tagName === 'TEXTAREA' || originalEl.tagName === 'INPUT') {
-        return originalEl;
-      }
-      // Check shadow root of original element
-      if (originalEl.shadowRoot) {
-        const inner = originalEl.shadowRoot.querySelector('[contenteditable="true"], textarea, input:not([type=hidden])');
-        if (inner) return inner;
-      }
-    }
-
-    // 3. Search all shadow roots for contenteditable
-    const editables = [];
-    collectElements(document, editables, 0);
-    for (const { el } of editables) {
-      if (el.isContentEditable && isVisible(el)) return el;
-      if ((el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') && isVisible(el)) return el;
-    }
-
-    return originalEl;
-  }
-
-  function shadowSafeType(el, text) {
-    el.focus();
-    // If the element has a shadow root with an inner input, type into that
-    const realInput = el.shadowRoot?.querySelector('input, textarea') || el;
-
-    if (realInput.isContentEditable) {
-      // Contenteditable: use execCommand
-      const sel = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(realInput);
-      sel.removeAllRanges();
-      sel.addRange(range);
-      if (realInput.textContent) document.execCommand('delete', false, null);
-      const ok = document.execCommand('insertText', false, text);
-      if (!ok) {
-        realInput.textContent = '';
-        realInput.appendChild(document.createTextNode(text));
-      }
-      realInput.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: text }));
-      realInput.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-    } else {
-      // Standard input/textarea
-      const tracker = realInput._valueTracker;
-      if (tracker) tracker.setValue('');
-
-      const proto = Object.getPrototypeOf(realInput);
-      const desc =
-        Object.getOwnPropertyDescriptor(proto, 'value') ||
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') ||
-        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
-
-      if (desc && desc.set) desc.set.call(realInput, text);
-      else realInput.value = text;
-
-      realInput.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: text }));
-      realInput.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-    }
-  }
-
-  function domType(ref, text) {
-    let el = resolveElement(ref);
-    if (!el) return { ok: false, error: `Element not found: ${ref}` };
-
-    el.scrollIntoView({ block: 'center', behavior: 'instant' });
-    if (typeof el.focus === 'function') el.focus();
-
-    // If not editable, click first (might open editor) then find real target
-    const isEditable = el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
-    if (!isEditable) {
-      try { el.click(); } catch {}
-      shadowSafeClick(el);
-      const target = findBestTypingTarget(el);
-      if (target && target !== el) {
-        el = target;
-        el.scrollIntoView({ block: 'center', behavior: 'instant' });
-        if (typeof el.focus === 'function') el.focus();
-      }
-    }
-
-    shadowSafeType(el, text);
-    return { ok: true };
-  }
-
-  function domTypeChar(ref, text, delay = 80) {
-    return new Promise((resolve) => {
-      let el = resolveElement(ref);
-      if (!el) { resolve({ ok: false, error: `Element not found: ${ref}` }); return; }
-
-      el.scrollIntoView({ block: 'center', behavior: 'instant' });
-      if (typeof el.focus === 'function') el.focus();
-
-      // Smart target detection
-      const isEditable = el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
-      if (!isEditable) {
-        try { el.click(); } catch {}
-        const target = findBestTypingTarget(el);
-        if (target) el = target;
-        if (typeof el.focus === 'function') el.focus();
-      }
-
-      const realInput = el.shadowRoot?.querySelector('input, textarea') || el;
-      const isContentEditable = realInput.isContentEditable;
-      let i = 0;
-
-      function typeNext() {
-        if (i >= text.length) {
-          realInput.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-          resolve({ ok: true });
-          return;
-        }
-        const ch = text[i];
-        const keyOpts = { key: ch, code: `Key${ch.toUpperCase()}`, bubbles: true, cancelable: true, composed: true };
-
-        realInput.dispatchEvent(new KeyboardEvent('keydown', keyOpts));
-        realInput.dispatchEvent(new KeyboardEvent('keypress', keyOpts));
-
-        if (isContentEditable) {
-          document.execCommand('insertText', false, ch);
-        } else {
-          const tracker = realInput._valueTracker;
-          if (tracker) tracker.setValue(realInput.value);
-          const proto = Object.getPrototypeOf(realInput);
-          const desc =
-            Object.getOwnPropertyDescriptor(proto, 'value') ||
-            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') ||
-            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
-          if (desc && desc.set) desc.set.call(realInput, realInput.value + ch);
-          else realInput.value += ch;
-        }
-
-        realInput.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: ch }));
-        realInput.dispatchEvent(new KeyboardEvent('keyup', keyOpts));
-        i++;
-        setTimeout(typeNext, delay);
-      }
-      typeNext();
-    });
-  }
-
-  /* ══════════════════════════════════════════════════════════════
-   *  OTHER INTERACTIONS
-   * ══════════════════════════════════════════════════════════════ */
-
-  function domKeyPress(key) {
-    const keyMap = {
-      Enter:      { key: 'Enter',      code: 'Enter',      keyCode: 13 },
-      Tab:        { key: 'Tab',        code: 'Tab',        keyCode: 9 },
-      Escape:     { key: 'Escape',     code: 'Escape',     keyCode: 27 },
-      Backspace:  { key: 'Backspace',  code: 'Backspace',  keyCode: 8 },
-      Delete:     { key: 'Delete',     code: 'Delete',     keyCode: 46 },
-      Space:      { key: ' ',          code: 'Space',      keyCode: 32 },
-      ArrowUp:    { key: 'ArrowUp',    code: 'ArrowUp',    keyCode: 38 },
-      ArrowDown:  { key: 'ArrowDown',  code: 'ArrowDown',  keyCode: 40 },
-      ArrowLeft:  { key: 'ArrowLeft',  code: 'ArrowLeft',  keyCode: 37 },
-      ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
-    };
-    const mapped = keyMap[key] || { key, code: key, keyCode: 0 };
-    const target = document.activeElement || document.body;
-    const opts = { ...mapped, bubbles: true, cancelable: true, composed: true };
-    target.dispatchEvent(new KeyboardEvent('keydown', opts));
-    target.dispatchEvent(new KeyboardEvent('keypress', opts));
-    target.dispatchEvent(new KeyboardEvent('keyup', opts));
-    if (key === 'Enter' && target.form) {
-      try { target.form.requestSubmit ? target.form.requestSubmit() : target.form.submit(); } catch {}
-    }
-    return { ok: true };
-  }
-
-  function domSelect(ref, value) {
-    const el = resolveElement(ref);
-    if (!el) return { ok: false, error: `Element not found: ${ref}` };
-    const tracker = el._valueTracker;
-    if (tracker) tracker.setValue('');
-    const desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
-    if (desc && desc.set) desc.set.call(el, value);
-    else el.value = value;
-    el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-    return { ok: true };
-  }
-
-  function domHover(ref) {
-    const el = resolveElement(ref);
-    if (!el) return { ok: false, error: `Element not found: ${ref}` };
-    el.scrollIntoView({ block: 'center', behavior: 'instant' });
-    const rect = el.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const opts = { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, view: window };
-    el.dispatchEvent(new PointerEvent('pointerover', opts));
-    el.dispatchEvent(new MouseEvent('mouseover', opts));
-    el.dispatchEvent(new PointerEvent('pointerenter', { ...opts, bubbles: false }));
-    el.dispatchEvent(new MouseEvent('mouseenter', { ...opts, bubbles: false }));
-    el.dispatchEvent(new MouseEvent('mousemove', opts));
-    return { ok: true };
-  }
-
-  function domScroll(selector, x, y) {
-    if (selector) {
-      const el = resolveElement(selector);
-      if (!el) return { ok: false, error: `Element not found: ${selector}` };
-      el.scrollBy({ left: x || 0, top: y || 0, behavior: 'instant' });
-    } else {
-      window.scrollBy({ left: x || 0, top: y || 0, behavior: 'instant' });
-    }
-    return { ok: true };
-  }
-
+  /* ── Wait for element (deep search) ── */
   function domWaitForElement(selector, timeout = 10000) {
     return new Promise((resolve) => {
       const start = Date.now();
       function poll() {
-        const el = resolveElement(selector) || querySelectorDeep(selector);
+        let el = null;
+        try { el = document.querySelector(selector); } catch {}
+        if (!el) {
+          // Deep search in shadow roots
+          const results = [];
+          collectElements(document, results, 0);
+          for (const r of results) {
+            if (r.label && r.label.toLowerCase().includes(selector.toLowerCase())) {
+              el = r.el;
+              break;
+            }
+          }
+        }
         if (el && isVisible(el)) { resolve({ ok: true }); return; }
-        if (Date.now() - start >= timeout) { resolve({ ok: false, error: `Timeout waiting for: ${selector}` }); return; }
+        if (Date.now() - start >= timeout) { resolve({ ok: false, error: `Timeout: ${selector}` }); return; }
         setTimeout(poll, 300);
       }
       poll();
     });
   }
 
-  function domGetAttribute(ref, attribute) {
-    const el = resolveElement(ref);
-    if (!el) return { ok: false, error: `Element not found: ${ref}` };
-    return { ok: true, value: el.getAttribute(attribute) ?? el[attribute] ?? null };
-  }
-
-  function domGetCoords(ref) {
-    const el = resolveElement(ref);
-    if (!el) return { error: 'not found' };
-    el.scrollIntoView({ block: 'center', behavior: 'instant' });
-    const rect = el.getBoundingClientRect();
-    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  }
-
-  /* ══════════════════════════════════════════════════════════════
-   *  WAIT FOR DOM
-   * ══════════════════════════════════════════════════════════════ */
-
+  /* ── Wait for DOM settle ── */
   function waitForDOM(quietMs = 400, maxMs = 5000) {
     return new Promise((resolve) => {
       let timer;
@@ -654,10 +323,21 @@
     });
   }
 
-  /* ══════════════════════════════════════════════════════════════
-   *  MESSAGE HANDLER
-   * ══════════════════════════════════════════════════════════════ */
+  /** Quick DOM settle — wait for React/Lit re-renders to finish before scanning */
+  function quickSettle() {
+    return new Promise((resolve) => {
+      let timer = setTimeout(resolve, 150); // default: 150ms is enough for most renders
+      const obs = new MutationObserver(() => {
+        clearTimeout(timer);
+        timer = setTimeout(() => { obs.disconnect(); resolve(); }, 150);
+      });
+      obs.observe(document.body, { childList: true, subtree: true });
+      // Hard cap at 1 second
+      setTimeout(() => { clearTimeout(timer); obs.disconnect(); resolve(); }, 1000);
+    });
+  }
 
+  /* ── Message handler — ONLY observation, no interactions ── */
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     const action = msg.action || msg.type;
 
@@ -667,57 +347,52 @@
         return false;
 
       case 'getPageInfo':
-        sendResponse(domGetPageInfo());
+        // Synchronous scan — no async waits that might close dropdowns/menus
+        sendResponse({ snapshot: buildSnapshot(true) });
         return false;
 
       case 'getElements':
       case 'getInteractiveElements':
-        sendResponse(domGetElements());
+        // Synchronous scan — no async waits that might close dropdowns/menus
+        sendResponse({ snapshot: buildSnapshot(false) });
         return false;
 
-      case 'getCoords':
-        sendResponse(domGetCoords(msg.selector || msg.elementId));
-        return false;
+      // Get element coordinates — scrolls into view first so elementFromPoint works
+      case 'getClickCoords': {
+        const el = resolveElement(msg.selector);
+        if (!el) { sendResponse({ x: null, y: null }); return false; }
+        // Scroll into view so the element is in the viewport
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        // Small delay for scroll to complete, then get coords
+        setTimeout(() => {
+          const rect = el.getBoundingClientRect();
+          sendResponse({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+        }, 50);
+        return true; // async
+      }
 
-      case 'click':
-        sendResponse(domClick(msg.selector || msg.elementId));
+      case 'scroll': {
+        if (msg.selector) {
+          const el = resolveElement(msg.selector);
+          if (!el) { sendResponse({ ok: false, error: `Not found: ${msg.selector}` }); return false; }
+          el.scrollBy({ left: msg.x || 0, top: msg.y || 0, behavior: 'instant' });
+        } else {
+          window.scrollBy({ left: msg.x || 0, top: msg.y || 0, behavior: 'instant' });
+        }
+        sendResponse({ ok: true });
         return false;
-
-      case 'clickPoint':
-        sendResponse(domClickPoint(msg.x, msg.y));
-        return false;
-
-      case 'type':
-        sendResponse(domType(msg.selector || msg.elementId, msg.text));
-        return false;
-
-      case 'typeChar':
-        domTypeChar(msg.selector || msg.elementId, msg.text, msg.delay || 80).then(sendResponse);
-        return true;
-
-      case 'keyPress':
-        sendResponse(domKeyPress(msg.key));
-        return false;
-
-      case 'select':
-        sendResponse(domSelect(msg.selector || msg.elementId, msg.value));
-        return false;
-
-      case 'hover':
-        sendResponse(domHover(msg.selector || msg.elementId));
-        return false;
-
-      case 'scroll':
-        sendResponse(domScroll(msg.selector, msg.x, msg.y));
-        return false;
+      }
 
       case 'waitForElement':
         domWaitForElement(msg.selector, msg.timeout || 10000).then(sendResponse);
         return true;
 
-      case 'getAttribute':
-        sendResponse(domGetAttribute(msg.selector || msg.elementId, msg.attribute));
+      case 'getAttribute': {
+        const el = resolveElement(msg.selector);
+        if (!el) { sendResponse({ ok: false, error: `Not found: ${msg.selector}` }); return false; }
+        sendResponse({ ok: true, value: el.getAttribute(msg.attribute) ?? el[msg.attribute] ?? null });
         return false;
+      }
 
       case 'waitForDOM':
         waitForDOM(msg.quietMs || 400, msg.maxMs || 5000).then(sendResponse);

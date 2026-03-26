@@ -357,18 +357,24 @@
         sendResponse({ snapshot: buildSnapshot(false) });
         return false;
 
-      // Get element coordinates — scrolls into view first so elementFromPoint works
+      // Prepare element for MAIN world interaction:
+      // 1. Resolve from Map (no DOM query needed)
+      // 2. Scroll into view
+      // 3. Tag ONLY this one element with data-psh-target (minimal mutation)
+      // 4. Return coordinates as fallback
       case 'getClickCoords': {
         const el = resolveElement(msg.selector);
-        if (!el) { sendResponse({ x: null, y: null }); return false; }
-        // Scroll into view so the element is in the viewport
+        if (!el) { sendResponse({ x: null, y: null, tagged: false }); return false; }
         el.scrollIntoView({ block: 'center', behavior: 'instant' });
-        // Small delay for scroll to complete, then get coords
-        setTimeout(() => {
-          const rect = el.getBoundingClientRect();
-          sendResponse({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-        }, 50);
-        return true; // async
+        // Tag this single element for MAIN world to find via querySelector
+        try { el.setAttribute('data-psh-target', 'true'); } catch {}
+        const rect = el.getBoundingClientRect();
+        sendResponse({
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          tagged: true
+        });
+        return false;
       }
 
       case 'scroll': {

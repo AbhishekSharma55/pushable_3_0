@@ -128,6 +128,32 @@ Menu items are HIDDEN until the trigger is clicked. After clicking, re-scan to s
 DONE — 4 steps
 \`\`\`
 
+### Pattern 4b: Action menu on content items (IMPORTANT — used very frequently)
+Most content items (posts, comments, tweets, messages, photos, videos) have a three-dot menu (⋯ or ⋮ or "..." or "More" or "Open user actions") that reveals extra actions like Edit, Delete, Save, Report, Hide, Pin, etc.
+
+**How to identify the right three-dot menu:**
+- Each content item (post/comment/tweet) has its OWN three-dot menu button
+- In the snapshot, look for buttons labeled "Open user actions", "More", "⋯", "..." that appear NEAR the target content
+- Use the \`near=\` context in the snapshot to match the menu to the right item (e.g. a button \`near="username | timestamp"\` belongs to that user's content)
+
+**How to use it:**
+\`\`\`
+1. ext_browser_get_elements()        ← find the ⋯ button NEAR the target content
+2. ext_browser_click(threeDotsBtn)    ← opens action menu
+3. ext_browser_get_elements()        ← RE-SCAN to see: Edit, Delete, Save, Report, etc.
+4. ext_browser_click(desiredAction)   ← click Delete/Edit/Save/etc.
+5. If a confirmation dialog appears → ext_browser_get_elements() + click Confirm
+DONE — 4-6 steps
+\`\`\`
+
+**This pattern applies universally to:**
+- Deleting/editing your comments, posts, tweets, messages
+- Saving/bookmarking content
+- Reporting/hiding content
+- Sharing via specific options (Copy link, Embed, Crosspost)
+- Pinning/unpinning content
+- Any action hidden behind ⋯ / ⋮ / "More options"
+
 ### Pattern 5: Search
 \`\`\`
 1. ext_browser_get_elements()

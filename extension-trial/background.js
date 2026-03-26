@@ -156,14 +156,57 @@ async function getStreamingTab() {
 }
 
 /* ── Command queue ── */
+// Track the last tab the agent interacted with — so subsequent commands
+// go to the RIGHT tab, not the Pushable AI chat tab the user is looking at.
+let lastAgentTabId = null;
+
+/** Check if a tab is a Pushable AI app tab — these must NEVER be navigated or automated */
+function isProtectedTab(tab) {
+  if (!tab || !tab.url) return false;
+  const u = tab.url;
+  // Chrome internal pages
+  if (u.startsWith('chrome://') || u.startsWith('chrome-extension://') || u.startsWith('about:')) return true;
+  try {
+    const url = new URL(u);
+    const h = url.hostname;
+    // Pushable AI — dev (localhost:3000/3001/3002) + production (any pushable domain)
+    if (h === 'localhost' && ['3000', '3001', '3002'].includes(url.port)) return true;
+    if (h === 'platform.pushable.ai') return true;
+    if (h.endsWith('pushable.ai')) return true;
+    if (h.includes('pushable')) return true;
+  } catch {}
+  return false;
+}
+
 function enqueue(cmd) {
   const tabFree = ['getTabList', 'newTab'];
   if (tabFree.includes(cmd.action)) { executeCommand(cmd, null); return; }
   if (!cmd.tabId) {
-    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-      if (tab) { cmd.tabId = tab.id; enqueueForTab(cmd); }
-      else sendResult(cmd, false, null, 'No active tab');
-    });
+    // Use last agent tab if available — NOT the active tab (which is usually the chat page)
+    if (lastAgentTabId) {
+      chrome.tabs.get(lastAgentTabId, (tab) => {
+        if (chrome.runtime.lastError || !tab) {
+          lastAgentTabId = null;
+          // Don't fall back to active tab — it's probably the chat page
+          // Instead, return error so the agent opens a new tab
+          sendResult(cmd, false, null, 'No automation tab open. Use ext_browser_new_tab(url) first.');
+        } else {
+          cmd.tabId = lastAgentTabId;
+          enqueueForTab(cmd);
+        }
+      });
+    } else {
+      // No lastAgentTabId — check if active tab is safe to use
+      chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+        if (tab && !isProtectedTab(tab)) {
+          cmd.tabId = tab.id;
+          enqueueForTab(cmd);
+        } else {
+          // Active tab is protected — tell agent to open a new tab
+          sendResult(cmd, false, null, 'No automation tab open. Use ext_browser_new_tab(url) first.');
+        }
+      });
+    }
     return;
   }
   enqueueForTab(cmd);
@@ -222,6 +265,10 @@ async function settleDOM(tabId) {
 
 async function executeCommand(cmd, tabId) {
   try {
+    // Remember which tab the agent is working on
+    if (tabId && !['getTabList', 'newTab'].includes(cmd.action)) {
+      lastAgentTabId = tabId;
+    }
     if (tabId) {
       try {
         const tab = await chrome.tabs.get(tabId);
@@ -239,10 +286,28 @@ async function executeCommand(cmd, tabId) {
       case 'navigate': {
         let url = cmd.url;
         if (url && !url.startsWith('http') && !url.startsWith('file:')) url = 'https://' + url;
-        await chrome.tabs.update(tabId, { url });
-        await waitForPageLoad(tabId);
-        await ensureContentScript(tabId);
-        const tab = await chrome.tabs.get(tabId);
+
+        // PROTECT: Never navigate a Pushable AI tab — open a new tab instead
+        let targetTabId = tabId;
+        if (tabId) {
+          try {
+            const currentTab = await chrome.tabs.get(tabId);
+            if (isProtectedTab(currentTab)) {
+              const newTab = await chrome.tabs.create({ url, active: true });
+              await waitForPageLoad(newTab.id);
+              await ensureContentScript(newTab.id);
+              lastAgentTabId = newTab.id;
+              sendResult(cmd, true, { url: newTab.url, title: newTab.title, newTabId: newTab.id });
+              break;
+            }
+          } catch {}
+        }
+
+        await chrome.tabs.update(targetTabId, { url });
+        await waitForPageLoad(targetTabId);
+        await ensureContentScript(targetTabId);
+        lastAgentTabId = targetTabId;
+        const tab = await chrome.tabs.get(targetTabId);
         sendResult(cmd, true, { url: tab.url, title: tab.title });
         break;
       }
@@ -298,10 +363,28 @@ async function executeCommand(cmd, tabId) {
           const [{ result }] = await chrome.scripting.executeScript({
             target: { tabId }, world: 'MAIN',
             func: (cx, cy) => {
-              // Content script already scrolled the element into view.
-              // elementFromPoint returns the deepest element at viewport coords.
-              const el = document.elementFromPoint(cx, cy);
-              if (!el) return { ok: false, error: 'No element at (' + cx + ',' + cy + ')' };
+              // Strategy 1: Find by data-psh-target attribute (set by content script on the exact element)
+              let el = document.querySelector('[data-psh-target="true"]');
+              // Clean up the attribute immediately
+              if (el) el.removeAttribute('data-psh-target');
+
+              // If not found in light DOM, search shadow roots
+              if (!el) {
+                function searchShadow(root) {
+                  try { const f = root.querySelector('[data-psh-target="true"]'); if (f) return f; } catch {}
+                  try { for (const c of root.querySelectorAll('*')) { if (c.shadowRoot) { const f = searchShadow(c.shadowRoot); if (f) return f; } } } catch {}
+                  return null;
+                }
+                el = searchShadow(document);
+                if (el) el.removeAttribute('data-psh-target');
+              }
+
+              // Strategy 2: Fall back to coordinates
+              if (!el && cx !== null && cy !== null) {
+                el = document.elementFromPoint(cx, cy);
+              }
+
+              if (!el) return { ok: false, error: 'Element not found' };
 
               // Full pointer+mouse event sequence with composed:true (crosses shadow DOM)
               const opts = { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, screenX: cx, screenY: cy, button: 0, buttons: 1, view: window };
@@ -357,10 +440,21 @@ async function executeCommand(cmd, tabId) {
           const [{ result }] = await chrome.scripting.executeScript({
             target: { tabId }, world: 'MAIN',
             func: (cx, cy, text) => {
-              let el = null;
-              if (cx !== null && cy !== null) el = document.elementFromPoint(cx, cy);
+              // Find by tag first, then coordinates, then activeElement
+              let el = document.querySelector('[data-psh-target="true"]');
+              if (el) el.removeAttribute('data-psh-target');
+              if (!el) {
+                function searchShadow(root) {
+                  try { const f = root.querySelector('[data-psh-target="true"]'); if (f) return f; } catch {}
+                  try { for (const c of root.querySelectorAll('*')) { if (c.shadowRoot) { const f = searchShadow(c.shadowRoot); if (f) return f; } } } catch {}
+                  return null;
+                }
+                el = searchShadow(document);
+                if (el) el.removeAttribute('data-psh-target');
+              }
+              if (!el && cx !== null && cy !== null) el = document.elementFromPoint(cx, cy);
               if (!el) el = document.activeElement;
-              if (!el || el === document.body) return { ok: false, error: 'No element at coordinates' };
+              if (!el || el === document.body) return { ok: false, error: 'Element not found' };
               el.scrollIntoView({ block: 'center', behavior: 'instant' });
               el.focus?.();
               // If not editable, click to open editor, find real target
@@ -587,19 +681,19 @@ async function executeCommand(cmd, tabId) {
             const requestedUrl = new URL(cmd.url);
             const allTabs = await chrome.tabs.query({});
 
-            // First: exact URL match (hostname + pathname)
+            // First: exact URL match (hostname + pathname) — skip protected tabs
             let existing = allTabs.find(t => {
-              if (!t.url) return false;
+              if (!t.url || isProtectedTab(t)) return false;
               try {
                 const u = new URL(t.url);
                 return u.hostname === requestedUrl.hostname && u.pathname === requestedUrl.pathname;
               } catch { return false; }
             });
 
-            // Second: same domain match — reuse by navigating
+            // Second: same domain match — reuse by navigating (skip protected tabs)
             if (!existing) {
               existing = allTabs.find(t => {
-                if (!t.url) return false;
+                if (!t.url || isProtectedTab(t)) return false;
                 try { return new URL(t.url).hostname === requestedUrl.hostname; }
                 catch { return false; }
               });
@@ -622,6 +716,7 @@ async function executeCommand(cmd, tabId) {
               }
               await ensureContentScript(existing.id);
               const tab = await chrome.tabs.get(existing.id);
+              lastAgentTabId = tab.id;
               sendResult(cmd, true, { newTabId: tab.id, url: tab.url, title: tab.title, reused: true });
               break;
             }
@@ -631,6 +726,7 @@ async function executeCommand(cmd, tabId) {
         // No existing tab on this domain — create new one
         const newTab = await chrome.tabs.create({ url: cmd.url || 'about:blank', active: cmd.active !== false });
         if (cmd.url && cmd.url !== 'about:blank') { await waitForPageLoad(newTab.id); await ensureContentScript(newTab.id); }
+        lastAgentTabId = newTab.id;
         sendResult(cmd, true, { newTabId: newTab.id, url: newTab.url, title: newTab.title });
         break;
       }
@@ -648,6 +744,7 @@ async function executeCommand(cmd, tabId) {
         await chrome.tabs.update(switchId, { active: true });
         const tab = await chrome.tabs.get(switchId);
         await chrome.windows.update(tab.windowId, { focused: true });
+        lastAgentTabId = switchId;
         sendResult(cmd, true, { tabId: switchId, url: tab.url, title: tab.title });
         break;
       }

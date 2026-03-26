@@ -24,8 +24,10 @@ const ExtBrowserAgentState = Annotation.Root({
     ...MessagesAnnotation.spec,
 });
 
-/** Max supersteps for the extension browser agent graph — 15 is enough for any task */
-const EXT_BROWSER_AGENT_RECURSION_LIMIT = 15;
+/** Max supersteps for the extension browser agent graph.
+ *  20 handles complex multi-step tasks (search → open → comment → upvote → delete).
+ *  Each "step" = one LLM call + tool execution. Most tasks need 4-10 steps. */
+const EXT_BROWSER_AGENT_RECURSION_LIMIT = 20;
 
 /**
  * Build a single "extension_browser_agent" tool that wraps an internal,

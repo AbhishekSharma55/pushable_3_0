@@ -103,7 +103,7 @@ export default function ExtensionSettingsPage() {
 
                     <div className="space-y-6 p-6">
                         {/* WebSocket URL */}
-                        <div className="space-y-2">
+                        {/* <div className="space-y-2">
                             <Label htmlFor="ws-url" className="text-sm font-medium">
                                 WebSocket URL
                             </Label>
@@ -131,7 +131,7 @@ export default function ExtensionSettingsPage() {
                                     )}
                                 </Button>
                             </div>
-                        </div>
+                        </div> */}
 
                         {/* API Key */}
                         <div className="space-y-2">
@@ -227,7 +227,7 @@ export default function ExtensionSettingsPage() {
                             <li>Go to <strong>chrome://extensions</strong>, enable <strong>Developer Mode</strong>, and click <strong>Load unpacked</strong>.</li>
                             <li>Select the unzipped extension folder.</li>
                             <li>Click the extension icon in your Chrome toolbar.</li>
-                            <li>Paste the <strong>WebSocket URL</strong> into the &quot;Server URL&quot; field.</li>
+                            {/* <li>Paste the <strong>WebSocket URL</strong> into the &quot;Server URL&quot; field.</li> */}
                             <li>Paste the <strong>API Key</strong> into the &quot;API Key&quot; field.</li>
                             <li>Click <strong>Connect</strong> — the status should turn green.</li>
                         </ol>

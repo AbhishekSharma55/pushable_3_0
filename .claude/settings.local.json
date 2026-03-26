@@ -60,7 +60,12 @@
       "Bash(systemctl status:*)",
       "Read(//home/ibr-ai-agent/.docker/**)",
       "Bash(docker restart:*)",
-      "Bash(wc -l /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-trial/*.js /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-trial/*.html /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-trial/*.json)"
+      "Bash(wc -l /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-trial/*.js /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-trial/*.html /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-trial/*.json)",
+      "Bash(DOCKER_HOST=unix:///var/run/docker.sock docker restart pushable_3_0-backend-1)",
+      "Bash(sudo docker:*)",
+      "Read(//run/**)",
+      "Bash(python3 -c \"from PIL import Image; print\\(''''ok''''\\)\")",
+      "Bash(pip3 install:*)"
     ]
   }
 }

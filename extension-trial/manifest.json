@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Browser Agent v3",
-  "version": "3.0.0",
-  "description": "High-accuracy browser automation — Shadow DOM, contenteditable, CDP trusted events, MutationObserver settling",
+  "name": "Pushable AI",
+  "version": "3.1.0",
+  "description": "AI-powered browser automation — works on every site",
   "permissions": [
     "tabs",
     "activeTab",
@@ -26,7 +26,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Browser Agent v3"
+    "default_title": "Pushable AI"
   },
   "icons": {
     "16": "icon16.png",

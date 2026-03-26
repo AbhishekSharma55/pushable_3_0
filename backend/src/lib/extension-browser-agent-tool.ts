@@ -24,8 +24,8 @@ const ExtBrowserAgentState = Annotation.Root({
     ...MessagesAnnotation.spec,
 });
 
-/** Max supersteps for the extension browser agent graph */
-const EXT_BROWSER_AGENT_RECURSION_LIMIT = 50;
+/** Max supersteps for the extension browser agent graph — 15 is enough for any task */
+const EXT_BROWSER_AGENT_RECURSION_LIMIT = 15;
 
 /**
  * Build a single "extension_browser_agent" tool that wraps an internal,
@@ -159,7 +159,27 @@ export function buildExtensionBrowserAgentTool(
 
                     const systemMsg = new SystemMessage(systemPrompt);
                     const messages = [systemMsg, ...state.messages];
+
+                    // LOG: what the LLM sees (last few messages)
+                    const recentMsgs = state.messages.slice(-4);
+                    for (const m of recentMsgs) {
+                        const role = m._getType?.() || 'unknown';
+                        const content = typeof m.content === 'string' ? m.content.slice(0, 500) : JSON.stringify(m.content).slice(0, 500);
+                        logger.info({ role, content }, `🧠 LLM INPUT [${role}]`);
+                    }
+
                     const response = await llmWithTools.invoke(messages);
+
+                    // LOG: what the LLM decided
+                    const aiResponse = response as AIMessage;
+                    if (aiResponse.tool_calls && aiResponse.tool_calls.length > 0) {
+                        for (const tc of aiResponse.tool_calls) {
+                            logger.info({ tool: tc.name, args: tc.args }, `🤖 LLM DECISION → ${tc.name}`);
+                        }
+                    } else {
+                        const textOut = typeof aiResponse.content === 'string' ? aiResponse.content.slice(0, 300) : JSON.stringify(aiResponse.content).slice(0, 300);
+                        logger.info({ content: textOut }, `🤖 LLM FINAL RESPONSE`);
+                    }
 
                     // Emit intermediate thinking
                     if (onEvent) {
@@ -246,6 +266,9 @@ export function buildExtensionBrowserAgentTool(
                         } catch (error) {
                             resultContent = `Error: ${error instanceof Error ? error.message : "Unknown error"}`;
                         }
+
+                        // LOG: tool result (truncated)
+                        logger.info({ tool: tc.name, resultLength: resultContent.length, result: resultContent.slice(0, 800) }, `📦 TOOL RESULT [${tc.name}]`);
 
                         // Emit tool_end
                         onEvent?.({

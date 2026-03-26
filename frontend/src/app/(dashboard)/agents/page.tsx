@@ -29,6 +29,10 @@ import {
     Chrome,
     ChevronRight,
     Bug,
+    Paperclip,
+    X,
+    FileText,
+    Image as ImageIcon,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -241,6 +245,57 @@ export default function AgentsPage() {
 
     // Models (for direct API indicator)
     const [llmModels, setLlmModels] = useState<LLMModel[]>([]);
+
+    // File attachment state
+    const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+    const [isDragOver, setIsDragOver] = useState(false);
+    const dragCounterRef = useRef(0);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const ACCEPTED_EXTENSIONS = ".png,.jpg,.jpeg,.gif,.webp,.pdf,.docx,.txt,.md,.csv";
+
+    const addFiles = useCallback((files: FileList | File[]) => {
+        const newFiles = Array.from(files).filter((f) => {
+            const ext = f.name.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+            const allowed = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".docx", ".txt", ".md", ".csv"];
+            return allowed.includes(ext) && f.size <= 20 * 1024 * 1024;
+        });
+        setPendingFiles((prev) => [...prev, ...newFiles].slice(0, 10));
+    }, []);
+
+    const removeFile = useCallback((index: number) => {
+        setPendingFiles((prev) => prev.filter((_, i) => i !== index));
+    }, []);
+
+    // Use a counter to handle dragenter/dragleave across child elements.
+    // dragenter increments, dragleave decrements. Only show overlay when > 0.
+    const handleDragEnter = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        dragCounterRef.current++;
+        if (dragCounterRef.current === 1) {
+            setIsDragOver(true);
+        }
+    }, []);
+
+    const handleDragOver = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+    }, []);
+
+    const handleDragLeave = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        dragCounterRef.current--;
+        if (dragCounterRef.current === 0) {
+            setIsDragOver(false);
+        }
+    }, []);
+
+    const handleDrop = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        dragCounterRef.current = 0;
+        setIsDragOver(false);
+        if (e.dataTransfer.files.length > 0) {
+            addFiles(e.dataTransfer.files);
+        }
+    }, [addFiles]);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -937,19 +992,30 @@ export default function AgentsPage() {
     };
 
     const sendMessage = async () => {
-        if (!chatInput.trim() || !workspace || !activeSession || sending) return;
-        const content = chatInput.trim();
+        if ((!chatInput.trim() && pendingFiles.length === 0) || !workspace || !activeSession || sending) return;
+        const content = chatInput.trim() || (pendingFiles.length > 0 ? 'Please analyze the attached file(s).' : '');
+        const filesToSend = pendingFiles.length > 0 ? [...pendingFiles] : undefined;
         setChatInput('');
+        setPendingFiles([]);
         setSending(true);
         sseDeliveredRef.current = false;
 
         if (LOGGING_ENABLED) {
-            setDebugLogs((prev) => [...prev, { id: debugLogId(), timestamp: Date.now(), type: 'system', summary: `User message sent (${content.length} chars)`, data: { message: content } }]);
+            setDebugLogs((prev) => [...prev, { id: debugLogId(), timestamp: Date.now(), type: 'system', summary: `User message sent (${content.length} chars${filesToSend?.length ? `, ${filesToSend.length} file(s)` : ''})`, data: { message: content, files: filesToSend?.map((f) => f.name) } }]);
         }
+
+        // Build attachment metadata for display
+        const attachmentMeta = filesToSend?.map((f) => ({
+            filename: f.name,
+            mimetype: f.type,
+            type: (f.type.startsWith('image/') ? 'image' : 'document') as 'image' | 'document',
+            size: f.size,
+        }));
 
         const userMsg: ChatMessage = {
             id: `temp-user-${Date.now()}`, sessionId: activeSession.id,
             role: 'user', content, tokenCount: 0, createdAt: new Date().toISOString(),
+            ...(attachmentMeta?.length ? { metadata: { attachments: attachmentMeta } } : {}),
         };
         const assistantMsg: ChatMessage = {
             id: `temp-assistant-${Date.now()}`, sessionId: activeSession.id,
@@ -961,14 +1027,34 @@ export default function AgentsPage() {
 
         try {
             const token = getToken();
-            const hdrs = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id };
 
-            // POST returns { runId } — start background execution
-            const postRes = await fetch(`${API_URL}/api/sessions/${activeSession.id}/chat`, {
-                method: 'POST', headers: hdrs, body: JSON.stringify({ message: content }),
-            });
-            if (!postRes.ok) throw new Error('Failed to send');
-            const { runId } = await postRes.json();
+            let runId: string;
+
+            if (filesToSend && filesToSend.length > 0) {
+                // Multipart form data with files
+                const formData = new FormData();
+                formData.append('message', content);
+                for (const file of filesToSend) {
+                    formData.append('files', file);
+                }
+                const postRes = await fetch(`${API_URL}/api/sessions/${activeSession.id}/chat`, {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
+                    body: formData,
+                });
+                if (!postRes.ok) throw new Error('Failed to send');
+                const result = await postRes.json();
+                runId = result.runId;
+            } else {
+                // Standard JSON
+                const hdrs = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id };
+                const postRes = await fetch(`${API_URL}/api/sessions/${activeSession.id}/chat`, {
+                    method: 'POST', headers: hdrs, body: JSON.stringify({ message: content }),
+                });
+                if (!postRes.ok) throw new Error('Failed to send');
+                const result = await postRes.json();
+                runId = result.runId;
+            }
 
             // Start polling fallback in parallel
             pollForCompletion(activeSession.id, assistantMsg.id, abortController.signal).catch(() => {});
@@ -1059,7 +1145,17 @@ export default function AgentsPage() {
         : agents;
 
     return (
-        <div className="space-y-6">
+        <div className="space-y-6 relative" onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+            {/* Page-level drag overlay */}
+            {isDragOver && activeSession && (
+                <div className="fixed inset-0 z-50 bg-primary/20 backdrop-blur-sm border-4 border-dashed border-primary/60 flex items-center justify-center pointer-events-none">
+                    <div className="flex flex-col items-center gap-3 text-primary bg-background/90 px-10 py-8 rounded-2xl shadow-2xl border border-primary/30">
+                        <Paperclip className="w-12 h-12" />
+                        <p className="text-lg font-semibold">Drop files here</p>
+                        <p className="text-sm text-muted-foreground">Images, PDFs, DOCX, TXT, MD, CSV</p>
+                    </div>
+                </div>
+            )}
             {/* Header */}
             <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
@@ -1462,8 +1558,26 @@ export default function AgentsPage() {
                                                         <Fragment key={msg.id}>
                                                             {msg.role === 'user' ? (
                                                                 <div className="flex justify-end">
-                                                                    <div className="bg-primary text-primary-foreground rounded-2xl rounded-br-sm px-4 py-2.5 max-w-[80%]">
-                                                                        <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.content}</p>
+                                                                    <div className="max-w-[80%] space-y-2">
+                                                                        {/* User attachments */}
+                                                                        {(() => {
+                                                                            const meta = msg.metadata as Record<string, unknown> | undefined;
+                                                                            const atts = meta?.attachments as Array<{ filename: string; type: string }> | undefined;
+                                                                            if (!atts?.length) return null;
+                                                                            return (
+                                                                                <div className="flex flex-wrap gap-2 justify-end">
+                                                                                    {atts.map((att, i) => (
+                                                                                        <div key={i} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-primary/80 text-primary-foreground text-xs">
+                                                                                            {att.type === "image" ? <ImageIcon className="w-3.5 h-3.5 shrink-0" /> : <FileText className="w-3.5 h-3.5 shrink-0" />}
+                                                                                            <span className="max-w-[150px] truncate">{att.filename}</span>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            );
+                                                                        })()}
+                                                                        <div className="bg-primary text-primary-foreground rounded-2xl rounded-br-sm px-4 py-2.5">
+                                                                            <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.content}</p>
+                                                                        </div>
                                                                     </div>
                                                                 </div>
                                                             ) : msg.segments && msg.segments.length > 0 ? (
@@ -1514,11 +1628,47 @@ export default function AgentsPage() {
                                             </div>
                                         </div>
                                         <div className="border-t border-border p-4">
-                                            <div className="max-w-5xl mx-auto relative">
-                                                <textarea ref={textareaRef} value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={handleKeyDown} placeholder={pendingApproval ? "Waiting for your approval..." : "Ask your agent..."} className="w-full resize-none rounded-xl border border-border bg-card px-4 py-3 pr-12 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring min-h-[48px] max-h-[160px] transition-colors" rows={1} disabled={sending || !!pendingApproval} />
-                                                <Button onClick={sendMessage} disabled={!chatInput.trim() || sending} size="icon" variant="ghost" className="absolute right-2 bottom-2 h-8 w-8 rounded-lg">
-                                                    {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
-                                                </Button>
+                                            <div className="max-w-5xl mx-auto">
+                                                {/* File preview strip */}
+                                                {pendingFiles.length > 0 && (
+                                                    <div className="space-y-2 mb-2">
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {pendingFiles.map((file, idx) => (
+                                                                <div key={`${file.name}-${idx}`} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-muted/60 border border-border text-xs group">
+                                                                    {file.type.startsWith("image/") ? <ImageIcon className="w-3.5 h-3.5 text-blue-500 shrink-0" /> : <FileText className="w-3.5 h-3.5 text-orange-500 shrink-0" />}
+                                                                    <span className="max-w-[120px] truncate text-foreground">{file.name}</span>
+                                                                    <span className="text-muted-foreground">({(file.size / 1024).toFixed(0)}KB)</span>
+                                                                    <button type="button" onClick={() => removeFile(idx)} className="ml-0.5 p-0.5 rounded hover:bg-destructive/10 transition-colors cursor-pointer">
+                                                                        <X className="w-3 h-3 text-muted-foreground hover:text-destructive" />
+                                                                    </button>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                        {pendingFiles.some((f) => f.type.startsWith("image/")) && (() => {
+                                                            const model = (selectedAgent?.model || "").toLowerCase();
+                                                            const visionPatterns = ["gpt-4o", "gpt-4-turbo", "gpt-4-vision", "claude-3", "claude-sonnet", "claude-opus", "claude-haiku", "gemini", "gemma", "llava", "pixtral", "qwen-vl", "qwen2-vl"];
+                                                            const supportsVision = !model || visionPatterns.some((p) => model.includes(p));
+                                                            if (!supportsVision) return (
+                                                                <p className="text-xs text-amber-600 dark:text-amber-400">
+                                                                    This model may not support image input. Images will be skipped. Consider switching to a vision model (GPT-4o, Claude 3, Gemini).
+                                                                </p>
+                                                            );
+                                                            return null;
+                                                        })()}
+                                                    </div>
+                                                )}
+                                                <div className="relative">
+                                                    <textarea ref={textareaRef} value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={handleKeyDown} placeholder={pendingApproval ? "Waiting for your approval..." : pendingFiles.length > 0 ? "Add a message about the file(s)…" : "Ask your agent..."} className="w-full resize-none rounded-xl border border-border bg-card px-4 py-3 pr-24 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring min-h-[48px] max-h-[160px] transition-colors" rows={1} disabled={sending || !!pendingApproval} />
+                                                    <input ref={fileInputRef} type="file" multiple accept={ACCEPTED_EXTENSIONS} className="hidden" onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }} />
+                                                    <div className="absolute right-2 bottom-2 flex items-center gap-1">
+                                                        <Button onClick={() => fileInputRef.current?.click()} size="icon" variant="ghost" className="h-8 w-8 rounded-lg" title="Attach files">
+                                                            <Paperclip className="h-4 w-4 text-muted-foreground" />
+                                                        </Button>
+                                                        <Button onClick={sendMessage} disabled={(!chatInput.trim() && pendingFiles.length === 0) || sending} size="icon" variant="ghost" className="h-8 w-8 rounded-lg">
+                                                            {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
+                                                        </Button>
+                                                    </div>
+                                                </div>
                                             </div>
                                         </div>
                                         </div>

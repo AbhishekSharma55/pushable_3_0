@@ -23,6 +23,7 @@ import { internalRoutes } from "./routes/internal.ts";
 import { vaultRoutes } from "./routes/vault.ts";
 import { browserProxyRoutes } from "./routes/browser-proxies.ts";
 import { channelRoutes } from "./routes/channels.ts";
+import { bucketRoutes } from "./routes/bucket.ts";
 import { webhookRoutes } from "./routes/webhooks.ts";
 import { startWorkers, stopWorkers } from "./lib/workers.ts";
 import { initScheduler } from "./lib/scheduler.ts";
@@ -47,7 +48,7 @@ await app.register(cors, {
   allowedHeaders: ["Content-Type", "Authorization", "x-workspace-id"],
 });
 await app.register(jwtPlugin, { secret: process.env.JWT_SECRET! });
-await app.register(multipart);
+await app.register(multipart, { limits: { fileSize: 20 * 1024 * 1024, files: 10 } });
 
 // Error handler
 app.setErrorHandler((err, _req, reply) => {
@@ -97,6 +98,7 @@ await app.register(vaultRoutes, { prefix: "/api" });
 await app.register(internalRoutes, { prefix: "/api/internal" });
 await app.register(browserProxyRoutes, { prefix: "/api" });
 await app.register(channelRoutes, { prefix: "/api" });
+await app.register(bucketRoutes, { prefix: "/api" });
 await app.register(modelRoutes, { prefix: "/api" });
 await app.register(creditRoutes, { prefix: "/api" });
 await app.register(blogRoutes, { prefix: "/api" });

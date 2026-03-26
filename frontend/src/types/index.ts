@@ -34,6 +34,8 @@ export interface Agent {
     canManageSchedules: boolean;
     canManageChannels: boolean;
     canManageAgents: boolean;
+    canManageBucket: boolean;
+    canExecutePython: boolean;
     requireApprovalForAll: boolean;
     browserType: 'cloud' | 'extension';
     browserEnabled: boolean;
@@ -50,6 +52,8 @@ export interface SystemPermissionsInput {
     canManageSchedules: boolean;
     canManageChannels: boolean;
     canManageAgents: boolean;
+    canManageBucket: boolean;
+    canExecutePython: boolean;
 }
 
 export interface Session {
@@ -79,6 +83,24 @@ export interface Message {
     content: string;
     tokenCount: number;
     createdAt: string;
+    metadata?: Record<string, unknown>;
+}
+
+export interface BucketFile {
+    id: string;
+    workspaceId: string;
+    filename: string;
+    storageKey: string;
+    mimeType: string;
+    sizeBytes: number;
+    folder: string;
+    source: 'chat_upload' | 'agent_generated' | 'api_upload';
+    sessionId: string | null;
+    agentId: string | null;
+    uploadedBy: string | null;
+    metadata: Record<string, unknown>;
+    createdAt: string;
+    updatedAt: string;
 }
 
 export interface Tool {

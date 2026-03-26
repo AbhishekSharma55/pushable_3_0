@@ -11,6 +11,10 @@ import { AppError, UnauthorizedError } from "../lib/errors.ts";
 import { logger } from "../lib/logger.ts";
 import { stripToolCallXml, stripToolCallXmlFinal } from "../lib/sanitize-llm-output.ts";
 import type { BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
+import { fileProcessingService, type ProcessedAttachment } from "../services/file-processing.service.ts";
+import { openrouterService } from "../services/openrouter.service.ts";
+import { agentRepository } from "../repositories/agent.repository.ts";
+import { bucketService } from "../services/bucket.service.ts";
 
 const AGENT_RECURSION_LIMIT = 50; // Safety net behind step_count-based graceful termination
 
@@ -385,7 +389,8 @@ async function executeRun(
     workspaceId: string,
     agentId: string,
     userId: string,
-    message: string
+    message: string,
+    attachments?: ProcessedAttachment[]
 ): Promise<void> {
     try {
         const browserToolCalls: StreamToolCall[] = [];
@@ -414,10 +419,61 @@ async function executeRun(
             });
         }
 
-        logger.info({ runId, sessionId }, "Starting graph stream for run");
+        logger.info({ runId, sessionId, attachmentCount: attachments?.length ?? 0 }, "Starting graph stream for run");
+
+        // Build message content — multimodal if attachments present
+        let humanMessage: HumanMessage;
+        if (attachments && attachments.length > 0) {
+            // Check vision support for image attachments
+            const hasImages = attachments.some((a) => a.type === "image");
+            let supportsVision = true;
+
+            if (hasImages) {
+                const agent = await agentRepository.findById(agentId, workspaceId);
+                const modelId = agent?.model || "openai/gpt-4o-mini";
+                supportsVision = await openrouterService.supportsVision(modelId);
+            }
+
+            // Build multimodal content array
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const contentParts: any[] = [];
+
+            // Add document text as context before the user's message
+            const docAttachments = attachments.filter((a) => a.type === "document");
+            if (docAttachments.length > 0) {
+                const docContext = docAttachments
+                    .map((a) => `--- Attached file: ${a.filename} ---\n${a.content}\n--- End of ${a.filename} ---`)
+                    .join("\n\n");
+                contentParts.push({ type: "text", text: docContext + "\n\n" + message });
+            } else {
+                contentParts.push({ type: "text", text: message });
+            }
+
+            // Add image attachments
+            const imageAttachments = attachments.filter((a) => a.type === "image");
+            if (imageAttachments.length > 0 && supportsVision) {
+                for (const img of imageAttachments) {
+                    contentParts.push({
+                        type: "image_url",
+                        image_url: { url: img.content },
+                    });
+                }
+            } else if (imageAttachments.length > 0 && !supportsVision) {
+                // Non-vision model — add a note about skipped images
+                contentParts[0] = {
+                    type: "text",
+                    text: contentParts[0].text +
+                        `\n\n[Note: ${imageAttachments.length} image(s) were attached but this model does not support image input. Please ask the user to switch to a vision-capable model to analyze images.]`,
+                };
+            }
+
+            humanMessage = new HumanMessage({ content: contentParts });
+        } else {
+            humanMessage = new HumanMessage(message);
+        }
 
         const stream = await graph.stream(
-            { messages: [new HumanMessage(message)] },
+            { messages: [humanMessage] },
             {
                 configurable: { thread_id: sessionId },
                 streamMode: "messages",
@@ -628,11 +684,92 @@ export async function chatRoutes(fastify: FastifyInstance) {
     // ── POST /sessions/:sessionId/chat ───────────────────────────────────────
     // Creates a run, starts graph in background, returns runId.
     // Frontend subscribes to GET /runs/:runId/events for SSE.
+    // Supports both JSON body { message } and multipart/form-data with files.
     fastify.post("/sessions/:sessionId/chat", async (request, reply) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const { sessionId } = request.params as { sessionId: string };
-        const body = chatBodySchema.parse(request.body);
         const user = request.user as { userId: string };
+
+        // Parse message and files from either JSON or multipart
+        let message: string;
+        let attachments: ProcessedAttachment[] | undefined;
+
+        const contentType = request.headers["content-type"] || "";
+
+        if (contentType.includes("multipart/form-data")) {
+            // Multipart: extract message field + file parts
+            const parts = request.parts();
+            let messageField = "";
+            const rawFiles: Array<{ filename: string; mimetype: string; buffer: Buffer }> = [];
+
+            for await (const part of parts) {
+                if (part.type === "field" && part.fieldname === "message") {
+                    messageField = part.value as string;
+                } else if (part.type === "file") {
+                    const buffer = await part.toBuffer();
+                    rawFiles.push({
+                        filename: part.filename,
+                        mimetype: part.mimetype,
+                        buffer,
+                    });
+                }
+            }
+
+            if (!messageField.trim() && rawFiles.length === 0) {
+                throw new AppError("Message or files are required", 400, "EMPTY_REQUEST");
+            }
+
+            message = messageField.trim() || "Please analyze the attached file(s).";
+
+            if (rawFiles.length > 0) {
+                try {
+                    attachments = await fileProcessingService.processFiles(rawFiles);
+                    logger.info(
+                        { fileCount: rawFiles.length, types: attachments.map((a) => a.type) },
+                        "Processed file attachments"
+                    );
+                } catch (err) {
+                    throw new AppError(
+                        err instanceof Error ? err.message : "Failed to process files",
+                        400,
+                        "FILE_PROCESSING_ERROR"
+                    );
+                }
+
+                // Persist uploaded files to the workspace bucket
+                try {
+                    const savedFiles = await Promise.all(
+                        rawFiles.map((f) =>
+                            bucketService.uploadFile({
+                                workspaceId,
+                                filename: f.filename,
+                                buffer: f.buffer,
+                                mimeType: f.mimetype,
+                                folder: "/chat-uploads",
+                                source: "chat_upload",
+                                sessionId,
+                                uploadedBy: user.userId,
+                            })
+                        )
+                    );
+                    // Enrich attachments with bucket file IDs
+                    if (attachments) {
+                        attachments.forEach((att, i) => {
+                            if (savedFiles[i]) {
+                                (att as ProcessedAttachment & { bucketFileId?: string }).bucketFileId = savedFiles[i].id;
+                            }
+                        });
+                    }
+                } catch (bucketErr) {
+                    // Non-fatal — log but don't block the chat
+                    logger.warn({ err: bucketErr }, "Failed to persist files to bucket");
+                }
+            }
+        } else {
+            // Standard JSON body
+            const body = chatBodySchema.parse(request.body);
+            message = body.message;
+        }
 
         const session = await sessionService.getSession(sessionId, workspaceId);
 
@@ -656,13 +793,22 @@ export async function chatRoutes(fastify: FastifyInstance) {
             }
         }
 
-        // Save user message immediately
+        // Save user message with attachment metadata
+        const attachmentMeta = attachments?.map((a) => ({
+            filename: a.filename,
+            mimetype: a.mimetype,
+            type: a.type,
+            size: a.size,
+            bucketFileId: (a as ProcessedAttachment & { bucketFileId?: string }).bucketFileId || null,
+        }));
+
         await messageRepository.create({
             workspaceId,
             sessionId,
             role: "user",
-            content: body.message,
+            content: message,
             tokenCount: 0,
+            ...(attachmentMeta?.length ? { metadata: { attachments: attachmentMeta } } : {}),
         });
 
         // Create run record
@@ -675,7 +821,7 @@ export async function chatRoutes(fastify: FastifyInstance) {
         // Initialize the event bus buffer for this run
         runEventBus.init(run.id);
 
-        logger.info({ runId: run.id, sessionId }, "Run created, starting graph execution");
+        logger.info({ runId: run.id, sessionId, hasAttachments: !!attachments?.length }, "Run created, starting graph execution");
 
         // Start graph execution in background (detached from this HTTP response)
         executeRun(
@@ -684,7 +830,8 @@ export async function chatRoutes(fastify: FastifyInstance) {
             workspaceId,
             session.agentId,
             user.userId,
-            body.message
+            message,
+            attachments
         ).catch((err) => {
             logger.error({ err, runId: run.id }, "Unhandled error in background run");
         });

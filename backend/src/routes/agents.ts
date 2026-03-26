@@ -31,6 +31,8 @@ const systemPermissionsSchema = z.object({
     canManageSchedules: z.boolean(),
     canManageChannels: z.boolean(),
     canManageAgents: z.boolean(),
+    canManageBucket: z.boolean().optional(),
+    canExecutePython: z.boolean().optional(),
 });
 
 export async function agentRoutes(fastify: FastifyInstance) {

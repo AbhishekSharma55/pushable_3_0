@@ -30,3 +30,4 @@ export { runs, runStatusEnum } from "./runs.ts";
 export { scheduleRuns, scheduleRunStatusEnum } from "./scheduleRuns.ts";
 export { blogs } from "./blogs.ts";
 export { contactSubmissions } from "./contactSubmissions.ts";
+export { bucketFiles, fileSourceEnum } from "./bucketFiles.ts";

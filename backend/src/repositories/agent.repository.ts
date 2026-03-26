@@ -28,11 +28,24 @@ export const agentRepository = {
             canManageSchedules: boolean;
             canManageChannels: boolean;
             canManageAgents: boolean;
+            canManageBucket?: boolean;
+            canExecutePython?: boolean;
         }
     ) {
-        // If systemLevelAccess is off, force all permissions to false
+        // If systemLevelAccess is off, force all system-level permissions to false
+        // canExecutePython is independent of systemLevelAccess
         const perms = data.systemLevelAccess
-            ? data
+            ? {
+                  systemLevelAccess: data.systemLevelAccess,
+                  canManageKB: data.canManageKB,
+                  canManageSkills: data.canManageSkills,
+                  canManageTools: data.canManageTools,
+                  canManageSchedules: data.canManageSchedules,
+                  canManageChannels: data.canManageChannels,
+                  canManageAgents: data.canManageAgents,
+                  ...(data.canManageBucket !== undefined && { canManageBucket: data.canManageBucket }),
+                  ...(data.canExecutePython !== undefined && { canExecutePython: data.canExecutePython }),
+              }
             : {
                   systemLevelAccess: false,
                   canManageKB: false,
@@ -41,6 +54,8 @@ export const agentRepository = {
                   canManageSchedules: false,
                   canManageChannels: false,
                   canManageAgents: false,
+                  ...(data.canManageBucket !== undefined && { canManageBucket: data.canManageBucket }),
+                  ...(data.canExecutePython !== undefined && { canExecutePython: data.canExecutePython }),
               };
         const result = await db
             .update(agents)

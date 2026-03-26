@@ -19,6 +19,7 @@ import {
     PlugZap,
     LogOut,
     User,
+    FolderOpen,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -54,6 +55,7 @@ const navItems = [
     {label: 'Integrations', href: '/integrations', icon: Blocks },
     { label: 'Extension', href: '/extension-settings', icon: PlugZap },
     { label: 'Knowledge Base', href: '/kb', icon: BookOpen },
+    { label: 'Files', href: '/files', icon: FolderOpen },
     { label: 'Skills', href: '/skills', icon: Zap },
     { label: 'Tools', href: '/tools', icon: Wrench },
     { label: 'Schedules', href: '/schedules', icon: Clock },

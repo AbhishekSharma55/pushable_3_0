@@ -9,6 +9,15 @@ import { API_URL, LOGGING_ENABLED } from '@/lib/constants';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+export interface ChatAttachment {
+    filename: string;
+    mimetype: string;
+    type: 'image' | 'document';
+    size: number;
+    /** For local preview only (not persisted) */
+    previewUrl?: string;
+}
+
 export interface ChatMessage {
     id: string;
     role: 'user' | 'assistant';
@@ -19,6 +28,7 @@ export interface ChatMessage {
         segments?: StreamSegment[];
         approvalRequest?: unknown;
         thinking?: string;
+        attachments?: ChatAttachment[];
     };
 }
 
@@ -594,8 +604,8 @@ export function useChatWs(sessionKey: string) {
     // ── Send a message ──────────────────────────────────────────────────────
 
     const sendMessage = useCallback(
-        async (text: string) => {
-            if (!workspaceId || !text.trim() || isLoading) return;
+        async (text: string, files?: File[]) => {
+            if (!workspaceId || (!text.trim() && (!files || files.length === 0)) || isLoading) return;
 
             const agentId = parseAgentId(sessionKey);
 
@@ -617,10 +627,25 @@ export function useChatWs(sessionKey: string) {
                 }
             }
 
+            // Build attachment metadata for display
+            const attachmentMeta: ChatAttachment[] | undefined = files?.map((f) => ({
+                filename: f.name,
+                mimetype: f.type,
+                type: (f.type.startsWith('image/') ? 'image' : 'document') as 'image' | 'document',
+                size: f.size,
+                previewUrl: f.type.startsWith('image/') ? URL.createObjectURL(f) : undefined,
+            }));
+
             // Optimistic user message
             setMessages((prev) => [
                 ...prev,
-                { id: generateId(), role: 'user', content: text, status: 'done' },
+                {
+                    id: generateId(),
+                    role: 'user',
+                    content: text || 'Please analyze the attached file(s).',
+                    status: 'done',
+                    ...(attachmentMeta?.length ? { metadata: { attachments: attachmentMeta } } : {}),
+                },
             ]);
 
             // Log the outgoing message
@@ -629,15 +654,15 @@ export function useChatWs(sessionKey: string) {
                     id: generateId(),
                     timestamp: Date.now(),
                     type: 'system',
-                    summary: `User message sent (${text.length} chars)`,
-                    data: { message: text },
+                    summary: `User message sent (${text.length} chars${files?.length ? `, ${files.length} file(s)` : ''})`,
+                    data: { message: text, files: files?.map((f) => f.name) },
                 }]);
             }
 
             setIsLoading(true);
 
             try {
-                const result = await sendChat(workspaceId, sessionId, text);
+                const result = await sendChat(workspaceId, sessionId, text || 'Please analyze the attached file(s).', files);
                 const runId = (result as { runId: string }).runId;
                 watchRun(runId, sessionId);
             } catch {

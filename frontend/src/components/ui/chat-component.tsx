@@ -36,6 +36,9 @@ import {
   Brain,
   Sparkles,
   Bug,
+  X,
+  FileText,
+  Image as ImageIcon,
 } from "lucide-react";
 import {
   Select,
@@ -754,8 +757,25 @@ function MessageBubble({
       )}
 
       {isUser ? (
-        <div className="max-w-[75%] rounded-2xl px-4 py-3 text-sm leading-relaxed bg-primary text-primary-foreground rounded-br-sm">
-          <p>{msg.content}</p>
+        <div className="max-w-[75%] space-y-2">
+          {/* User attachments */}
+          {msg.metadata?.attachments && msg.metadata.attachments.length > 0 && (
+            <div className="flex flex-wrap gap-2 justify-end">
+              {msg.metadata.attachments.map((att, i) => (
+                <div key={i} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-primary/80 text-primary-foreground text-xs">
+                  {att.type === "image" ? (
+                    <ImageIcon className="w-3.5 h-3.5 shrink-0" />
+                  ) : (
+                    <FileText className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  <span className="max-w-[150px] truncate">{att.filename}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed bg-primary text-primary-foreground rounded-br-sm">
+            <p>{msg.content}</p>
+          </div>
         </div>
       ) : (
         <div className="max-w-[75%] space-y-2">
@@ -1046,11 +1066,80 @@ export function ChatComponent({
   // Last assistant content for browser preview
   const lastAssistantContent = messages.filter((m) => m.role === "assistant").at(-1)?.content ?? "";
 
+  // ── File attachment state ──
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const dragCounterRef = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const ACCEPTED_EXTENSIONS = ".png,.jpg,.jpeg,.gif,.webp,.pdf,.docx,.txt,.md,.csv";
+
+  // Check if the current agent's model likely supports vision
+  const hasImageFiles = pendingFiles.some((f) => f.type.startsWith("image/"));
+  const modelSupportsVision = (() => {
+    const model = (currentAgent?.model || "").toLowerCase();
+    // Known vision-capable model families
+    const visionPatterns = [
+      "gpt-4o", "gpt-4-turbo", "gpt-4-vision",
+      "claude-3", "claude-sonnet", "claude-opus", "claude-haiku",
+      "gemini", "gemma",
+      "llava", "pixtral", "qwen-vl", "qwen2-vl",
+      "internvl", "cogvlm",
+    ];
+    if (!model) return true; // Assume yes if unknown
+    return visionPatterns.some((p) => model.includes(p));
+  })();
+
+  const addFiles = useCallback((files: FileList | File[]) => {
+    const newFiles = Array.from(files).filter((f) => {
+      const ext = f.name.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+      const allowed = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".docx", ".txt", ".md", ".csv"];
+      return allowed.includes(ext) && f.size <= 20 * 1024 * 1024;
+    });
+    setPendingFiles((prev) => [...prev, ...newFiles].slice(0, 10));
+  }, []);
+
+  const removeFile = useCallback((index: number) => {
+    setPendingFiles((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  // Drag & drop handlers — counter-based to prevent flicker across child elements
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current++;
+    if (dragCounterRef.current === 1) {
+      setIsDragOver(true);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDragOver(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setIsDragOver(false);
+    if (readOnly) return;
+    if (e.dataTransfer.files.length > 0) {
+      addFiles(e.dataTransfer.files);
+    }
+  }, [addFiles, readOnly]);
+
   const handleSend = () => {
-    if (!value.trim() || isLoading || readOnly) return;
+    if ((!value.trim() && pendingFiles.length === 0) || isLoading || readOnly) return;
     setSendCount((c) => c + 1);
-    sendMessage(value.trim());
+    sendMessage(value.trim(), pendingFiles.length > 0 ? pendingFiles : undefined);
     setValue("");
+    setPendingFiles([]);
     adjustHeight(true);
   };
 
@@ -1085,7 +1174,23 @@ export function ChatComponent({
       {/* ── Main chat + browser preview ── */}
       <div className="flex flex-1 min-w-0 h-full overflow-hidden">
       {/* ── Chat column ── */}
-      <div className={cn("flex flex-col min-w-0 h-full", browserSession ? "flex-1" : "flex-1")}>
+      <div
+        className={cn("flex flex-col min-w-0 h-full relative", browserSession ? "flex-1" : "flex-1")}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {/* Drag overlay */}
+        {isDragOver && !readOnly && (
+          <div className="absolute inset-0 z-50 bg-primary/20 backdrop-blur-sm border-4 border-dashed border-primary/60 rounded-lg flex items-center justify-center pointer-events-none">
+            <div className="flex flex-col items-center gap-3 text-primary bg-background/90 px-10 py-8 rounded-2xl shadow-2xl border border-primary/30">
+              <Paperclip className="w-12 h-12" />
+              <p className="text-lg font-semibold">Drop files here</p>
+              <p className="text-sm text-muted-foreground">Images, PDFs, DOCX, TXT, MD, CSV</p>
+            </div>
+          </div>
+        )}
         {/* Header */}
         <div className="relative">
           <ChatHeader
@@ -1151,12 +1256,42 @@ export function ChatComponent({
         ) : (
           <div className="shrink-0 px-5 pb-4 pt-2 bg-background border-t border-border">
             <div className="relative bg-secondary/30 rounded-xl border border-border">
+              {/* File preview strip */}
+              {pendingFiles.length > 0 && (
+                <div className="px-4 pt-3 space-y-2">
+                  <div className="flex flex-wrap gap-2">
+                    {pendingFiles.map((file, idx) => (
+                      <div key={`${file.name}-${idx}`} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-muted/60 border border-border text-xs group">
+                        {file.type.startsWith("image/") ? (
+                          <ImageIcon className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                        ) : (
+                          <FileText className="w-3.5 h-3.5 text-orange-500 shrink-0" />
+                        )}
+                        <span className="max-w-[120px] truncate text-foreground">{file.name}</span>
+                        <span className="text-muted-foreground">({(file.size / 1024).toFixed(0)}KB)</span>
+                        <button
+                          type="button"
+                          onClick={() => removeFile(idx)}
+                          className="ml-0.5 p-0.5 rounded hover:bg-destructive/10 transition-colors cursor-pointer"
+                        >
+                          <X className="w-3 h-3 text-muted-foreground hover:text-destructive" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  {hasImageFiles && !modelSupportsVision && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400">
+                      This model may not support image input. Images will be skipped. Consider switching to a vision model (GPT-4o, Claude 3, Gemini).
+                    </p>
+                  )}
+                </div>
+              )}
               <Textarea
                 ref={textareaRef}
                 value={value}
                 onChange={(e) => { setValue(e.target.value); adjustHeight(); }}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask your agent…"
+                placeholder={pendingFiles.length > 0 ? "Add a message about the file(s)…" : "Ask your agent…"}
                 className={cn(
                   "w-full px-4 py-3 resize-none bg-transparent border-none",
                   "text-foreground text-sm focus:outline-none",
@@ -1164,17 +1299,30 @@ export function ChatComponent({
                   "placeholder:text-muted-foreground/60 min-h-[52px]"
                 )}
               />
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept={ACCEPTED_EXTENSIONS}
+                className="hidden"
+                onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }}
+              />
               <div className="flex items-center justify-between px-3 pb-3">
-                <button type="button" className="p-2 hover:bg-accent rounded-lg transition-colors cursor-pointer">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="p-2 hover:bg-accent rounded-lg transition-colors cursor-pointer"
+                  title="Attach files (images, PDFs, docs)"
+                >
                   <Paperclip className="w-4 h-4 text-muted-foreground" />
                 </button>
                 <button
                   type="button"
                   onClick={handleSend}
-                  disabled={!value.trim() || isLoading}
+                  disabled={(!value.trim() && pendingFiles.length === 0) || isLoading}
                   className={cn(
                     "px-1.5 py-1.5 rounded-lg text-sm border border-border transition-colors cursor-pointer",
-                    value.trim() && !isLoading
+                    (value.trim() || pendingFiles.length > 0) && !isLoading
                       ? "bg-primary text-primary-foreground hover:opacity-90"
                       : "text-muted-foreground opacity-50 cursor-not-allowed"
                   )}

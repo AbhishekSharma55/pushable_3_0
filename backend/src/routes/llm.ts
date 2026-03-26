@@ -75,4 +75,26 @@ export async function llmRoutes(fastify: FastifyInstance) {
             );
         }
     });
+
+    /**
+     * GET /llm/models/:modelId/capabilities
+     * Returns model capabilities (vision support, input modalities)
+     */
+    fastify.get("/llm/models/:modelId/capabilities", async (request) => {
+        const { modelId } = request.params as { modelId: string };
+
+        try {
+            const capabilities = await openrouterService.getModelCapabilities(
+                decodeURIComponent(modelId)
+            );
+            return { data: capabilities };
+        } catch (error) {
+            logger.error({ err: error }, "Failed to fetch model capabilities");
+            throw new AppError(
+                "Failed to fetch model capabilities",
+                502,
+                "LLM_FETCH_ERROR"
+            );
+        }
+    });
 }

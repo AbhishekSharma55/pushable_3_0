@@ -63,6 +63,8 @@ export interface SystemPermissions {
     canManageSchedules: boolean;
     canManageChannels: boolean;
     canManageAgents: boolean;
+    canManageBucket: boolean;
+    canExecutePython: boolean;
 }
 
 export interface AgentCapabilities {
@@ -612,6 +614,18 @@ Use when: User asks you to build or reorganize the agent team.
 Warning: Creating agents consumes workspace agent quota.`);
         }
 
+        if (perms.canManageBucket) {
+            systemParts.push(`
+**File Bucket (Persistent Storage)**
+- bucket_save_file: Save a file you create (reports, exports, data) to the workspace bucket
+- bucket_read_file: Read a file's content by ID or filename
+- bucket_list_files: List files, optionally filtered by folder or search
+- bucket_delete_file: Delete a file permanently
+- bucket_get_download_url: Get a download URL to share with the user
+Use when: You need to persist a file (document, export, generated content) so the user can access it later.
+Files are organized in folders. Your default folder is /agent-output.`);
+        }
+
         systemParts.push(`
 SYSTEM ACCESS RULES:
 - Use \`ask_user_confirmation\` before any destructive action (delete, disconnect) — show exactly what will be affected
@@ -623,7 +637,31 @@ SYSTEM ACCESS RULES:
         blocks.push(systemParts.join("\n"));
     }
 
-    // --- BLOCK 6: Output Format ---
+    // --- BLOCK 6: Python Execution Guidance ---
+    if (capabilities.systemPermissions.canExecutePython || capabilities.systemLevelAccess) {
+        blocks.push(`## Python Execution Environment (CRITICAL)
+
+You have access to a \`python_execute\` tool that runs Python code in a sandboxed environment with scientific libraries (numpy, pandas, scipy, sympy, matplotlib, math, statistics).
+
+**YOU MUST USE \`python_execute\` for the following — NEVER do these in your head:**
+
+1. **Any arithmetic, math, or calculations** — Even simple ones. "What's 15% of $4,280?" → use Python. Never guess or do mental math.
+2. **Summing, totaling, or aggregating numbers** — Invoice totals, expense reports, revenue sums, counts, averages. Always compute with code.
+3. **Financial calculations** — Tax, interest rates, discounts, margins, ROI, currency conversion, amortization.
+4. **Data analysis** — Sorting, filtering, ranking, comparisons, trend analysis, statistics.
+5. **Invoice / receipt / document processing** — When extracting numbers from documents, always verify totals and do cross-checks in Python.
+6. **Unit conversions** — Weight, distance, temperature, currency, time zones.
+7. **Date/time calculations** — Days between dates, business days, deadlines, duration calculations.
+8. **Percentage calculations** — Growth rates, completion rates, error rates.
+9. **Equation solving** — Use sympy for algebra, calculus, or symbolic math.
+10. **Chart/graph generation** — Use matplotlib to create visualizations. Save to file with plt.savefig().
+
+**WHY:** You are an AI and your mental math is unreliable. A wrong number in a financial summary, invoice, or report can cause serious real-world harm. Python execution is fast (< 1 second) and 100% accurate. There is zero reason to skip it.
+
+**RULE: If there is a number in your response that came from a calculation, it MUST have been computed by \`python_execute\`. No exceptions.**`);
+    }
+
+    // --- BLOCK 7: Output Format ---
     blocks.push(`## Response Format
 
 - Be direct. Lead with the answer or action result.

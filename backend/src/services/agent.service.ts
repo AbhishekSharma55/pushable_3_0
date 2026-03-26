@@ -65,6 +65,8 @@ export const agentService = {
             canManageSchedules: boolean;
             canManageChannels: boolean;
             canManageAgents: boolean;
+            canManageBucket?: boolean;
+            canExecutePython?: boolean;
         }
     ) {
         const agent = await agentRepository.findById(id, workspaceId);

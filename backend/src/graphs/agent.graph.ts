@@ -29,6 +29,8 @@ import { buildSystemTools } from "../tools/system.tools.ts";
 import { buildMemoryTools } from "../tools/memory.tools.ts";
 import { buildPlanningTools, type Todo } from "../tools/planning.tools.ts";
 import { buildNotebookTools, loadNotebookEntries } from "../tools/notebook.tools.ts";
+import { buildBucketTools } from "../tools/bucket.tools.ts";
+import { buildPythonTools } from "../tools/python.tools.ts";
 import { memoryRepository } from "../repositories/memory.repository.ts";
 import { buildSystemPrompt } from "../lib/system-prompt-builder.ts";
 import { browserRepository } from "../repositories/browser.repository.ts";
@@ -1213,6 +1215,8 @@ export async function createAgentGraph(
         canManageSchedules: agent.canManageSchedules,
         canManageChannels: agent.canManageChannels,
         canManageAgents: agent.canManageAgents,
+        canManageBucket: agent.canManageBucket,
+        canExecutePython: agent.canExecutePython,
     };
 
     if (agent.systemLevelAccess) {
@@ -1222,6 +1226,22 @@ export async function createAgentGraph(
             permissions: systemPermissions,
         });
         langchainTools.push(...systemTools);
+    }
+
+    // --- 7b. Bucket tools (file storage) ---
+    if (agent.canManageBucket || agent.systemLevelAccess) {
+        const bucketTools = buildBucketTools({
+            workspaceId,
+            agentId,
+            sessionId: chatSessionId,
+        });
+        langchainTools.push(...bucketTools);
+    }
+
+    // --- 7c. Python execution tools ---
+    if (agent.canExecutePython || agent.systemLevelAccess) {
+        const pythonTools = buildPythonTools();
+        langchainTools.push(...pythonTools);
     }
 
     // --- 8. Memory tools (when user context is available) ---

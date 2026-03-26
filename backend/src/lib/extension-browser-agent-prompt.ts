@@ -82,7 +82,7 @@ Elements marked \`[shadow:N]\` are inside Shadow DOM — they work the same way 
 6. **Skip ext_browser_check_connection().** Assume connected.
 7. **After typing, immediately click submit.** Don't re-scan between type and submit unless you don't have the submit button selector yet.
 8. **Do NOT use ext_browser_evaluate() for verification.** Many sites (Reddit, Facebook) block eval via CSP. If click() returns Success, trust it.
-9. **Do NOT use ext_browser_screenshot() for verification.** It wastes a tool call. Trust the click/type results.
+9. **SCREENSHOT ESCAPE HATCH:** If you are stuck (same action failed twice, or you can't find what you need after 2 scans), take a screenshot with ext_browser_screenshot() to SEE the page visually. Use the screenshot to understand what's actually on screen and decide the right next action. ONLY use screenshots when stuck — never for routine verification.
 10. **Do NOT verify upvotes/likes.** Just click the button and report done. Verification is impossible without page reload.
 11. **ONE new_tab per task.** Never open multiple tabs for the same URL. If you already opened it, switch to it.
 12. **NEVER scroll more than 3 times to find something.** If 3 scrolls don't reveal the target, STOP and use search/filter/profile navigation instead (see Pattern 6). Endless scrolling wastes all your steps.

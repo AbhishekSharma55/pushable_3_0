@@ -55,11 +55,16 @@ export PUBLIC_FRONTEND_PORT="${PUBLIC_FRONTEND_PORT:-3001}"
 export ADMIN_PANEL_PORT="${ADMIN_PANEL_PORT:-3002}"
 export BACKEND_PORT="${BACKEND_PORT:-4000}"
 export BROWSER_SERVICE_PORT="${BROWSER_SERVICE_PORT:-8080}"
+export MINIO_API_PORT="${MINIO_API_PORT:-9000}"
+export MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-9001}"
+export MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
+export MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
+export S3_BUCKET="${S3_BUCKET:-pushable-bucket}"
 
 # ─── Check port conflicts ───
 echo -e "${CYAN}Checking ports...${NC}"
-PORTS=("$FRONTEND_PORT" "$PUBLIC_FRONTEND_PORT" "$ADMIN_PANEL_PORT" "$BACKEND_PORT" "$BROWSER_SERVICE_PORT")
-NAMES=("Frontend" "Public Frontend" "Admin Panel" "Backend" "Browser Service")
+PORTS=("$FRONTEND_PORT" "$PUBLIC_FRONTEND_PORT" "$ADMIN_PANEL_PORT" "$BACKEND_PORT" "$BROWSER_SERVICE_PORT" "$MINIO_API_PORT" "$MINIO_CONSOLE_PORT")
+NAMES=("Frontend" "Public Frontend" "Admin Panel" "Backend" "Browser Service" "MinIO API" "MinIO Console")
 for i in "${!PORTS[@]}"; do
     port="${PORTS[$i]}"
     name="${NAMES[$i]}"
@@ -83,7 +88,10 @@ echo "  Public Frontend: http://localhost:${PUBLIC_FRONTEND_PORT}"
 echo "  Admin Panel:     http://localhost:${ADMIN_PANEL_PORT}"
 echo "  Backend:         http://localhost:${BACKEND_PORT}"
 echo "  Browser Service: http://localhost:${BROWSER_SERVICE_PORT}"
+echo "  MinIO API:       http://localhost:${MINIO_API_PORT}"
+echo "  MinIO Console:   http://localhost:${MINIO_CONSOLE_PORT}"
 echo "  Database:        ${POSTGRES_DB} (${POSTGRES_USER}@postgres)"
+echo "  S3 Bucket:       ${S3_BUCKET}"
 echo "  Capsolver:       ${CAPSOLVER_EXTENSION_ENABLED}"
 echo ""
 
@@ -122,6 +130,18 @@ for i in $(seq 1 15); do
     if docker compose -f "$COMPOSE_FILE" exec -T redis redis-cli ping &>/dev/null; then
         echo -e "  ${GREEN}Redis ready${NC}"
         break
+    fi
+    sleep 1
+done
+
+# Wait for MinIO
+for i in $(seq 1 30); do
+    if curl -sf "http://localhost:${MINIO_API_PORT}/minio/health/live" &>/dev/null; then
+        echo -e "  ${GREEN}MinIO ready${NC}"
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo -e "  ${YELLOW}MinIO still starting (check logs)${NC}"
     fi
     sleep 1
 done
@@ -187,15 +207,16 @@ for i in $(seq 1 60); do
 done
 
 echo ""
-echo -e "${GREEN}╔═══════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║       Pushable AI is running!             ║${NC}"
-echo -e "${GREEN}╠═══════════════════════════════════════════╣${NC}"
-echo -e "${GREEN}║  Frontend:  http://localhost:${FRONTEND_PORT}          ║${NC}"
-echo -e "${GREEN}║  Public:    http://localhost:${PUBLIC_FRONTEND_PORT}          ║${NC}"
-echo -e "${GREEN}║  Admin:     http://localhost:${ADMIN_PANEL_PORT}          ║${NC}"
-echo -e "${GREEN}║  Backend:   http://localhost:${BACKEND_PORT}          ║${NC}"
-echo -e "${GREEN}║  Browser:   http://localhost:${BROWSER_SERVICE_PORT}          ║${NC}"
-echo -e "${GREEN}╚═══════════════════════════════════════════╝${NC}"
+echo -e "${GREEN}╔═══════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║         Pushable AI is running!               ║${NC}"
+echo -e "${GREEN}╠═══════════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║  Frontend:      http://localhost:${FRONTEND_PORT}          ║${NC}"
+echo -e "${GREEN}║  Public:        http://localhost:${PUBLIC_FRONTEND_PORT}          ║${NC}"
+echo -e "${GREEN}║  Admin:         http://localhost:${ADMIN_PANEL_PORT}          ║${NC}"
+echo -e "${GREEN}║  Backend:       http://localhost:${BACKEND_PORT}          ║${NC}"
+echo -e "${GREEN}║  Browser:       http://localhost:${BROWSER_SERVICE_PORT}          ║${NC}"
+echo -e "${GREEN}║  MinIO Console: http://localhost:${MINIO_CONSOLE_PORT}          ║${NC}"
+echo -e "${GREEN}╚═══════════════════════════════════════════════╝${NC}"
 echo ""
 echo "  Logs:    docker compose -f $COMPOSE_FILE logs -f"
 echo "  Stop:    docker compose -f $COMPOSE_FILE down"

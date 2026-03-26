@@ -4,7 +4,7 @@ import { logger } from "./logger.ts";
 const connectionString = process.env.DATABASE_URL!;
 const sql = postgres(connectionString);
 
-const DEFAULT_BROWSER_AGENT_MODEL = "anthropic/claude-haiku-4-5";
+const DEFAULT_BROWSER_AGENT_MODEL = "google/gemini-3-flash-preview";
 
 export interface BrowserAgentSettings {
     model: string;

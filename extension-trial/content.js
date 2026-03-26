@@ -150,13 +150,32 @@
       return true;
     });
 
-    // Sort by vertical position
+    // Prioritize: menuitems and action buttons first (they're in open dropdowns),
+    // then buttons/inputs, then links. This ensures dropdown menu items
+    // aren't cut off by the element limit.
+    function priority(item) {
+      const el = item.el;
+      const role = el.getAttribute('role');
+      const tag = el.tagName.toLowerCase();
+      if (role === 'menuitem') return 0;  // highest priority — dropdown items
+      if (tag === 'button' || role === 'button') return 1;
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable) return 1;
+      if (tag === 'summary') return 1;
+      if (tag === 'a') return 2;  // links are lowest priority
+      return 1;
+    }
+
+    // Sort: priority first, then vertical position within same priority
     unique.sort((a, b) => {
+      const pa = priority(a);
+      const pb = priority(b);
+      if (pa !== pb) return pa - pb;
       return a.el.getBoundingClientRect().top - b.el.getBoundingClientRect().top;
     });
 
+    // Take top 80 elements (increased from 60 to avoid cutting off important items)
     const tagged = [];
-    for (const item of unique.slice(0, 60)) {
+    for (const item of unique.slice(0, 80)) {
       const id = nextId++;
       elementMap.set(id, item);
       tagged.push({ id, ...item });
@@ -234,14 +253,22 @@
         try { desc += ` href=${new URL(el.href).pathname.slice(0, 60)}`; } catch {}
       }
 
-      // Reddit/social special attributes
+      // Special button annotations
       if (el.hasAttribute('upvote')) desc += ' [UPVOTE-BTN]';
       if (el.hasAttribute('downvote')) desc += ' [DOWNVOTE-BTN]';
       const ariaPressed = el.getAttribute('aria-pressed');
       if (ariaPressed) desc += ` pressed=${ariaPressed}`;
 
+      // Detect three-dot / action menu buttons (universal pattern)
+      const lbl = label.toLowerCase();
+      if (lbl.includes('more') || lbl.includes('actions') || lbl.includes('options') ||
+          lbl === '...' || lbl === '⋯' || lbl === '⋮' ||
+          el.getAttribute('aria-haspopup') === 'true' || el.getAttribute('aria-haspopup') === 'menu') {
+        desc += ' [ACTION-MENU]';
+      }
+
       // Nearby context for buttons (helps associate buttons with content)
-      if (tag === 'button' || role === 'button') {
+      if (tag === 'button' || role === 'button' || role === 'menuitem') {
         const ctx = getNearbyContext(el);
         if (ctx) desc += ` near="${ctx}"`;
       }
@@ -358,21 +385,45 @@
         return false;
 
       // Prepare element for MAIN world interaction:
-      // 1. Resolve from Map (no DOM query needed)
-      // 2. Scroll into view
-      // 3. Tag ONLY this one element with data-psh-target (minimal mutation)
-      // 4. Return coordinates as fallback
+      // 1. Resolve from Map
+      // 2. Scroll into view (skip for menu items — they're already visible in a popup)
+      // 3. Tag element ONLY if it's safe (not inside a dropdown/menu)
+      // 4. Return coordinates
       case 'getClickCoords': {
         const el = resolveElement(msg.selector);
         if (!el) { sendResponse({ x: null, y: null, tagged: false }); return false; }
-        el.scrollIntoView({ block: 'center', behavior: 'instant' });
-        // Tag this single element for MAIN world to find via querySelector
-        try { el.setAttribute('data-psh-target', 'true'); } catch {}
+
+        // Check if element is inside a dropdown/menu/popup
+        // These elements are already visible — don't scroll or set attributes (causes dropdown to close)
+        const isInMenu = el.getAttribute('role') === 'menuitem' ||
+          el.closest?.('[role="menu"]') ||
+          el.closest?.('[role="dialog"]') ||
+          el.closest?.('[role="listbox"]') ||
+          el.closest?.('[aria-haspopup]');
+
+        if (!isInMenu) {
+          el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+
+        // Only tag if NOT in a menu — setting attributes on menu items closes the dropdown
+        let tagged = false;
+        if (!isInMenu) {
+          try { el.setAttribute('data-psh-target', 'true'); tagged = true; } catch {}
+        }
+
         const rect = el.getBoundingClientRect();
+        // For menu items: pass the label text so MAIN world can find by text + role
+        const entry = elementMap.get(parseInt((msg.selector.match(/data-psh-id="(\d+)"/) || [])[1], 10));
+        const labelText = entry?.label || el.textContent?.trim()?.slice(0, 60) || '';
+        const elRole = el.getAttribute('role') || '';
+
         sendResponse({
           x: rect.left + rect.width / 2,
           y: rect.top + rect.height / 2,
-          tagged: true
+          tagged,
+          isInMenu,
+          labelText,
+          elRole
         });
         return false;
       }

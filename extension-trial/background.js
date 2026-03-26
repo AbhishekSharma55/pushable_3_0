@@ -359,49 +359,114 @@ async function executeCommand(cmd, tabId) {
         }
 
         try {
-          // Step 2: Click at coordinates in MAIN world
+          // Step 2: Click in MAIN world
           const [{ result }] = await chrome.scripting.executeScript({
             target: { tabId }, world: 'MAIN',
-            func: (cx, cy) => {
-              // Strategy 1: Find by data-psh-target attribute (set by content script on the exact element)
-              let el = document.querySelector('[data-psh-target="true"]');
+            func: (cx, cy, labelText, elRole, isInMenu) => {
+              // Strategy 0: For menu items — deep search by text+role through shadow DOM
+              // This is the ONLY method that works for Lit/React menu items inside nested shadow roots
+              let el = null;
+              if (isInMenu && labelText) {
+                function findByText(root) {
+                  for (const c of root.querySelectorAll('*')) {
+                    if (c.getAttribute?.('role') === 'menuitem' && c.textContent?.includes(labelText)) return c;
+                    if (c.shadowRoot) { const f = findByText(c.shadowRoot); if (f) return f; }
+                    if (c.tagName?.includes('-')) {
+                      for (const child of c.children) {
+                        if (child.getAttribute?.('role') === 'menuitem' && child.textContent?.includes(labelText)) return child;
+                      }
+                    }
+                  }
+                  return null;
+                }
+                el = findByText(document);
+              }
+
+              // Strategy 1: Find by data-psh-target attribute
+              if (!el) el = document.querySelector('[data-psh-target="true"]');
               // Clean up the attribute immediately
               if (el) el.removeAttribute('data-psh-target');
 
-              // If not found in light DOM, search shadow roots
+              // If not found in light DOM, deep search through shadow roots AND slotted content
               if (!el) {
-                function searchShadow(root) {
+                function deepSearch(root) {
+                  // Check this root's own children
                   try { const f = root.querySelector('[data-psh-target="true"]'); if (f) return f; } catch {}
-                  try { for (const c of root.querySelectorAll('*')) { if (c.shadowRoot) { const f = searchShadow(c.shadowRoot); if (f) return f; } } } catch {}
+                  // Walk all elements — check their shadow roots AND their light DOM children
+                  try {
+                    for (const c of root.querySelectorAll('*')) {
+                      // Check shadow root
+                      if (c.shadowRoot) {
+                        const f = deepSearch(c.shadowRoot);
+                        if (f) return f;
+                      }
+                      // Check light DOM children of custom elements (slotted content)
+                      if (c.tagName && c.tagName.includes('-') && c.children.length > 0) {
+                        const f = c.querySelector('[data-psh-target="true"]');
+                        if (f) return f;
+                      }
+                    }
+                  } catch {}
                   return null;
                 }
-                el = searchShadow(document);
+                el = deepSearch(document);
                 if (el) el.removeAttribute('data-psh-target');
               }
 
               // Strategy 2: Fall back to coordinates
               if (!el && cx !== null && cy !== null) {
-                el = document.elementFromPoint(cx, cy);
+                let target = document.elementFromPoint(cx, cy);
+                // Walk up to find nearest interactive element (button, menuitem, link)
+                // elementFromPoint may return a child span/svg inside the actual button
+                if (target) {
+                  let walk = target;
+                  for (let i = 0; i < 5 && walk; i++) {
+                    if (walk.tagName === 'BUTTON' || walk.tagName === 'A' ||
+                        walk.getAttribute?.('role') === 'menuitem' ||
+                        walk.getAttribute?.('role') === 'button' ||
+                        walk.tagName === 'INPUT' || walk.tagName === 'TEXTAREA' ||
+                        walk.tagName === 'SELECT' || walk.tagName === 'SUMMARY') {
+                      target = walk;
+                      break;
+                    }
+                    walk = walk.parentElement;
+                  }
+                }
+                el = target;
               }
 
               if (!el) return { ok: false, error: 'Element not found' };
 
-              // Full pointer+mouse event sequence with composed:true (crosses shadow DOM)
-              const opts = { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, screenX: cx, screenY: cy, button: 0, buttons: 1, view: window };
-              el.dispatchEvent(new PointerEvent('pointerover', opts));
-              el.dispatchEvent(new PointerEvent('pointerenter', { ...opts, bubbles: false }));
-              el.dispatchEvent(new MouseEvent('mouseover', opts));
-              el.dispatchEvent(new MouseEvent('mouseenter', { ...opts, bubbles: false }));
-              el.dispatchEvent(new MouseEvent('mousemove', opts));
-              el.dispatchEvent(new PointerEvent('pointerdown', opts));
-              el.dispatchEvent(new MouseEvent('mousedown', opts));
-              el.focus?.();
-              el.dispatchEvent(new PointerEvent('pointerup', opts));
-              el.dispatchEvent(new MouseEvent('mouseup', opts));
-              el.dispatchEvent(new MouseEvent('click', opts));
+              // Check if this is a toggle button (upvote/downvote) — these must NOT get double-clicked
+              const isToggle = el.hasAttribute('aria-pressed') || el.hasAttribute('upvote') || el.hasAttribute('downvote');
+
+              if (isToggle) {
+                // Toggle buttons: ONLY use synthetic composed events (not .click())
+                // to avoid double-toggle (on→off). These elements listen for pointer events.
+                const rect = el.getBoundingClientRect();
+                const ecx = rect.left + rect.width / 2;
+                const ecy = rect.top + rect.height / 2;
+                const opts = { bubbles: true, cancelable: true, composed: true, clientX: ecx, clientY: ecy, screenX: ecx, screenY: ecy, button: 0, buttons: 1, view: window };
+                el.dispatchEvent(new PointerEvent('pointerover', opts));
+                el.dispatchEvent(new PointerEvent('pointerenter', { ...opts, bubbles: false }));
+                el.dispatchEvent(new MouseEvent('mouseover', opts));
+                el.dispatchEvent(new MouseEvent('mouseenter', { ...opts, bubbles: false }));
+                el.dispatchEvent(new MouseEvent('mousemove', opts));
+                el.dispatchEvent(new PointerEvent('pointerdown', opts));
+                el.dispatchEvent(new MouseEvent('mousedown', opts));
+                el.focus?.();
+                el.dispatchEvent(new PointerEvent('pointerup', opts));
+                el.dispatchEvent(new MouseEvent('mouseup', opts));
+                el.dispatchEvent(new MouseEvent('click', opts));
+              } else {
+                // Non-toggle elements (menu items, buttons, links):
+                // Use native .click() which produces isTrusted:true
+                // This is required for Lit/React menu items that check isTrusted
+                try { el.click(); } catch {}
+              }
               return { ok: true, tag: el.tagName.toLowerCase() };
             },
-            args: [coords.x, coords.y]
+            args: [coords.x, coords.y, coords.labelText || '', coords.elRole || '', coords.isInMenu || false]
           });
           // No settleDOM here — it closes dropdowns/menus by observing mutations too long.
           // The next get_elements() call has its own quickSettle (150ms).
@@ -444,12 +509,19 @@ async function executeCommand(cmd, tabId) {
               let el = document.querySelector('[data-psh-target="true"]');
               if (el) el.removeAttribute('data-psh-target');
               if (!el) {
-                function searchShadow(root) {
+                function deepSearch(root) {
                   try { const f = root.querySelector('[data-psh-target="true"]'); if (f) return f; } catch {}
-                  try { for (const c of root.querySelectorAll('*')) { if (c.shadowRoot) { const f = searchShadow(c.shadowRoot); if (f) return f; } } } catch {}
+                  try {
+                    for (const c of root.querySelectorAll('*')) {
+                      if (c.shadowRoot) { const f = deepSearch(c.shadowRoot); if (f) return f; }
+                      if (c.tagName && c.tagName.includes('-') && c.children.length > 0) {
+                        const f = c.querySelector('[data-psh-target="true"]'); if (f) return f;
+                      }
+                    }
+                  } catch {}
                   return null;
                 }
-                el = searchShadow(document);
+                el = deepSearch(document);
                 if (el) el.removeAttribute('data-psh-target');
               }
               if (!el && cx !== null && cy !== null) el = document.elementFromPoint(cx, cy);
@@ -475,14 +547,25 @@ async function executeCommand(cmd, tabId) {
               }
               const target = el.shadowRoot?.querySelector('input, textarea') || el;
               if (target.isContentEditable) {
-                const s = window.getSelection(); const r = document.createRange();
-                r.selectNodeContents(target); s.removeAllRanges(); s.addRange(r);
-                if (target.textContent) document.execCommand('delete', false, null);
+                // CLEAR: select all content and delete it completely
+                target.focus();
+                // Method 1: selectAll + delete
+                document.execCommand('selectAll', false, null);
+                document.execCommand('delete', false, null);
+                // Method 2: if still has content, force clear
+                if (target.textContent && target.textContent.trim()) {
+                  target.innerHTML = '';
+                }
+                // TYPE: insert the new text
                 const ok = document.execCommand('insertText', false, text);
-                if (!ok) { target.textContent = ''; target.appendChild(document.createTextNode(text)); }
+                if (!ok) {
+                  target.textContent = '';
+                  target.appendChild(document.createTextNode(text));
+                }
                 target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: text }));
                 target.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
               } else {
+                // For standard inputs: set value directly (replaces existing content)
                 const tracker = target._valueTracker; if (tracker) tracker.setValue('');
                 const proto = Object.getPrototypeOf(target);
                 const desc = Object.getOwnPropertyDescriptor(proto, 'value') ||

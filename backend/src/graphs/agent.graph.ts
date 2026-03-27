@@ -22,7 +22,7 @@ import { buildAgentCallerTool } from "../lib/agent-tool.ts";
 import { integrationRepository } from "../repositories/integration.repository.ts";
 import { getComposioClient } from "../lib/composio.ts";
 import { logger } from "../lib/logger.ts";
-import { buildBrowserAgentTool, type BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
+import { buildLazyBrowserAgentTool, type BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
 import { buildExtensionBrowserAgentTool } from "../lib/extension-browser-agent-tool.ts";
 import { buildVaultTools } from "../tools/vault.tools.ts";
 import { buildSystemTools } from "../tools/system.tools.ts";
@@ -345,8 +345,8 @@ function detectCorrectionSignals(messages: BaseMessage[]): boolean {
 
 /**
  * Load tool-scoped procedural memory from LangGraph PostgresStore.
- * Queries each tool's namespace with semantic search (when embeddings are configured)
- * to find learnings relevant to the current user message.
+ * Uses a single prefix-namespace search (one embedding API call) instead of
+ * per-tool queries (N embedding calls) to avoid O(N) latency on agents with many tools.
  * Learnings are workspace-wide — any agent using the same tool benefits.
  */
 async function loadProceduralMemory(
@@ -358,43 +358,29 @@ async function loadProceduralMemory(
     try {
         if (toolNames.length === 0) return "";
 
-        // Deduplicate tool names and query each tool's namespace
-        const uniqueTools = [...new Set(toolNames)];
-        const allLearnings: Array<{ tool: string; learning: string }> = [];
-
-        // Query tool namespaces in parallel (with semantic search when available)
-        const searchPromises = uniqueTools.map(async (toolName) => {
-            const namespace = [workspaceId, "tool_learnings", toolName];
-            try {
-                const searchOpts: { limit: number; query?: string } = { limit: 5 };
-                // Use semantic search if we have a user message and embeddings are configured
-                if (userMessage) {
-                    searchOpts.query = userMessage;
-                }
-                const items = await store.search(namespace, searchOpts);
-                return items.map((item) => ({
-                    tool: toolName,
-                    learning: item.value.learning as string,
-                }));
-            } catch {
-                // Individual tool namespace query failure is non-fatal
-                return [];
-            }
-        });
-
-        const results = await Promise.all(searchPromises);
-        for (const items of results) {
-            allLearnings.push(...items);
+        // Single prefix-namespace search across all tool learnings (1 embedding call)
+        const namespace = [workspaceId, "tool_learnings"];
+        const searchOpts: { limit: number; query?: string } = { limit: 20 };
+        if (userMessage) {
+            searchOpts.query = userMessage;
         }
 
-        if (allLearnings.length === 0) return "";
+        const items = await store.search(namespace, searchOpts);
+        if (items.length === 0) return "";
 
-        // Group by tool for clearer prompt injection
+        // Filter to learnings for tools this agent actually has, group by tool
+        const toolNameSet = new Set(toolNames);
         const byTool = new Map<string, string[]>();
-        for (const { tool, learning } of allLearnings) {
-            if (!byTool.has(tool)) byTool.set(tool, []);
-            byTool.get(tool)!.push(learning);
+        for (const item of items) {
+            const toolName = item.namespace[2]; // [workspaceId, "tool_learnings", toolName]
+            if (!toolName || !toolNameSet.has(toolName)) continue;
+            const learning = item.value.learning as string;
+            if (!learning) continue;
+            if (!byTool.has(toolName)) byTool.set(toolName, []);
+            byTool.get(toolName)!.push(learning);
         }
+
+        if (byTool.size === 0) return "";
 
         const sections = [...byTool.entries()]
             .map(([tool, learnings]) =>
@@ -731,6 +717,7 @@ async function resolveModel(
 interface GraphCacheEntry {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     graph: any; // CompiledStateGraph returned by graph.compile()
+    runReflection: (messages: BaseMessage[]) => Promise<void>;
     browserEventRef: { current: BrowserAgentEventEmitter | undefined };
     timestamp: number;
 }
@@ -780,7 +767,7 @@ export function getAgentDebugInfo(agentId: string, workspaceId: string): AgentDe
 }
 
 const graphCache = new Map<string, GraphCacheEntry>();
-const GRAPH_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes
+const GRAPH_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 /** Evict stale entries periodically to prevent memory leaks */
 setInterval(() => {
@@ -821,7 +808,7 @@ export async function createAgentGraph(
         // Update browser event ref to point to current run's handler
         cached.browserEventRef.current = onBrowserEvent;
         logger.info({ agentId, cacheKey }, "Using cached agent graph");
-        return cached.graph;
+        return { graph: cached.graph, runReflection: cached.runReflection };
     }
 
     const agent = await agentRepository.findById(agentId, workspaceId);
@@ -833,7 +820,7 @@ export async function createAgentGraph(
     const modelMultiplier = resolvedModel.multiplier;
 
     const agentTemperature = agent.temperature ?? 0.7;
-    const { llm, isClaudeDirect, recreate: recreateLLM } = createLLM({
+    const { llm, isClaudeDirect, supportsPromptCaching, recreate: recreateLLM } = createLLM({
         modelId,
         temperature: agentTemperature,
     });
@@ -862,31 +849,55 @@ export async function createAgentGraph(
     const mcpServerCapabilities: MCPServerCapability[] = [];
     const composioIntegrations: ComposioIntegration[] = [];
 
-    // --- 1. Function & MCP Tools ---
-    if (allowedToolIds.length > 0) {
-        const dbTools = await toolRepository.findByIds(allowedToolIds);
+    // --- Browser event ref (must exist before parallel block so browser task can close over it) ---
+    const browserEventRef: { current: BrowserAgentEventEmitter | undefined } = { current: onBrowserEvent };
+    const stableBrowserEventEmitter: BrowserAgentEventEmitter = (event) => {
+        browserEventRef.current?.(event);
+    };
+    const browserType = agent.browserType || "cloud";
+    logger.info({ browserModelId }, "Browser agent using model from system_settings");
 
-        for (const tool of dbTools) {
-            const config = tool.config as Record<string, unknown>;
+    // --- Parallel I/O: load all tool categories concurrently ---
+    // All categories are independent — run them simultaneously to cut total loading
+    // time from sum-of-latencies down to max-of-latencies.
+    const [
+        functionMcpResult,
+        delegationResult,
+        composioResult,
+        browserToolResult,
+        kbResult,
+        vaultResult,
+        skillResult,
+        channelResult,
+        storeResult,
+    ] = await Promise.allSettled([
 
-            if (tool.type === "function") {
+        // 1. Function & MCP tools
+        (async () => {
+            const tools: DynamicStructuredTool[] = [];
+            const capabilities: ToolCapability[] = [];
+            const clients: MultiServerMCPClient[] = [];
+            const mcpCapabilities: MCPServerCapability[] = [];
+            if (allowedToolIds.length === 0) return { tools, capabilities, clients, mcpCapabilities };
+
+            const dbTools = await toolRepository.findByIds(allowedToolIds);
+
+            // Function tools — sync construction, no network I/O
+            for (const tool of dbTools) {
+                if (tool.type !== "function") continue;
+                const config = tool.config as Record<string, unknown>;
                 const webhookUrl = config.webhookUrl as string;
                 if (!webhookUrl) {
                     logger.warn({ toolId: tool.id }, "Function tool missing webhookUrl, skipping");
                     continue;
                 }
-
                 const method = ((config.method as string) || "POST").toUpperCase();
-
                 const varPattern = /\{\{(\w+)\}\}/g;
                 const urlVars: string[] = [];
                 let match;
                 while ((match = varPattern.exec(webhookUrl)) !== null) {
-                    if (!urlVars.includes(match[1])) {
-                        urlVars.push(match[1]);
-                    }
+                    if (!urlVars.includes(match[1])) urlVars.push(match[1]);
                 }
-
                 const schemaFields: Record<string, z.ZodTypeAny> = {};
                 for (const v of urlVars) {
                     schemaFields[v] = z.string().describe(`Value for {{${v}}} in the URL`);
@@ -897,9 +908,7 @@ export async function createAgentGraph(
                 if (urlVars.length === 0 && method !== "POST") {
                     schemaFields["input"] = z.string().describe("The input to send to the tool").optional();
                 }
-
                 const paramDesc = Object.keys(schemaFields).join(", ") || "none";
-
                 const functionTool = new DynamicStructuredTool({
                     name: tool.name.replace(/[^a-zA-Z0-9_-]/g, "_"),
                     description: tool.description || `Execute ${tool.name}`,
@@ -907,26 +916,19 @@ export async function createAgentGraph(
                     func: async (params) => {
                         let resolvedUrl = webhookUrl;
                         for (const v of urlVars) {
-                            const value = params[v] as string;
                             resolvedUrl = resolvedUrl.replace(
                                 new RegExp(`\\{\\{${v}\\}\\}`, "g"),
-                                encodeURIComponent(value)
+                                encodeURIComponent(params[v] as string)
                             );
                         }
-
                         const controller = new AbortController();
                         const timeout = setTimeout(() => controller.abort(), 30_000);
                         try {
-                            const fetchOptions: RequestInit = {
-                                method,
-                                signal: controller.signal,
-                            };
-
+                            const fetchOptions: RequestInit = { method, signal: controller.signal };
                             if (method === "POST") {
                                 fetchOptions.headers = { "Content-Type": "application/json" };
                                 fetchOptions.body = JSON.stringify({ input: params.input ?? "" });
                             }
-
                             const response = await fetch(resolvedUrl, fetchOptions);
                             return await response.text();
                         } catch (error) {
@@ -937,277 +939,367 @@ export async function createAgentGraph(
                         }
                     },
                 });
-
-                langchainTools.push(functionTool);
-                toolCapabilities.push({
-                    name: tool.name,
-                    description: tool.description,
-                    parameters: paramDesc,
-                });
-            } else if (tool.type === "mcp") {
-                const mcpUrl = config.url as string;
-                if (!mcpUrl) {
-                    logger.warn({ toolId: tool.id }, "MCP tool missing URL, skipping");
-                    continue;
-                }
-
-                try {
-                    const mcpClient = new MultiServerMCPClient({
-                        [tool.name]: {
-                            url: mcpUrl,
-                            transport: "sse",
-                        },
-                    });
-
-                    const mcpToolsList = await mcpClient.getTools();
-                    mcpClients.push(mcpClient);
-
-                    const toolNames = config.toolNames as string[] | undefined;
-                    const filtered = toolNames && toolNames.length > 0
-                        ? mcpToolsList.filter((t) => toolNames.includes(t.name))
-                        : mcpToolsList;
-
-                    const mcpToolNames: string[] = [];
-                    for (const mcpTool of filtered) {
-                        langchainTools.push(mcpTool as DynamicStructuredTool);
-                        mcpToolNames.push(mcpTool.name);
-                    }
-
-                    mcpServerCapabilities.push({
-                        name: tool.name,
-                        description: tool.description,
-                        toolNames: mcpToolNames,
-                    });
-                } catch (error) {
-                    logger.warn(
-                        { error, toolId: tool.id, mcpUrl },
-                        "Failed to connect to MCP server, skipping tool"
-                    );
-                }
+                tools.push(functionTool);
+                capabilities.push({ name: tool.name, description: tool.description, parameters: paramDesc });
             }
-        }
-    }
 
-    // --- 2. Agent delegation tools (parallel) ---
-    const delegateAgentIds = allowedAgentIds.filter((id) => id !== agentId);
-    const connectedAgents: ConnectedAgent[] = [];
-
-    if (delegateAgentIds.length > 0) {
-        const delegateResults = await Promise.all(
-            delegateAgentIds.map(async (targetAgentId) => {
-                try {
-                    const targetAgent = await agentRepository.findById(targetAgentId, workspaceId);
-                    if (targetAgent) {
-                        const agentTool = await buildAgentCallerTool(
-                            agentId,
-                            targetAgentId,
-                            workspaceId
-                        );
-                        if (agentTool) {
-                            return {
-                                tool: agentTool,
-                                agent: {
-                                    id: targetAgent.id,
-                                    name: targetAgent.name,
-                                    role: targetAgent.systemPrompt?.split("\n")[0] || "General Assistant",
-                                } as ConnectedAgent,
-                            };
+            // MCP tools — connect to all servers in parallel (each needs network I/O)
+            const mcpDbTools = dbTools.filter((t) => t.type === "mcp");
+            if (mcpDbTools.length > 0) {
+                const mcpResults = await Promise.allSettled(
+                    mcpDbTools.map(async (tool) => {
+                        const config = tool.config as Record<string, unknown>;
+                        const mcpUrl = config.url as string;
+                        if (!mcpUrl) {
+                            logger.warn({ toolId: tool.id }, "MCP tool missing URL, skipping");
+                            return null;
                         }
-                    }
-                    return null;
-                } catch (error) {
-                    logger.warn(
-                        { error, targetAgentId },
-                        "Failed to build agent caller tool, skipping"
-                    );
-                    return null;
-                }
-            })
-        );
-
-        for (const result of delegateResults) {
-            if (result) {
-                langchainTools.push(result.tool);
-                connectedAgents.push(result.agent);
-            }
-        }
-    }
-
-    // --- 3. Composio integration tools ---
-    // Composio uses meta tools (COMPOSIO_SEARCH_TOOLS, COMPOSIO_MULTI_EXECUTE_TOOL, etc.)
-    // that discover and execute app-specific actions at runtime. We pass meta tools once
-    // and build the composioIntegrations list so the system prompt tells the agent which
-    // connections are available.
-    let composioToolCount = 0;
-    const activeIntegrations = agentIntegrations.filter(
-        (i) => i.status === "active"
-    );
-
-    if (activeIntegrations.length > 0) {
-        try {
-            const composio = getComposioClient();
-
-            const toolkitSlugs = [...new Set(activeIntegrations.map((i) => i.composioToolkitSlug))];
-
-            // Build per-toolkit tool permissions from integration metadata
-            const toolsConfig: Record<string, { enable: string[] } | { disable: string[] }> = {};
-            for (const integ of activeIntegrations) {
-                const slug = integ.composioToolkitSlug;
-                const perms = (integ.metadata as Record<string, unknown>)?.toolPermissions as {
-                    mode?: string;
-                    tools?: string[];
-                } | undefined;
-
-                if (perms?.tools && perms.tools.length > 0) {
-                    if (perms.mode === "allowlist") {
-                        toolsConfig[slug] = { enable: perms.tools };
-                    } else {
-                        toolsConfig[slug] = { disable: perms.tools };
+                        const mcpClient = new MultiServerMCPClient({
+                            [tool.name]: { url: mcpUrl, transport: "sse" },
+                        });
+                        const mcpToolsList = await mcpClient.getTools();
+                        const toolNames = config.toolNames as string[] | undefined;
+                        const filtered = toolNames && toolNames.length > 0
+                            ? mcpToolsList.filter((t) => toolNames.includes(t.name))
+                            : mcpToolsList;
+                        return {
+                            client: mcpClient,
+                            tools: filtered,
+                            capability: {
+                                name: tool.name,
+                                description: tool.description,
+                                toolNames: filtered.map((t) => t.name),
+                            },
+                        };
+                    })
+                );
+                for (const r of mcpResults) {
+                    if (r.status === "fulfilled" && r.value) {
+                        clients.push(r.value.client);
+                        for (const t of r.value.tools) tools.push(t as DynamicStructuredTool);
+                        mcpCapabilities.push(r.value.capability);
+                    } else if (r.status === "rejected") {
+                        logger.warn({ error: r.reason }, "Failed to connect to MCP server, skipping");
                     }
                 }
             }
+            return { tools, capabilities, clients, mcpCapabilities };
+        })(),
 
-            const sessionConfig: Record<string, unknown> = {
-                toolkits: toolkitSlugs,
-            };
-            if (Object.keys(toolsConfig).length > 0) {
-                sessionConfig.tools = toolsConfig;
-            }
-
-            const session = await composio.create(workspaceId, sessionConfig);
-            const composioTools = await session.tools();
-
-            // Add all meta tools (COMPOSIO_SEARCH_TOOLS, COMPOSIO_MULTI_EXECUTE_TOOL, etc.)
-            if (Array.isArray(composioTools)) {
-                for (const tool of composioTools) {
-                    const castTool = tool as unknown as DynamicStructuredTool;
-                    langchainTools.push(castTool);
-                    composioToolCount++;
-                }
-            }
-
-            // Build integration metadata for system prompt so the agent knows which connections exist
-            for (const integ of activeIntegrations) {
-                const slug = integ.composioToolkitSlug;
-                const label = integ.connectionLabel || integ.name;
-                const appDisplayName = slug.charAt(0).toUpperCase() + slug.slice(1);
-
-                composioIntegrations.push({
-                    connectionLabel: label,
-                    connectionDescription: integ.connectionDescription ?? undefined,
-                    app: slug,
-                    appDisplayName,
-                    actions: [`Use COMPOSIO_SEARCH_TOOLS to find ${slug} actions, then COMPOSIO_MULTI_EXECUTE_TOOL to execute them`],
-                });
-            }
-        } catch (error) {
-            logger.warn(
-                { error, agentId },
-                "Failed to load Composio tools, proceeding without them"
-            );
-        }
-    }
-
-    // --- 4. Browser Agent (load ONLY the selected browser type) ---
-    // Use a mutable ref so the cached graph always emits to the current run
-    const browserEventRef: { current: BrowserAgentEventEmitter | undefined } = { current: onBrowserEvent };
-    const stableBrowserEventEmitter: BrowserAgentEventEmitter = (event) => {
-        browserEventRef.current?.(event);
-    };
-
-    let hasBrowser = false;
-    const browserType = agent.browserType || "cloud";
-
-    logger.info({ browserModelId }, "Browser agent using model from system_settings");
-
-    if (browserType === "cloud") {
-        // Cloud browser: autonomous sub-agent with internal browser tools
-        try {
-            const browserAgentTool = await buildBrowserAgentTool(
-                agentId,
-                workspaceId,
-                browserModelId,
-                modelMultiplier,
-                agentTemperature,
-                stableBrowserEventEmitter,
-                chatSessionId
-            );
-            if (browserAgentTool) {
-                langchainTools.push(browserAgentTool);
-                hasBrowser = true;
-            }
-        } catch (error) {
-            logger.warn(
-                { error, agentId },
-                "Failed to load cloud browser agent, proceeding without it"
-            );
-        }
-    } else if (browserType === "extension") {
-        // Extension browser: autonomous sub-agent using Chrome extension tools
-        try {
-            const extBrowserAgentTool = buildExtensionBrowserAgentTool(
-                agentId,
-                workspaceId,
-                modelMultiplier,
-                agentTemperature,
-                stableBrowserEventEmitter,
-                browserModelId
-            );
-            if (extBrowserAgentTool) {
-                langchainTools.push(extBrowserAgentTool);
-                hasBrowser = true;
-            }
-        } catch (error) {
-            logger.warn(
-                { error, agentId },
-                "Failed to load extension browser agent, proceeding without it"
-            );
-        }
-    }
-
-    // --- 5. Fetch KB metadata for prompt builder (parallel) ---
-    const kbCapabilities: KBCapability[] = [];
-    if (allowedKbIds.length > 0) {
-        try {
-            const kbs = await kbRepository.findKBsByIds(allowedKbIds, workspaceId);
-            const kbsWithDocs = await Promise.all(
-                kbs.map(async (kb) => {
-                    const docs = await kbRepository.findDocumentsByKB(kb.id, workspaceId);
-                    return {
-                        name: kb.name,
-                        description: kb.description,
-                        documentCount: docs.length,
-                    };
+        // 2. Agent delegation tools
+        (async () => {
+            const tools: DynamicStructuredTool[] = [];
+            const agents: ConnectedAgent[] = [];
+            const delegateIds = allowedAgentIds.filter((id) => id !== agentId);
+            if (delegateIds.length === 0) return { tools, agents };
+            const results = await Promise.all(
+                delegateIds.map(async (targetAgentId) => {
+                    try {
+                        const targetAgent = await agentRepository.findById(targetAgentId, workspaceId);
+                        if (targetAgent) {
+                            const agentTool = await buildAgentCallerTool(agentId, targetAgentId, workspaceId);
+                            if (agentTool) {
+                                return {
+                                    tool: agentTool,
+                                    agent: {
+                                        id: targetAgent.id,
+                                        name: targetAgent.name,
+                                        role: targetAgent.systemPrompt?.split("\n")[0] || "General Assistant",
+                                    } as ConnectedAgent,
+                                };
+                            }
+                        }
+                        return null;
+                    } catch (error) {
+                        logger.warn({ error, targetAgentId }, "Failed to build agent caller tool, skipping");
+                        return null;
+                    }
                 })
             );
-            kbCapabilities.push(...kbsWithDocs);
-        } catch (error) {
-            logger.warn({ error }, "Failed to fetch KB metadata for prompt builder");
-        }
+            for (const r of results) {
+                if (r) { tools.push(r.tool); agents.push(r.agent); }
+            }
+            return { tools, agents };
+        })(),
+
+        // 3. Composio integration tools (external API calls)
+        (async () => {
+            const tools: DynamicStructuredTool[] = [];
+            const integrations: ComposioIntegration[] = [];
+            let count = 0;
+            const activeIntegrations = agentIntegrations.filter((i) => i.status === "active");
+            if (activeIntegrations.length === 0) return { tools, integrations, count };
+            try {
+                const composio = getComposioClient();
+                const toolkitSlugs = [...new Set(activeIntegrations.map((i) => i.composioToolkitSlug))];
+                const toolsConfig: Record<string, { enable: string[] } | { disable: string[] }> = {};
+                for (const integ of activeIntegrations) {
+                    const slug = integ.composioToolkitSlug;
+                    const perms = (integ.metadata as Record<string, unknown>)?.toolPermissions as {
+                        mode?: string; tools?: string[];
+                    } | undefined;
+                    if (perms?.tools && perms.tools.length > 0) {
+                        toolsConfig[slug] = perms.mode === "allowlist"
+                            ? { enable: perms.tools }
+                            : { disable: perms.tools };
+                    }
+                }
+                const sessionConfig: Record<string, unknown> = { toolkits: toolkitSlugs };
+                if (Object.keys(toolsConfig).length > 0) sessionConfig.tools = toolsConfig;
+                const session = await composio.create(workspaceId, sessionConfig);
+                const composioTools = await session.tools();
+                if (Array.isArray(composioTools)) {
+                    for (const tool of composioTools) {
+                        tools.push(tool as unknown as DynamicStructuredTool);
+                        count++;
+                    }
+                }
+                for (const integ of activeIntegrations) {
+                    const slug = integ.composioToolkitSlug;
+                    integrations.push({
+                        connectionLabel: integ.connectionLabel || integ.name,
+                        connectionDescription: integ.connectionDescription ?? undefined,
+                        app: slug,
+                        appDisplayName: slug.charAt(0).toUpperCase() + slug.slice(1),
+                        actions: [`Use COMPOSIO_SEARCH_TOOLS to find ${slug} actions, then COMPOSIO_MULTI_EXECUTE_TOOL to execute them`],
+                    });
+                }
+            } catch (error) {
+                logger.warn({ error, agentId }, "Failed to load Composio tools, proceeding without them");
+            }
+            return { tools, integrations, count };
+        })(),
+
+        // 4. Browser agent tool — lazy init: registers tool instantly, defers Chromium startup to first invocation
+        (async () => {
+            let tool: DynamicStructuredTool | null = null;
+            let hasBrowser = false;
+            if (browserType === "cloud") {
+                try {
+                    tool = buildLazyBrowserAgentTool(
+                        agentId, workspaceId, browserModelId, modelMultiplier,
+                        agentTemperature, stableBrowserEventEmitter, chatSessionId
+                    );
+                    hasBrowser = true;
+                } catch (error) {
+                    logger.warn({ error, agentId }, "Failed to create lazy browser agent tool, proceeding without it");
+                }
+            } else if (browserType === "extension") {
+                try {
+                    tool = buildExtensionBrowserAgentTool(
+                        agentId, workspaceId, modelMultiplier,
+                        agentTemperature, stableBrowserEventEmitter, browserModelId
+                    );
+                    hasBrowser = !!tool;
+                } catch (error) {
+                    logger.warn({ error, agentId }, "Failed to load extension browser agent, proceeding without it");
+                }
+            }
+            return { tool, hasBrowser };
+        })(),
+
+        // 5. KB metadata for system prompt builder
+        (async () => {
+            const kbCapabilities: KBCapability[] = [];
+            if (allowedKbIds.length === 0) return kbCapabilities;
+            try {
+                const kbs = await kbRepository.findKBsByIds(allowedKbIds, workspaceId);
+                const kbsWithDocs = await Promise.all(
+                    kbs.map(async (kb) => {
+                        const docs = await kbRepository.findDocumentsByKB(kb.id, workspaceId);
+                        return { name: kb.name, description: kb.description, documentCount: docs.length };
+                    })
+                );
+                kbCapabilities.push(...kbsWithDocs);
+            } catch (error) {
+                logger.warn({ error }, "Failed to fetch KB metadata for prompt builder");
+            }
+            return kbCapabilities;
+        })(),
+
+        // 6. Vault tools (Bitwarden credential access)
+        (async () => {
+            try {
+                return await buildVaultTools(workspaceId);
+            } catch (error) {
+                logger.warn({ error, agentId }, "Failed to load vault tools, proceeding without them");
+                return [] as DynamicStructuredTool[];
+            }
+        })(),
+
+        // 7. Skill metadata for system prompt builder
+        (async () => {
+            try {
+                return await skillRepository.findByIds(allowedSkillIds, workspaceId);
+            } catch (error) {
+                logger.warn({ error }, "Failed to fetch skill metadata");
+                return [] as Awaited<ReturnType<typeof skillRepository.findByIds>>;
+            }
+        })(),
+
+        // 9. Channel awareness + send message tool
+        (async () => {
+            const channelInfos: ChannelInfo[] = [];
+            let sendChannelTool: DynamicStructuredTool | null = null;
+            try {
+                const allConnections = await channelRepository.findByWorkspace(workspaceId);
+                const agentConnections = allConnections.filter(
+                    (c) => c.agentId === agentId && c.status === "active"
+                );
+                for (const conn of agentConnections) {
+                    const config = (conn.config || {}) as Record<string, unknown>;
+                    const knownUsersMap = (config.knownUsers as Record<
+                        string,
+                        { username: string; firstName: string; chatId?: string }
+                    >) || {};
+                    const users: ChannelUserInfo[] = Object.entries(knownUsersMap).map(
+                        ([uid, info]) => ({
+                            userId: uid,
+                            username: info.username || "",
+                            firstName: info.firstName || "",
+                            chatId: info.chatId,
+                        })
+                    );
+                    channelInfos.push({
+                        connectionId: conn.id,
+                        channelType: conn.channelType as "telegram" | "slack",
+                        name: conn.name,
+                        status: conn.status,
+                        knownUsers: users,
+                    });
+                }
+                if (agentConnections.length > 0) {
+                    sendChannelTool = new DynamicStructuredTool({
+                        name: "send_channel_message",
+                        description:
+                            "Send a message to a specific user on a connected messaging channel (Telegram/Slack). " +
+                            "You can identify the user by their name, username, or user ID. " +
+                            "The system will resolve the correct user from known users.",
+                        schema: z.object({
+                            user: z.string().describe("The user to send to — can be a name (e.g. 'John'), username (e.g. 'john_doe'), or user ID"),
+                            message: z.string().describe("The message text to send"),
+                            channel_name: z.string().optional().describe("Optional: specific channel connection name if the agent has multiple channels"),
+                        }),
+                        func: async (params) => {
+                            const { user, message, channel_name } = params;
+                            let targetConnections = agentConnections;
+                            if (channel_name) {
+                                targetConnections = agentConnections.filter(
+                                    (c) => c.name.toLowerCase().includes(channel_name.toLowerCase())
+                                );
+                                if (targetConnections.length === 0) {
+                                    return `No channel found matching "${channel_name}". Available: ${agentConnections.map((c) => c.name).join(", ")}`;
+                                }
+                            }
+                            const userLower = user.toLowerCase().replace(/^@/, "");
+                            for (const conn of targetConnections) {
+                                const connConfig = (conn.config || {}) as Record<string, unknown>;
+                                const knownUsersMap = (connConfig.knownUsers as Record<
+                                    string,
+                                    { username: string; firstName: string; chatId?: string }
+                                >) || {};
+                                const matchedEntry = Object.entries(knownUsersMap).find(([uid, info]) =>
+                                    uid === user ||
+                                    (info.username && info.username.toLowerCase() === userLower) ||
+                                    (info.firstName && info.firstName.toLowerCase() === userLower)
+                                );
+                                if (matchedEntry) {
+                                    const [uid, userInfo] = matchedEntry;
+                                    const chatId = userInfo.chatId || uid;
+                                    if (conn.channelType === "telegram") {
+                                        const telegramAdapter = channelManager.getTelegramAdapter();
+                                        const sent = await telegramAdapter.sendDirectMessage(conn.id, chatId, message);
+                                        if (sent) {
+                                            return `Message sent to ${userInfo.firstName || userInfo.username || uid} on ${conn.name} (Telegram).`;
+                                        }
+                                        return `Failed to send message to user. They may need to start a conversation with the bot first.`;
+                                    }
+                                    return `Sending messages on ${conn.channelType} is not yet supported.`;
+                                }
+                            }
+                            const allUsers: string[] = [];
+                            for (const conn of targetConnections) {
+                                const connConfig = (conn.config || {}) as Record<string, unknown>;
+                                const knownUsersMap = (connConfig.knownUsers as Record<string, { username: string; firstName: string }>) || {};
+                                for (const [uid, info] of Object.entries(knownUsersMap)) {
+                                    allUsers.push(info.firstName || info.username || uid);
+                                }
+                            }
+                            if (allUsers.length > 0) return `No user found matching "${user}". Known users: ${allUsers.join(", ")}`;
+                            return `No user found matching "${user}". No users have interacted with the bot yet.`;
+                        },
+                    });
+                }
+            } catch (error) {
+                logger.warn({ error, agentId }, "Failed to load channel info for agent");
+            }
+            return { channelInfos, sendChannelTool };
+        })(),
+
+        // Store — fetched in parallel so it's ready for notebook tools below
+        getStore(),
+    ]);
+
+    // --- Merge parallel results into shared collections ---
+    if (functionMcpResult.status === "fulfilled") {
+        langchainTools.push(...functionMcpResult.value.tools);
+        toolCapabilities.push(...functionMcpResult.value.capabilities);
+        mcpClients.push(...functionMcpResult.value.clients);
+        mcpServerCapabilities.push(...functionMcpResult.value.mcpCapabilities);
+    } else {
+        logger.warn({ error: functionMcpResult.reason }, "Function/MCP tool loading failed");
     }
 
-    // --- 6b. Vault tools (Bitwarden credential access) ---
-    try {
-        const vaultTools = await buildVaultTools(workspaceId);
-        langchainTools.push(...vaultTools);
-    } catch (error) {
-        logger.warn(
-            { error, agentId },
-            "Failed to load vault tools, proceeding without them"
-        );
+    const connectedAgents: ConnectedAgent[] = [];
+    if (delegationResult.status === "fulfilled") {
+        langchainTools.push(...delegationResult.value.tools);
+        connectedAgents.push(...delegationResult.value.agents);
+    } else {
+        logger.warn({ error: delegationResult.reason }, "Agent delegation tool loading failed");
     }
 
-    // --- 6c. Fetch skill metadata for prompt builder ---
-    const permittedSkills = await skillRepository.findByIds(
-        allowedSkillIds,
-        workspaceId
-    );
+    let composioToolCount = 0;
+    if (composioResult.status === "fulfilled") {
+        langchainTools.push(...composioResult.value.tools);
+        composioIntegrations.push(...composioResult.value.integrations);
+        composioToolCount = composioResult.value.count;
+    } else {
+        logger.warn({ error: composioResult.reason }, "Composio tool loading failed");
+    }
+
+    let hasBrowser = false;
+    if (browserToolResult.status === "fulfilled") {
+        if (browserToolResult.value.tool) langchainTools.push(browserToolResult.value.tool);
+        hasBrowser = browserToolResult.value.hasBrowser;
+    } else {
+        logger.warn({ error: browserToolResult.reason }, "Browser tool loading failed");
+    }
+
+    const kbCapabilities: KBCapability[] = kbResult.status === "fulfilled" ? kbResult.value : [];
+
+    if (vaultResult.status === "fulfilled") {
+        langchainTools.push(...vaultResult.value);
+    } else {
+        logger.warn({ error: vaultResult.reason }, "Vault tool loading failed");
+    }
+
+    const permittedSkills = skillResult.status === "fulfilled" ? skillResult.value : [];
     const skillCapabilities: SkillCapability[] = permittedSkills.map((s) => ({
         name: s.name,
         description: s.description,
     }));
 
-    // --- 7. System tools ---
+    const channelInfos: ChannelInfo[] = [];
+    if (channelResult.status === "fulfilled") {
+        channelInfos.push(...channelResult.value.channelInfos);
+        if (channelResult.value.sendChannelTool) langchainTools.push(channelResult.value.sendChannelTool);
+    } else {
+        logger.warn({ error: channelResult.reason }, "Channel tool loading failed");
+    }
+
+    const store = storeResult.status === "fulfilled" ? storeResult.value : await getStore();
+
+    // --- 7. System tools (sync — no I/O) ---
     const systemPermissions: SystemPermissions = {
         canManageKB: agent.canManageKB,
         canManageSkills: agent.canManageSkills,
@@ -1220,43 +1312,26 @@ export async function createAgentGraph(
     };
 
     if (agent.systemLevelAccess) {
-        const systemTools = buildSystemTools({
-            agentId,
-            workspaceId,
-            permissions: systemPermissions,
-        });
-        langchainTools.push(...systemTools);
+        langchainTools.push(...buildSystemTools({ agentId, workspaceId, permissions: systemPermissions }));
     }
 
-    // --- 7b. Bucket tools (file storage) ---
+    // --- 7b. Bucket tools ---
     if (agent.canManageBucket || agent.systemLevelAccess) {
-        const bucketTools = buildBucketTools({
-            workspaceId,
-            agentId,
-            sessionId: chatSessionId,
-        });
-        langchainTools.push(...bucketTools);
+        langchainTools.push(...buildBucketTools({ workspaceId, agentId, sessionId: chatSessionId }));
     }
 
     // --- 7c. Python execution tools ---
     if (agent.canExecutePython || agent.systemLevelAccess) {
-        const pythonTools = buildPythonTools();
-        langchainTools.push(...pythonTools);
+        langchainTools.push(...buildPythonTools());
     }
 
-    // --- 8. Memory tools (when user context is available) ---
-    const store = await getStore();
+    // --- 8. Memory & notebook tools ---
     if (userId) {
-        const memoryTools = buildMemoryTools({ workspaceId, agentId, userId });
-        langchainTools.push(...memoryTools);
-
-        // --- 8a. Notebook tools (persistent cross-session scratchpad) ---
-        const notebookTools = buildNotebookTools({ store, workspaceId, agentId, userId });
-        langchainTools.push(...notebookTools);
+        langchainTools.push(...buildMemoryTools({ workspaceId, agentId, userId }));
+        langchainTools.push(...buildNotebookTools({ store, workspaceId, agentId, userId }));
     }
 
-    // --- 8b. Planning tools (write_todos, update_todo, get_todos) ---
-    // Use a mutable ref that gets synced with graph state in the agent node
+    // --- 8b. Planning tools ---
     let currentTodos: Todo[] = [];
     const planningTools = buildPlanningTools(
         () => currentTodos,
@@ -1264,7 +1339,7 @@ export async function createAgentGraph(
     );
     langchainTools.push(...planningTools);
 
-    // --- 8c. Decision confirmation tool (human-in-the-loop for decisions) ---
+    // --- 8c. Decision confirmation tool (human-in-the-loop) ---
     const askUserConfirmationTool = new DynamicStructuredTool({
         name: "ask_user_confirmation",
         description:
@@ -1272,17 +1347,8 @@ export async function createAgentGraph(
             "Use this before sending messages, deleting resources, creating system resources, " +
             "or making any irreversible change. Present a clear, human-readable question.",
         schema: z.object({
-            question: z
-                .string()
-                .describe(
-                    "A clear question for the user. E.g. 'Should I send this message to John on Telegram?'"
-                ),
-            context: z
-                .string()
-                .optional()
-                .describe(
-                    "Additional context to show the user — draft content, what will be deleted, etc."
-                ),
+            question: z.string().describe("A clear question for the user. E.g. 'Should I send this message to John on Telegram?'"),
+            context: z.string().optional().describe("Additional context to show the user — draft content, what will be deleted, etc."),
         }),
         func: async () => {
             // Execution is handled by the tool node via interrupt — this is never called directly
@@ -1290,176 +1356,6 @@ export async function createAgentGraph(
         },
     });
     langchainTools.push(askUserConfirmationTool);
-
-    // --- 9. Channel awareness + send message tool ---
-    const channelInfos: ChannelInfo[] = [];
-    try {
-        const allConnections = await channelRepository.findByWorkspace(workspaceId);
-        const agentConnections = allConnections.filter(
-            (c) => c.agentId === agentId && c.status === "active"
-        );
-
-        for (const conn of agentConnections) {
-            const config = (conn.config || {}) as Record<string, unknown>;
-            const knownUsersMap = (config.knownUsers as Record<
-                string,
-                { username: string; firstName: string; chatId?: string }
-            >) || {};
-
-            const users: ChannelUserInfo[] = Object.entries(knownUsersMap).map(
-                ([uid, info]) => ({
-                    userId: uid,
-                    username: info.username || "",
-                    firstName: info.firstName || "",
-                    chatId: info.chatId,
-                })
-            );
-
-            channelInfos.push({
-                connectionId: conn.id,
-                channelType: conn.channelType as "telegram" | "slack",
-                name: conn.name,
-                status: conn.status,
-                knownUsers: users,
-            });
-        }
-
-        // Build the send_channel_message tool if there are active channels
-        if (agentConnections.length > 0) {
-            const sendChannelMessageTool = new DynamicStructuredTool({
-                name: "send_channel_message",
-                description:
-                    "Send a message to a specific user on a connected messaging channel (Telegram/Slack). " +
-                    "You can identify the user by their name, username, or user ID. " +
-                    "The system will resolve the correct user from known users.",
-                schema: z.object({
-                    user: z
-                        .string()
-                        .describe(
-                            "The user to send to — can be a name (e.g. 'John'), username (e.g. 'john_doe'), or user ID"
-                        ),
-                    message: z.string().describe("The message text to send"),
-                    channel_name: z
-                        .string()
-                        .optional()
-                        .describe(
-                            "Optional: specific channel connection name if the agent has multiple channels"
-                        ),
-                }),
-                func: async (params) => {
-                    const { user, message, channel_name } = params;
-
-                    // Find matching connection(s)
-                    let targetConnections = agentConnections;
-                    if (channel_name) {
-                        targetConnections = agentConnections.filter(
-                            (c) =>
-                                c.name
-                                    .toLowerCase()
-                                    .includes(channel_name.toLowerCase())
-                        );
-                        if (targetConnections.length === 0) {
-                            return `No channel found matching "${channel_name}". Available: ${agentConnections.map((c) => c.name).join(", ")}`;
-                        }
-                    }
-
-                    // Search for the user across connections
-                    const userLower = user.toLowerCase().replace(/^@/, "");
-                    for (const conn of targetConnections) {
-                        const config = (conn.config || {}) as Record<
-                            string,
-                            unknown
-                        >;
-                        const knownUsersMap = (config.knownUsers as Record<
-                            string,
-                            {
-                                username: string;
-                                firstName: string;
-                                chatId?: string;
-                            }
-                        >) || {};
-
-                        // Find user by name, username, or ID
-                        const matchedEntry = Object.entries(
-                            knownUsersMap
-                        ).find(([uid, info]) => {
-                            return (
-                                uid === user ||
-                                (info.username &&
-                                    info.username.toLowerCase() ===
-                                        userLower) ||
-                                (info.firstName &&
-                                    info.firstName.toLowerCase() ===
-                                        userLower)
-                            );
-                        });
-
-                        if (matchedEntry) {
-                            const [userId, userInfo] = matchedEntry;
-                            const chatId = userInfo.chatId || userId;
-
-                            if (conn.channelType === "telegram") {
-                                const telegramAdapter =
-                                    channelManager.getTelegramAdapter();
-                                const sent =
-                                    await telegramAdapter.sendDirectMessage(
-                                        conn.id,
-                                        chatId,
-                                        message
-                                    );
-                                if (sent) {
-                                    const displayName =
-                                        userInfo.firstName ||
-                                        userInfo.username ||
-                                        userId;
-                                    return `Message sent to ${displayName} on ${conn.name} (Telegram).`;
-                                }
-                                return `Failed to send message to user. They may need to start a conversation with the bot first.`;
-                            }
-
-                            // TODO: Slack support
-                            return `Sending messages on ${conn.channelType} is not yet supported.`;
-                        }
-                    }
-
-                    // No match found — list known users
-                    const allUsers: string[] = [];
-                    for (const conn of targetConnections) {
-                        const config = (conn.config || {}) as Record<
-                            string,
-                            unknown
-                        >;
-                        const knownUsersMap = (config.knownUsers as Record<
-                            string,
-                            {
-                                username: string;
-                                firstName: string;
-                            }
-                        >) || {};
-                        for (const [uid, info] of Object.entries(
-                            knownUsersMap
-                        )) {
-                            const name =
-                                info.firstName || info.username || uid;
-                            allUsers.push(name);
-                        }
-                    }
-
-                    if (allUsers.length > 0) {
-                        return `No user found matching "${user}". Known users: ${allUsers.join(", ")}`;
-                    }
-                    return `No user found matching "${user}". No users have interacted with the bot yet.`;
-                },
-            });
-
-            langchainTools.push(sendChannelMessageTool);
-        }
-    } catch (error) {
-        logger.warn(
-            { error, agentId },
-            "Failed to load channel info for agent"
-        );
-    }
 
     // --- Build capability-aware system prompt ---
     const capabilities: AgentCapabilities = {
@@ -1492,7 +1388,7 @@ export async function createAgentGraph(
             modelId,
             modelMultiplier,
             toolCount: langchainTools.length,
-            delegateAgents: delegateAgentIds.length,
+            delegateAgents: connectedAgents.length,
             composioTools: composioToolCount,
             kbCount: allowedKbIds.length,
             skillCount: permittedSkills.length,
@@ -1601,88 +1497,25 @@ export async function createAgentGraph(
             return { messages: [new AIMessage(errorMsg)], todos: currentTodos };
         }
 
-        // Build dynamic system prompt
-        const systemPromptParts: string[] = [];
+        // Build system prompt — split into stable (cacheable) and dynamic parts.
+        // Stable parts don't change between turns: agent identity, tools, instructions.
+        // Dynamic parts change per turn: memories, KB results, tool history, plan state.
+        // This enables prompt caching on Anthropic models (90% input cost savings on cache hits).
+        const stableParts: string[] = [];
+        const dynamicParts: string[] = [];
 
-        // 0. Inject conversation summary if exists
-        if (state.summary) {
-            systemPromptParts.push(
-                `## Conversation Summary (earlier messages)\n${state.summary}`
-            );
-        }
+        // ── Stable parts (cacheable — identical across all turns in a session) ──
 
-        // 0a. Inject notebook (persistent working context) — placed early so it survives compression
-        if (notebookSection) {
-            systemPromptParts.push(notebookSection);
-        }
+        // Capability-aware system prompt (agent identity, core behavior, tools, integrations, etc.)
+        stableParts.push(baseSystemPrompt);
 
-        // 0a2. Inject procedural memory (agent-level learnings from past reflections)
-        if (proceduralMemorySection) {
-            systemPromptParts.push(proceduralMemorySection);
-        }
-
-        // 0b. Inject long-term memories for this user
-        if (memories.length > 0) {
-            const processMemories = memories.filter((m) => m.category === "process");
-            const otherMemories = memories.filter((m) => m.category !== "process");
-
-            const memoryParts: string[] = [];
-
-            if (processMemories.length > 0) {
-                const processLines = processMemories
-                    .map((m) => `- ${m.content}`)
-                    .join("\n");
-                memoryParts.push(
-                    `### Learned Processes & Workflows (FOLLOW THESE)\n` +
-                    `These are processes the user taught you. When a request matches one of these, follow it exactly:\n${processLines}`
-                );
-            }
-
-            if (otherMemories.length > 0) {
-                const otherLines = otherMemories
-                    .map((m) => `- [${m.category}] ${m.content}`)
-                    .join("\n");
-                memoryParts.push(
-                    `### User Facts & Preferences\n${otherLines}`
-                );
-            }
-
-            systemPromptParts.push(
-                `## Long-term Memories About This User\n` +
-                `⚠️ You MUST read and apply these memories. They represent things this user has already told you.\n\n` +
-                memoryParts.join("\n\n")
-            );
-        }
-
-        // 1. KB context (RAG) — with credit deduction
-        if (kbResults.length > 0) {
-            const context = kbResults
-                .map((r) => r.content)
-                .join("\n\n---\n\n");
-            systemPromptParts.push(
-                `Relevant context from knowledge base:\n${context}`
-            );
-            // Deduct KB query credits (fire-and-forget)
-            deductCredits({
-                workspaceId,
-                amount: calculateCreditCost({ action: "kb_query" }),
-                type: "kb_query",
-                metadata: { agentId, kbIds: allowedKbIds },
-            }).catch((err) =>
-                logger.warn({ err }, "KB query credit deduction failed")
-            );
-        }
-
-        // 2. Capability-aware system prompt
-        systemPromptParts.push(baseSystemPrompt);
-
-        // 3. Skills instructions
+        // Skills instructions
         if (skillsSection) {
-            systemPromptParts.push(skillsSection);
+            stableParts.push(skillsSection);
         }
 
-        // 4. Artifact generation instructions
-        systemPromptParts.push(`## File & Document Generation
+        // Artifact generation instructions
+        stableParts.push(`## File & Document Generation
 
 When the user asks you to create, write, or generate any document,
 report, file, spreadsheet, webpage, or content — respond using
@@ -1711,33 +1544,9 @@ Rules:
 - For pdf: output styled HTML inside the artifact, set type="pdf"
 - Filename should be descriptive and lowercase with hyphens`);
 
-        // 5. Inject current plan state if there is one
-        if (currentTodos.length > 0) {
-            const completed = currentTodos.filter((t) => t.status === "completed").length;
-            const todoLines = currentTodos.map((t, i) => {
-                const icon = t.status === "completed" ? "done" : t.status === "in_progress" ? "..." : " ";
-                return `${i + 1}. [${icon}] ${t.title}${t.result ? ` → ${t.result}` : ""}`;
-            }).join("\n");
-            const nextPending = currentTodos.find((t) => t.status === "pending");
-            const inProgress = currentTodos.find((t) => t.status === "in_progress");
-            let instruction = "";
-            if (inProgress) {
-                instruction = `Step "${inProgress.title}" is in_progress. Complete it and call \`update_todo("${inProgress.id}", "completed", "<result>")\` when done.`;
-            } else if (nextPending) {
-                instruction = `Next step: "${nextPending.title}". Execute it and update its status as you progress.`;
-            } else {
-                instruction = `All steps completed. Summarize results to the user.`;
-            }
-            systemPromptParts.push(
-                `## Current Plan (${completed}/${currentTodos.length} completed)\n${todoLines}\n\n` +
-                `${instruction}\n` +
-                `Tip: You can combine \`update_todo\` with other tool calls in the same turn to be efficient.`
-            );
-        }
-
-        // 6. Memory capability instructions
+        // Memory & Notebook capability instructions (static how-to, not the actual memory content)
         if (userId) {
-            systemPromptParts.push(`## Memory — IMPORTANT
+            stableParts.push(`## Memory — IMPORTANT
 You have a \`save_memory\` tool. You MUST use it aggressively to learn from every conversation. The user should NEVER have to repeat themselves.
 
 ### When to save (DO THIS EVERY TIME):
@@ -1762,8 +1571,7 @@ You have a \`save_memory\` tool. You MUST use it aggressively to learn from ever
 
 ### Rule: When in doubt, SAVE IT. It's better to save too much than to forget something the user told you.`);
 
-            // 6b. Notebook usage instructions
-            systemPromptParts.push(`## Notebook — Your Persistent Scratchpad
+            stableParts.push(`## Notebook — Your Persistent Scratchpad
 You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\`, \`delete_notebook_entry\`) for saving working references that persist across all sessions.
 
 ### Notebook vs Memory — When to use which:
@@ -1788,17 +1596,112 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
 - Include a brief description when saving so future-you knows what it's for`);
         }
 
-        // 7. Inject tool usage history so LLM avoids repeating mistakes
-        const toolUsageSummary = buildToolUsageSummary(state.messages);
-        if (toolUsageSummary) {
-            systemPromptParts.push(toolUsageSummary);
+        // ── Dynamic parts (change between turns) ──
+
+        // Conversation summary from earlier messages
+        if (state.summary) {
+            dynamicParts.push(
+                `## Conversation Summary (earlier messages)\n${state.summary}`
+            );
         }
 
-        // Inject step budget awareness when approaching the limit
+        // Notebook entries (persistent working context)
+        if (notebookSection) {
+            dynamicParts.push(notebookSection);
+        }
+
+        // Procedural memory (agent-level learnings from past reflections)
+        if (proceduralMemorySection) {
+            dynamicParts.push(proceduralMemorySection);
+        }
+
+        // Long-term memories for this user
+        if (memories.length > 0) {
+            const processMemories = memories.filter((m) => m.category === "process");
+            const otherMemories = memories.filter((m) => m.category !== "process");
+
+            const memoryParts: string[] = [];
+
+            if (processMemories.length > 0) {
+                const processLines = processMemories
+                    .map((m) => `- ${m.content}`)
+                    .join("\n");
+                memoryParts.push(
+                    `### Learned Processes & Workflows (FOLLOW THESE)\n` +
+                    `These are processes the user taught you. When a request matches one of these, follow it exactly:\n${processLines}`
+                );
+            }
+
+            if (otherMemories.length > 0) {
+                const otherLines = otherMemories
+                    .map((m) => `- [${m.category}] ${m.content}`)
+                    .join("\n");
+                memoryParts.push(
+                    `### User Facts & Preferences\n${otherLines}`
+                );
+            }
+
+            dynamicParts.push(
+                `## Long-term Memories About This User\n` +
+                `⚠️ You MUST read and apply these memories. They represent things this user has already told you.\n\n` +
+                memoryParts.join("\n\n")
+            );
+        }
+
+        // KB context (RAG) — with credit deduction
+        if (kbResults.length > 0) {
+            const context = kbResults
+                .map((r) => r.content)
+                .join("\n\n---\n\n");
+            dynamicParts.push(
+                `Relevant context from knowledge base:\n${context}`
+            );
+            // Deduct KB query credits (fire-and-forget)
+            deductCredits({
+                workspaceId,
+                amount: calculateCreditCost({ action: "kb_query" }),
+                type: "kb_query",
+                metadata: { agentId, kbIds: allowedKbIds },
+            }).catch((err) =>
+                logger.warn({ err }, "KB query credit deduction failed")
+            );
+        }
+
+        // Current plan state
+        if (currentTodos.length > 0) {
+            const completed = currentTodos.filter((t) => t.status === "completed").length;
+            const todoLines = currentTodos.map((t, i) => {
+                const icon = t.status === "completed" ? "done" : t.status === "in_progress" ? "..." : " ";
+                return `${i + 1}. [${icon}] ${t.title}${t.result ? ` → ${t.result}` : ""}`;
+            }).join("\n");
+            const nextPending = currentTodos.find((t) => t.status === "pending");
+            const inProgress = currentTodos.find((t) => t.status === "in_progress");
+            let instruction = "";
+            if (inProgress) {
+                instruction = `Step "${inProgress.title}" is in_progress. Complete it and call \`update_todo("${inProgress.id}", "completed", "<result>")\` when done.`;
+            } else if (nextPending) {
+                instruction = `Next step: "${nextPending.title}". Execute it and update its status as you progress.`;
+            } else {
+                instruction = `All steps completed. Summarize results to the user.`;
+            }
+            dynamicParts.push(
+                `## Current Plan (${completed}/${currentTodos.length} completed)\n${todoLines}\n\n` +
+                `${instruction}\n` +
+                `Tip: You can combine \`update_todo\` with other tool calls in the same turn to be efficient.`
+            );
+        }
+
+        // Tool usage history so LLM avoids repeating mistakes
+        const toolUsageSummary = buildToolUsageSummary(state.messages);
+        if (toolUsageSummary) {
+            dynamicParts.push(toolUsageSummary);
+        }
+
+        // Step budget awareness when approaching the limit
         const isApproachingLimit = stepCount >= MAX_TOOL_ITERATIONS - 3;
         if (isApproachingLimit) {
             const remaining = MAX_TOOL_ITERATIONS - stepCount;
-            systemPromptParts.push(
+            dynamicParts.push(
                 `## ⚠️ STEP BUDGET WARNING\n` +
                 `You have used ${stepCount} of ${MAX_TOOL_ITERATIONS} tool iterations. ` +
                 `You have ${remaining} iteration(s) remaining.\n` +
@@ -1807,14 +1710,45 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
             );
         }
 
-        const systemMsg = new SystemMessage(systemPromptParts.join("\n\n"));
+        // ── Build SystemMessage with prompt caching for Anthropic models ──
+        // For Anthropic models (direct or via OpenRouter), we split into two content blocks:
+        //   1. Stable block with cache_control — cached across turns (~90% input cost savings)
+        //   2. Dynamic block without cache_control — processed fresh each turn
+        // For ChatAnthropic (direct): cache_control is passed natively.
+        // For ChatOpenAI (OpenRouter): cache_control is stripped by LangChain but re-injected
+        //   by the custom fetch wrapper in gateway.ts (createCacheControlFetch).
+        // For non-Anthropic models: single string, no cache_control (they use automatic caching).
+        const stableText = stableParts.join("\n\n");
+        const dynamicText = dynamicParts.join("\n\n");
+
+        const systemMsg = supportsPromptCaching
+            ? new SystemMessage({
+                content: [
+                    {
+                        type: "text" as const,
+                        text: stableText,
+                        // cache_control is either passed natively (ChatAnthropic) or
+                        // re-injected by the custom fetch wrapper (ChatOpenAI + OpenRouter)
+                        ...(isClaudeDirect ? { cache_control: { type: "ephemeral" } } : {}),
+                    },
+                    ...(dynamicText
+                        ? [{ type: "text" as const, text: dynamicText }]
+                        : []),
+                ],
+            })
+            : new SystemMessage(
+                stableText + (dynamicText ? "\n\n" + dynamicText : "")
+            );
         let response;
         try {
             const sanitizedMessages = sanitizeMessagesForProvider(state.messages);
             logger.info({
                 messageCount: state.messages.length,
                 sanitizedMessageCount: sanitizedMessages.length,
-                systemPromptLength: systemPromptParts.join("\n\n").length,
+                systemPromptLength: stableText.length + (dynamicText ? dynamicText.length + 2 : 0),
+                stablePromptLength: stableText.length,
+                dynamicPromptLength: dynamicText.length,
+                promptCaching: supportsPromptCaching,
                 toolCount: langchainTools.length,
                 isClaudeDirect,
                 modelId,
@@ -2140,14 +2074,14 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
             logger.info({ route: "summarize", messageCount: state.messages.length }, "shouldContinue → summarize");
             return "summarize_conversation";
         }
-        // Route through reflection node to extract learnings before ending
+        // End the graph — reflection runs post-stream (fire-and-forget) so [DONE] is not blocked
         logger.info({
-            route: "reflect_and_learn",
+            route: "__end__",
             messageCount: state.messages.length,
             stepCount: state.step_count,
             lastMessageType: lastMessage?.constructor?.name,
-        }, "shouldContinue → reflect_and_learn");
-        return "reflect_and_learn";
+        }, "shouldContinue → __end__");
+        return "__end__";
     };
 
     // Final answer node — invoked when step budget is exhausted.
@@ -2264,11 +2198,12 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
         return { messages: results, todos: currentTodos };
     };
 
+    // reflect_and_learn runs post-stream (fire-and-forget via runReflection below),
+    // so it is NOT a graph node — this keeps [DONE] unblocked.
     const graph = new StateGraph(AgentState)
         .addNode("agent", agentNode)
         .addNode("summarize_conversation", summarizeConversation)
-        .addNode("final_answer", finalAnswerNode)
-        .addNode("reflect_and_learn", reflectAndLearn);
+        .addNode("final_answer", finalAnswerNode);
 
     if (langchainTools.length > 0) {
         graph
@@ -2276,29 +2211,40 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
             .addEdge("__start__", "agent")
             .addConditionalEdges("agent", shouldContinue)
             .addEdge("tools", "agent")
-            .addEdge("final_answer", "reflect_and_learn")
-            .addEdge("summarize_conversation", "reflect_and_learn")
-            .addEdge("reflect_and_learn", "__end__");
+            .addEdge("final_answer", "__end__")
+            .addEdge("summarize_conversation", "__end__");
     } else {
         graph
             .addEdge("__start__", "agent")
             .addConditionalEdges("agent", shouldContinue)
-            .addEdge("final_answer", "reflect_and_learn")
-            .addEdge("summarize_conversation", "reflect_and_learn")
-            .addEdge("reflect_and_learn", "__end__");
+            .addEdge("final_answer", "__end__")
+            .addEdge("summarize_conversation", "__end__");
     }
 
     const checkpointer = await getCheckpointer();
 
     const compiled = graph.compile({ checkpointer, store });
 
+    // Standalone reflection runner — called by executeRun after [DONE] is emitted.
+    // Captures the agent's LLM, store, and tool list from this closure.
+    const runReflection = async (messages: BaseMessage[]): Promise<void> => {
+        const fakeState = {
+            messages,
+            step_count: 0,
+            summary: "",
+            todos: [] as Todo[],
+        } as typeof AgentState.State;
+        await reflectAndLearn(fakeState, {} as RunnableConfig);
+    };
+
     // Cache compiled graph for subsequent messages in this session
     graphCache.set(cacheKey, {
         graph: compiled,
+        runReflection,
         browserEventRef,
         timestamp: Date.now(),
     });
     logger.info({ agentId, cacheKey }, "Agent graph compiled and cached");
 
-    return compiled;
+    return { graph: compiled, runReflection };
 }

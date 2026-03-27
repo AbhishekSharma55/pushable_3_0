@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef, Fragment } from 'react';
+import { useEffect, useState, useCallback, useRef, Fragment, useMemo } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
     Bot,
@@ -33,6 +33,7 @@ import {
     X,
     FileText,
     Image as ImageIcon,
+    DollarSign,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -140,12 +141,20 @@ type ChatSegment =
     | { type: 'text'; content: string }
     | { type: 'tools'; toolCalls: ToolCallEvent[] };
 
+interface MessageCost {
+    inputTokens: number;
+    outputTokens: number;
+    totalCost: number;
+}
+
 interface ChatMessage extends Message {
     isStreaming?: boolean;
     toolCalls?: ToolCallEvent[];
     segments?: ChatSegment[];
     approvalRequest?: ApprovalRequest;
     thinking?: string;
+    helperText?: string;
+    cost?: MessageCost;
 }
 
 type ViewMode = 'chat' | 'settings';
@@ -225,6 +234,12 @@ export default function AgentsPage() {
     const [debugLogs, setDebugLogs] = useState<DebugLogEntry[]>([]);
     const [showDebugPanel, setShowDebugPanel] = useState(false);
     const debugLogId = useCallback(() => `dl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, []);
+
+    // Session cost (sum of all assistant message costs, logging only)
+    const sessionCost = useMemo(() => {
+        if (!LOGGING_ENABLED) return 0;
+        return messages.reduce((sum, m) => sum + (m.cost?.totalCost ?? 0), 0);
+    }, [messages]);
 
     // Browser preview state
     const [browserProfile, setBrowserProfile] = useState<BrowserProfile | null>(null);
@@ -398,6 +413,7 @@ export default function AgentsPage() {
                             segments: (meta.segments as ChatSegment[] | undefined) || undefined,
                             approvalRequest: (meta.approvalRequest as ApprovalRequest | undefined) || undefined,
                             thinking: (meta.thinking as string | undefined) || undefined,
+                            cost: (meta.cost as MessageCost | undefined) || undefined,
                         };
                     }
                     return msg;
@@ -846,6 +862,20 @@ export default function AgentsPage() {
                             setDebugLogs((prev) => [...prev, { id: debugLogId(), timestamp: Date.now(), type: evtType as DebugLogEntry['type'], summary, data: parsed }]);
                         }
                     }
+                    if (parsed.helperText) {
+                        setMessages((prev) => prev.map((m) =>
+                            m.id === assistantMsgId
+                                ? { ...m, helperText: parsed.helperText as string }
+                                : m
+                        ));
+                    }
+                    if (parsed.cost) {
+                        setMessages((prev) => prev.map((m) =>
+                            m.id === assistantMsgId
+                                ? { ...m, cost: parsed.cost as MessageCost }
+                                : m
+                        ));
+                    }
                     if (parsed.content) {
                         sseDeliveredRef.current = true;
                         fullContent += parsed.content;
@@ -938,7 +968,7 @@ export default function AgentsPage() {
                     const hydrated: ChatMessage[] = msgsRes.map((msg: ChatMessage & { metadata?: Record<string, unknown> }) => {
                         const meta = msg.metadata as Record<string, unknown> | undefined;
                         if (meta && msg.role === 'assistant') {
-                            return { ...msg, toolCalls: (meta.toolCalls as ToolCallEvent[] | undefined) || undefined, segments: (meta.segments as ChatSegment[] | undefined) || undefined, thinking: (meta.thinking as string | undefined) || undefined };
+                            return { ...msg, toolCalls: (meta.toolCalls as ToolCallEvent[] | undefined) || undefined, segments: (meta.segments as ChatSegment[] | undefined) || undefined, thinking: (meta.thinking as string | undefined) || undefined, cost: (meta.cost as MessageCost | undefined) || undefined };
                         }
                         return msg;
                     });
@@ -959,6 +989,7 @@ export default function AgentsPage() {
                                 segments: (meta.segments as ChatSegment[] | undefined) || undefined,
                                 approvalRequest: (meta.approvalRequest as ApprovalRequest | undefined) || undefined,
                                 thinking: (meta.thinking as string | undefined) || undefined,
+                                cost: (meta.cost as MessageCost | undefined) || undefined,
                             };
                         }
                         return msg;
@@ -1381,6 +1412,13 @@ export default function AgentsPage() {
                                                     {showBrowserPreview ? 'Hide' : 'Show'} Extension
                                                 </Button>
                                             )}
+                                            {/* Session cost badge (logging only) */}
+                                            {LOGGING_ENABLED && sessionCost > 0 && (
+                                                <div className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border border-emerald-500/30 bg-emerald-500/10 text-emerald-600 h-8">
+                                                    <DollarSign className="h-3 w-3" />
+                                                    <span>Session: {sessionCost < 0.0001 ? '<$0.0001' : `$${sessionCost.toFixed(4)}`}</span>
+                                                </div>
+                                            )}
                                             {/* Debug panel toggle */}
                                             {LOGGING_ENABLED && (
                                                 <Button
@@ -1454,7 +1492,11 @@ export default function AgentsPage() {
                                                                     <div className="flex-1 min-w-0">
                                                                         <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5">
                                                                             {isStreaming && !text ? (
-                                                                                <ThinkingLoader />
+                                                                                msg.helperText ? (
+                                                                                    <TextShimmer className="font-mono text-sm" duration={1.2}>
+                                                                                        {msg.helperText}
+                                                                                    </TextShimmer>
+                                                                                ) : <ThinkingLoader />
                                                                             ) : (
                                                                                 <>
                                                                                     {cleanMessage && (
@@ -1619,6 +1661,20 @@ export default function AgentsPage() {
                                                                     )}
                                                                     {(msg.content || msg.isStreaming) && renderAssistantText(msg.content, msg.isStreaming)}
                                                                 </>
+                                                            )}
+                                                            {/* Per-message cost badge (logging only) */}
+                                                            {LOGGING_ENABLED && msg.role === 'assistant' && !msg.isStreaming && msg.cost && (
+                                                                <div className="flex items-center gap-1.5 mt-1.5 ml-10">
+                                                                    <Badge variant="outline" className="h-5 px-1.5 text-[10px] gap-1 font-normal text-muted-foreground border-border/60">
+                                                                        <DollarSign className="w-2.5 h-2.5" />
+                                                                        {msg.cost.totalCost < 0.0001
+                                                                            ? '<$0.0001'
+                                                                            : `$${msg.cost.totalCost.toFixed(4)}`}
+                                                                    </Badge>
+                                                                    <span className="text-[10px] text-muted-foreground/60">
+                                                                        {msg.cost.inputTokens.toLocaleString()}in / {msg.cost.outputTokens.toLocaleString()}out
+                                                                    </span>
+                                                                </div>
                                                             )}
                                                         </Fragment>
                                                         );

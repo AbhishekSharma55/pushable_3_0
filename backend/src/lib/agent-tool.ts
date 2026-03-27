@@ -50,7 +50,7 @@ export async function buildAgentCallerTool(
             );
 
             try {
-                const graph = await createAgentGraph(
+                const { graph } = await createAgentGraph(
                     targetAgentId,
                     workspaceId
                 );

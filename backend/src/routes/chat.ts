@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { HumanMessage } from "@langchain/core/messages";
+import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
 import { Command, GraphRecursionError } from "@langchain/langgraph";
 import { sessionService } from "../services/session.service.ts";
 import { messageRepository } from "../repositories/message.repository.ts";
@@ -15,8 +15,11 @@ import { fileProcessingService, type ProcessedAttachment } from "../services/fil
 import { openrouterService } from "../services/openrouter.service.ts";
 import { agentRepository } from "../repositories/agent.repository.ts";
 import { bucketService } from "../services/bucket.service.ts";
+import { createLLM } from "../lib/gateway.ts";
 
 const AGENT_RECURSION_LIMIT = 50; // Safety net behind step_count-based graceful termination
+
+const HELPER_TEXT_MODEL = "meta-llama/llama-3.2-3b-instruct";
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -57,6 +60,7 @@ interface StreamResult {
     toolCalls: StreamToolCall[];
     segments: StreamSegment[];
     thinking: string;
+    usage: { inputTokens: number; outputTokens: number };
 }
 
 // ─── Browser event handler (emits to RunEventBus) ────────────────────────────
@@ -177,6 +181,9 @@ async function processGraphStream(
     const segments: StreamSegment[] = [];
     let lastSegmentType: "text" | "tools" | null = null;
 
+    // Track token usage per graph step (max per step to handle cumulative reporters)
+    const usageByStep = new Map<number, { input_tokens: number; output_tokens: number }>();
+
     for await (const [message, metadata] of stream) {
         if (!message) continue;
 
@@ -187,6 +194,17 @@ async function processGraphStream(
 
         // Detect AI tool_calls
         const msgObj = message as Record<string, unknown>;
+
+        // Capture token usage from AI message chunks
+        const usageMeta = msgObj.usage_metadata as { input_tokens?: number; output_tokens?: number } | undefined;
+        if (usageMeta && (usageMeta.input_tokens || usageMeta.output_tokens)) {
+            const step = (meta?.langgraph_step as number) ?? -1;
+            const existing = usageByStep.get(step) ?? { input_tokens: 0, output_tokens: 0 };
+            usageByStep.set(step, {
+                input_tokens: Math.max(existing.input_tokens, usageMeta.input_tokens ?? 0),
+                output_tokens: Math.max(existing.output_tokens, usageMeta.output_tokens ?? 0),
+            });
+        }
         const toolCalls = msgObj.tool_calls as
             | Array<{ id?: string; name: string; args?: Record<string, unknown> }>
             | undefined;
@@ -343,13 +361,22 @@ async function processGraphStream(
             : seg
     ).filter((seg) => seg.type !== "text" || (seg.content ?? "").trim());
 
-    return { content: cleanContent, toolCalls: allToolCalls, segments: cleanSegments, thinking: fullThinking };
+    // Sum token usage across all graph steps
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    for (const u of usageByStep.values()) {
+        totalInputTokens += u.input_tokens;
+        totalOutputTokens += u.output_tokens;
+    }
+
+    return { content: cleanContent, toolCalls: allToolCalls, segments: cleanSegments, thinking: fullThinking, usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens } };
 }
 
 // ─── Check for HITL interrupts ───────────────────────────────────────────────
 
 async function checkAndEmitInterrupts(
-    graph: Awaited<ReturnType<typeof createAgentGraph>>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    graph: any,
     sessionId: string,
     runId: string
 ): Promise<{ interrupted: boolean; approvalRequest?: unknown }> {
@@ -381,6 +408,44 @@ async function checkAndEmitInterrupts(
     return { interrupted: false };
 }
 
+// ─── Calculate cost from OpenRouter pricing and emit SSE event ───────────────
+
+async function calculateAndEmitCost(
+    runId: string,
+    modelId: string | undefined,
+    usage: { inputTokens: number; outputTokens: number },
+): Promise<{ inputTokens: number; outputTokens: number; totalCost: number } | undefined> {
+    if (!modelId || (usage.inputTokens === 0 && usage.outputTokens === 0)) return undefined;
+
+    try {
+        const models = await openrouterService.getModels();
+        const modelInfo = models.find((m) => m.id === modelId);
+        if (!modelInfo) return undefined;
+
+        const promptPrice = parseFloat(modelInfo.pricing.prompt);
+        const completionPrice = parseFloat(modelInfo.pricing.completion);
+        const totalCost =
+            usage.inputTokens * promptPrice + usage.outputTokens * completionPrice;
+
+        const costData = {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            totalCost,
+        };
+
+        runEventBus.emit(runId, {
+            type: "cost",
+            data: { cost: costData },
+            timestamp: Date.now(),
+        });
+
+        return costData;
+    } catch (err) {
+        logger.warn({ err }, "Failed to calculate run cost");
+        return undefined;
+    }
+}
+
 // ─── Execute a run in background (detached from HTTP) ────────────────────────
 
 async function executeRun(
@@ -401,13 +466,62 @@ async function executeRun(
             browserSegments
         );
 
-        const graph = await createAgentGraph(
-            agentId,
-            workspaceId,
-            userId,
-            onBrowserEvent,
-            sessionId
-        );
+        // Fire fast helper text LLM in parallel with graph creation
+        const helperTextPromise = (async () => {
+            try {
+                const { llm: fastLlm } = createLLM({
+                    modelId: HELPER_TEXT_MODEL,
+                    temperature: 0.3,
+                    streaming: false,
+                    maxRetries: 1,
+                });
+                const resp = await fastLlm.invoke([
+                    {
+                        role: "system",
+                        content:
+                            "Generate a short status line (8-15 words) starting with a gerund verb. Fix typos. Output ONLY the status line.",
+                    },
+                    { role: "user", content: "What is the cricket score of t20 men's world cup" },
+                    { role: "assistant", content: "Looking up the latest T20 World Cup score and winner details" },
+                    { role: "user", content: "What is the opensource versions of LiteLLm" },
+                    { role: "assistant", content: "Identifying open-source alternatives to LiteLLM and their key features" },
+                    { role: "user", content: "How can we cook rice ?" },
+                    { role: "assistant", content: "Outlining key steps for cooking rice safely and effectively" },
+                    { role: "user", content: "How can somone graduates from standford ?" },
+                    { role: "assistant", content: "Outlining a clear path for someone graduating from Stanford to advance professionally" },
+                    { role: "user", content: "compare react vs vue" },
+                    { role: "assistant", content: "Comparing React and Vue frameworks across performance, ecosystem, and learning curve" },
+                    { role: "user", content: "How you can help me ?" },
+                    { role: "assistant", content: "Describing available capabilities and how to get started" },
+                    { role: "user", content: "hello" },
+                    { role: "assistant", content: "Preparing a friendly greeting and introduction" },
+                    { role: "user", content: message },
+                ]);
+                const text = typeof resp.content === "string"
+                    ? resp.content.trim()
+                    : "";
+                if (text) {
+                    runEventBus.emit(runId, {
+                        type: "helperText",
+                        data: { helperText: text },
+                        timestamp: Date.now(),
+                    });
+                }
+            } catch (err) {
+                logger.warn({ err }, "Helper text generation failed, skipping");
+            }
+        })();
+
+        const [{ graph, runReflection }] = await Promise.all([
+            createAgentGraph(
+                agentId,
+                workspaceId,
+                userId,
+                onBrowserEvent,
+                sessionId
+            ),
+            helperTextPromise,
+        ]);
 
         // Emit debug info for the frontend debug panel
         const debugInfo = getAgentDebugInfo(agentId, workspaceId);
@@ -503,6 +617,13 @@ async function executeRun(
             logger.warn({ runId }, "Run interrupted but no approval payload found — interrupt may not display correctly");
         }
 
+        // Calculate and emit cost (non-blocking, uses cached model list)
+        const costData = await calculateAndEmitCost(
+            runId,
+            debugInfo?.modelId,
+            streamResult.usage,
+        );
+
         // Save assistant message with metadata
         if (streamResult.content || streamResult.toolCalls.length > 0 || isInterrupted) {
             await messageRepository.create({
@@ -516,6 +637,7 @@ async function executeRun(
                     segments: streamResult.segments,
                     ...(approvalRequest ? { approvalRequest } : {}),
                     ...(streamResult.thinking ? { thinking: streamResult.thinking } : {}),
+                    ...(costData ? { cost: costData } : {}),
                 },
             });
         }
@@ -529,7 +651,15 @@ async function executeRun(
             runEventBus.markInterrupted(runId);
             logger.info({ runId }, "Run interrupted, waiting for approval");
         } else {
-            runEventBus.complete(runId);
+            runEventBus.complete(runId); // ← [DONE] sent to frontend here
+
+            // Fire-and-forget reflection: runs AFTER [DONE] so it never blocks the user
+            graph.getState({ configurable: { thread_id: sessionId } })
+                .then((state: { values?: { messages?: BaseMessage[] } }) => {
+                    const messages = state.values?.messages ?? [];
+                    return runReflection(messages);
+                })
+                .catch((err: unknown) => logger.warn({ err, runId }, "Post-run reflection failed"));
         }
     } catch (error) {
         // GraphRecursionError means the step_count-based graceful termination
@@ -538,7 +668,7 @@ async function executeRun(
         if (error instanceof GraphRecursionError) {
             logger.warn({ runId, error: error.message }, "Run hit recursion limit — completing gracefully with streamed content");
 
-            const streamResult = { content: "", toolCalls: [] as StreamToolCall[], segments: [] as StreamSegment[], thinking: "" };
+            const streamResult = { content: "", toolCalls: [] as StreamToolCall[], segments: [] as StreamSegment[], thinking: "", usage: { inputTokens: 0, outputTokens: 0 } };
             if (streamResult.content || streamResult.toolCalls.length > 0) {
                 await messageRepository.create({
                     workspaceId,
@@ -587,7 +717,7 @@ async function resumeRun(
             browserSegments
         );
 
-        const graph = await createAgentGraph(
+        const { graph, runReflection } = await createAgentGraph(
             agentId,
             workspaceId,
             userId,
@@ -613,6 +743,14 @@ async function resumeRun(
         const isInterrupted = interruptResult.interrupted;
         const approvalRequest = interruptResult.approvalRequest;
 
+        // Calculate and emit cost
+        const resumeDebugInfo = getAgentDebugInfo(agentId, workspaceId);
+        const costData = await calculateAndEmitCost(
+            runId,
+            resumeDebugInfo?.modelId,
+            streamResult.usage,
+        );
+
         if (streamResult.content || streamResult.toolCalls.length > 0 || isInterrupted) {
             await messageRepository.create({
                 workspaceId,
@@ -625,6 +763,7 @@ async function resumeRun(
                     segments: streamResult.segments,
                     ...(approvalRequest ? { approvalRequest } : {}),
                     ...(streamResult.thinking ? { thinking: streamResult.thinking } : {}),
+                    ...(costData ? { cost: costData } : {}),
                 },
             });
         }
@@ -636,7 +775,15 @@ async function resumeRun(
             runEventBus.markInterrupted(runId);
             logger.info({ runId }, "Run interrupted again after approval, waiting for next approval");
         } else {
-            runEventBus.complete(runId);
+            runEventBus.complete(runId); // ← [DONE] sent to frontend here
+
+            // Fire-and-forget reflection after [DONE]
+            graph.getState({ configurable: { thread_id: sessionId } })
+                .then((state: { values?: { messages?: BaseMessage[] } }) => {
+                    const messages = state.values?.messages ?? [];
+                    return runReflection(messages);
+                })
+                .catch((err: unknown) => logger.warn({ err, runId }, "Post-run reflection failed (resumed run)"));
         }
     } catch (error) {
         if (error instanceof GraphRecursionError) {

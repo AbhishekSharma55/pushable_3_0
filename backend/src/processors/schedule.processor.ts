@@ -42,7 +42,7 @@ export async function processSchedule(data: {
     }
 
     try {
-        const graph = await createAgentGraph(agentId, workspaceId);
+        const { graph } = await createAgentGraph(agentId, workspaceId);
 
         const result = await graph.invoke(
             { messages: [new HumanMessage(prompt)] },

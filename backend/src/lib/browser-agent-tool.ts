@@ -160,6 +160,72 @@ const BROWSER_AGENT_RECURSION_LIMIT = 50;
  * the current page state (interactive elements with index numbers) and
  * injects it as context. The LLM always "sees" the page before deciding.
  */
+/**
+ * Build a lazy "browser_agent" tool that defers Chromium session creation
+ * until the tool is actually invoked by the LLM. This avoids the ~14s
+ * browser startup cost during graph creation for messages that never
+ * use the browser.
+ */
+export function buildLazyBrowserAgentTool(
+    agentId: string,
+    workspaceId: string,
+    modelId: string,
+    modelMultiplier: number,
+    temperature: number,
+    onEvent?: BrowserAgentEventEmitter,
+    chatSessionId?: string
+): DynamicStructuredTool {
+    // Cache the real tool after first initialization
+    let realTool: DynamicStructuredTool | null | undefined = undefined; // undefined = not yet initialized
+    let initPromise: Promise<DynamicStructuredTool | null> | null = null;
+
+    return new DynamicStructuredTool({
+        name: "browser_agent",
+        description:
+            "Delegate a browser automation task to the Browser Agent. " +
+            "Describe what you want done in natural language — the browser agent " +
+            "will autonomously navigate websites, interact with pages, fill forms, " +
+            "extract data, handle CAPTCHAs, and return a clean summary. " +
+            "Include the target URL and expected outcome in your instruction. " +
+            "The result is a human-readable summary — relay it to the user as-is, " +
+            "never include raw HTML, DOM elements, or page state details.",
+        schema: z.object({
+            instruction: z
+                .string()
+                .describe(
+                    "Natural language instruction for the browser agent. " +
+                        "Be specific: which website, what to do, what data to extract or action to perform."
+                ),
+        }),
+        func: async ({ instruction }) => {
+            // Lazy init: build the real browser agent on first call
+            if (realTool === undefined) {
+                if (!initPromise) {
+                    logger.info({ agentId }, "Lazy browser agent: initializing on first invocation");
+                    initPromise = buildBrowserAgentTool(
+                        agentId, workspaceId, modelId, modelMultiplier,
+                        temperature, onEvent, chatSessionId
+                    ).then((tool) => {
+                        realTool = tool;
+                        return tool;
+                    }).catch((error) => {
+                        logger.error({ error, agentId }, "Lazy browser agent: initialization failed");
+                        realTool = null;
+                        return null;
+                    });
+                }
+                await initPromise;
+            }
+
+            if (!realTool) {
+                return "Browser agent is unavailable — browser session could not be started.";
+            }
+
+            return realTool.invoke({ instruction });
+        },
+    });
+}
+
 export async function buildBrowserAgentTool(
     agentId: string,
     workspaceId: string,

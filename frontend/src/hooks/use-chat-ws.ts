@@ -18,6 +18,12 @@ export interface ChatAttachment {
     previewUrl?: string;
 }
 
+export interface MessageCost {
+    inputTokens: number;
+    outputTokens: number;
+    totalCost: number;
+}
+
 export interface ChatMessage {
     id: string;
     role: 'user' | 'assistant';
@@ -28,7 +34,9 @@ export interface ChatMessage {
         segments?: StreamSegment[];
         approvalRequest?: unknown;
         thinking?: string;
+        helperText?: string;
         attachments?: ChatAttachment[];
+        cost?: MessageCost;
     };
 }
 
@@ -131,7 +139,9 @@ async function connectSSE(
     onDone: () => void,
     onDebug?: (info: AgentDebugInfo) => void,
     onRawEvent?: (type: string, data: unknown) => void,
-    fromIndex?: number
+    fromIndex?: number,
+    onHelperText?: (text: string) => void,
+    onCost?: (cost: MessageCost) => void,
 ): Promise<void> {
     const token = getToken();
     const baseUrl = `${API_URL}/api/runs/${runId}/events`;
@@ -177,6 +187,8 @@ async function connectSSE(
                 try {
                     const data = JSON.parse(payload);
                     if (data.debug && onDebug) onDebug(data.debug as AgentDebugInfo);
+                    if (data.helperText && onHelperText) onHelperText(data.helperText as string);
+                    if (data.cost && onCost) onCost(data.cost as MessageCost);
                     if (data.content) onContent(data.content as string);
                     if (data.toolCall) onToolCall(data.toolCall as StreamToolCall);
                     if (data.approvalRequest) onApprovalRequest(data.approvalRequest);
@@ -449,7 +461,27 @@ export function useChatWs(sessionKey: string) {
                     }]);
                 } : undefined,
                 // fromIndex — skip already-seen events on reconnect
-                reconnect?.fromEventIndex
+                reconnect?.fromEventIndex,
+                // onHelperText
+                (text) => {
+                    setMessages((prev) =>
+                        prev.map((m) =>
+                            m.id === thinkingId
+                                ? { ...m, metadata: { ...m.metadata, helperText: text } }
+                                : m
+                        )
+                    );
+                },
+                // onCost
+                (costData) => {
+                    setMessages((prev) =>
+                        prev.map((m) =>
+                            m.id === thinkingId
+                                ? { ...m, metadata: { ...m.metadata, cost: costData } }
+                                : m
+                        )
+                    );
+                },
             ).catch(() => {
                 // SSE failed entirely — polling fallback will pick it up
                 console.warn('[SSE] connection failed, relying on polling fallback');

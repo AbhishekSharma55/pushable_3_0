@@ -39,6 +39,7 @@ import {
   X,
   FileText,
   Image as ImageIcon,
+  DollarSign,
 } from "lucide-react";
 import {
   Select,
@@ -49,7 +50,7 @@ import {
 } from "@/components/ui/select";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useChatWs, type ChatMessage } from "@/hooks/use-chat-ws";
+import { useChatWs, type ChatMessage, type MessageCost } from "@/hooks/use-chat-ws";
 import { ToolCallDisplay } from "@/components/chat/tool-call-display";
 import { useSessions, type Session } from "@/hooks/use-sessions";
 import { useAgents, type Agent } from "@/hooks/use-agents";
@@ -782,7 +783,13 @@ function MessageBubble({
           {/* Empty thinking state — no content, no tool calls */}
           {!hasContent && !hasToolCalls && msg.status === "thinking" && (
             <div className="rounded-2xl px-4 py-3 text-sm leading-relaxed bg-secondary/50 text-foreground border border-border rounded-bl-sm">
-              <ThinkingLoader />
+              {msg.metadata?.helperText ? (
+                <TextShimmer className="font-mono text-sm" duration={1.2}>
+                  {msg.metadata.helperText}
+                </TextShimmer>
+              ) : (
+                <ThinkingLoader />
+              )}
             </div>
           )}
 
@@ -892,6 +899,21 @@ function MessageBubble({
           {msg.status === "error" && (
             <p className="text-xs text-destructive mt-1">Error occurred</p>
           )}
+
+          {/* Per-message cost badge (logging only) */}
+          {LOGGING_ENABLED && msg.status === "done" && msg.metadata?.cost && (
+            <div className="flex items-center gap-1.5 mt-1.5">
+              <Badge variant="outline" className="h-5 px-1.5 text-[10px] gap-1 font-normal text-muted-foreground border-border/60">
+                <DollarSign className="w-2.5 h-2.5" />
+                {msg.metadata.cost.totalCost < 0.0001
+                  ? "<$0.0001"
+                  : `$${msg.metadata.cost.totalCost.toFixed(4)}`}
+              </Badge>
+              <span className="text-[10px] text-muted-foreground/60">
+                {msg.metadata.cost.inputTokens.toLocaleString()}in / {msg.metadata.cost.outputTokens.toLocaleString()}out
+              </span>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -964,6 +986,12 @@ export function ChatComponent({
 
   // ── Debug panel state ──
   const [showDebugPanel, setShowDebugPanel] = useState(false);
+
+  // ── Session cost (sum of all assistant message costs, logging only) ──
+  const sessionCost = useMemo(() => {
+    if (!LOGGING_ENABLED) return 0;
+    return messages.reduce((sum, m) => sum + (m.metadata?.cost?.totalCost ?? 0), 0);
+  }, [messages]);
 
   // ── Browser preview state ──
   const { workspace } = useActiveWorkspace();
@@ -1205,18 +1233,26 @@ export function ChatComponent({
             }}
           />
           {LOGGING_ENABLED && (
-            <button
-              onClick={() => setShowDebugPanel(!showDebugPanel)}
-              className={cn(
-                "absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors",
-                showDebugPanel
-                  ? "bg-orange-500/10 border-orange-500/30 text-orange-600 hover:bg-orange-500/20"
-                  : "bg-background border-border text-muted-foreground hover:text-foreground hover:bg-muted/50"
+            <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
+              {sessionCost > 0 && (
+                <div className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium border border-emerald-500/30 bg-emerald-500/10 text-emerald-600">
+                  <DollarSign className="h-3 w-3" />
+                  <span>Session: {sessionCost < 0.0001 ? "<$0.0001" : `$${sessionCost.toFixed(4)}`}</span>
+                </div>
               )}
-            >
-              <Bug className="h-3.5 w-3.5" />
-              {showDebugPanel ? "Hide" : "Show"} Debug
-            </button>
+              <button
+                onClick={() => setShowDebugPanel(!showDebugPanel)}
+                className={cn(
+                  "flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors",
+                  showDebugPanel
+                    ? "bg-orange-500/10 border-orange-500/30 text-orange-600 hover:bg-orange-500/20"
+                    : "bg-background border-border text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                )}
+              >
+                <Bug className="h-3.5 w-3.5" />
+                {showDebugPanel ? "Hide" : "Show"} Debug
+              </button>
+            </div>
           )}
         </div>
 

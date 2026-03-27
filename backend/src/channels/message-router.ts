@@ -49,7 +49,7 @@ export async function resolveChannelApproval(
     pendingChannelApprovals.delete(sessionId);
 
     try {
-        const graph = await createAgentGraph(
+        const { graph } = await createAgentGraph(
             pending.agentId,
             pending.workspaceId,
             pending.userId
@@ -185,7 +185,7 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
 
         // Create agent graph and invoke (non-streaming for channels)
         // Use channel externalUserId for memory scoping
-        const graph = await createAgentGraph(message.agentId, message.workspaceId, message.externalUserId);
+        const { graph } = await createAgentGraph(message.agentId, message.workspaceId, message.externalUserId);
 
         const result = await graph.invoke(
             { messages: [new HumanMessage(message.text)] },

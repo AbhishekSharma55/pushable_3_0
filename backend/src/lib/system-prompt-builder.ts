@@ -622,8 +622,17 @@ Warning: Creating agents consumes workspace agent quota.`);
 - bucket_list_files: List files, optionally filtered by folder or search
 - bucket_delete_file: Delete a file permanently
 - bucket_get_download_url: Get a download URL to share with the user
+- bucket_export_to_composio: **Upload a bucket file directly to an external service** (Google Drive, Dropbox, etc.) via Composio — transfers the file server-side without passing content through conversation
 Use when: You need to persist a file (document, export, generated content) so the user can access it later.
-Files are organized in folders. Your default folder is /agent-output.`);
+Files are organized in folders. Your default folder is /agent-output.
+
+**Uploading bucket files to external services (Google Drive, Dropbox, etc.):**
+IMPORTANT: When the user asks you to upload a bucket file to an external service, use \`bucket_export_to_composio\` instead of reading the file with bucket_read_file and passing content manually.
+Steps:
+1. Use bucket_list_files to find the file ID
+2. Use COMPOSIO_SEARCH_TOOLS to discover the correct upload tool slug and its file parameter name
+3. Call bucket_export_to_composio with the file ID, tool slug, file parameter name, and any additional params (folder ID, path, etc.)
+This handles files of any size efficiently without token limits.`);
         }
 
         systemParts.push(`

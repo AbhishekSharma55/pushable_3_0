@@ -13,7 +13,6 @@ import {
     File as FileIcon,
     FolderPlus,
     Loader2,
-    Paperclip,
     X,
     MoreVertical,
     Pencil,
@@ -46,6 +45,10 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { TxtPreview } from '@/components/artifact/previews/txt-preview';
+import { MarkdownPreview } from '@/components/artifact/previews/markdown-preview';
+import { CsvPreview } from '@/components/artifact/previews/csv-preview';
+import { HtmlPreview } from '@/components/artifact/previews/html-preview';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
 import { listFiles, listFolders, uploadFile, deleteFile, renameFile, moveFile, getStorageUsage, getFileDownloadUrl } from '@/lib/api/bucket';
 import { getToken } from '@/lib/auth';
@@ -95,6 +98,12 @@ export default function FilesPage() {
     const [moveTarget, setMoveTarget] = useState('');
     const [newFolderDialog, setNewFolderDialog] = useState(false);
     const [newFolderPath, setNewFolderPath] = useState('');
+
+    // Preview
+    const [previewFile, setPreviewFile] = useState<BucketFile | null>(null);
+    const [previewContent, setPreviewContent] = useState<string | null>(null);
+    const [previewBlobUrl, setPreviewBlobUrl] = useState<string | null>(null);
+    const [previewLoading, setPreviewLoading] = useState(false);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -202,6 +211,139 @@ export default function FilesPage() {
                 URL.revokeObjectURL(blobUrl);
             })
             .catch(() => toast.error('Failed to download file'));
+    };
+
+    const handlePreview = async (file: BucketFile) => {
+        setPreviewFile(file);
+        setPreviewContent(null);
+        setPreviewBlobUrl(null);
+        setPreviewLoading(true);
+
+        const token = getToken();
+        const url = `${API_URL}/api/bucket/files/${file.id}/download`;
+
+        try {
+            const res = await fetch(url, {
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    'x-workspace-id': workspace?.id || '',
+                },
+            });
+            if (!res.ok) throw new Error('Failed to fetch file');
+
+            const mime = file.mimeType;
+            if (mime.startsWith('image/') || mime === 'application/pdf' || mime.startsWith('video/') || mime.startsWith('audio/')) {
+                const blob = await res.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                setPreviewBlobUrl(blobUrl);
+            } else {
+                const text = await res.text();
+                setPreviewContent(text);
+            }
+        } catch {
+            toast.error('Failed to load preview');
+            setPreviewFile(null);
+        } finally {
+            setPreviewLoading(false);
+        }
+    };
+
+    const closePreview = () => {
+        if (previewBlobUrl) URL.revokeObjectURL(previewBlobUrl);
+        setPreviewFile(null);
+        setPreviewContent(null);
+        setPreviewBlobUrl(null);
+    };
+
+    const renderPreviewContent = () => {
+        if (previewLoading) {
+            return (
+                <div className="flex items-center justify-center py-20">
+                    <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                </div>
+            );
+        }
+        if (!previewFile) return null;
+
+        const mime = previewFile.mimeType;
+        const filename = previewFile.filename.toLowerCase();
+
+        // Images
+        if (mime.startsWith('image/')) {
+            return (
+                <div className="flex items-center justify-center overflow-auto">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={previewBlobUrl!} alt={previewFile.filename} className="max-w-full max-h-[70vh] object-contain rounded" />
+                </div>
+            );
+        }
+
+        // PDF
+        if (mime === 'application/pdf') {
+            return (
+                <iframe src={previewBlobUrl!} className="w-full border-none rounded" style={{ height: '70vh' }} title="PDF Preview" />
+            );
+        }
+
+        // Video
+        if (mime.startsWith('video/')) {
+            return (
+                <video src={previewBlobUrl!} controls className="max-w-full max-h-[70vh] rounded">
+                    Your browser does not support video playback.
+                </video>
+            );
+        }
+
+        // Audio
+        if (mime.startsWith('audio/')) {
+            return (
+                <div className="flex items-center justify-center py-10">
+                    <audio src={previewBlobUrl!} controls>
+                        Your browser does not support audio playback.
+                    </audio>
+                </div>
+            );
+        }
+
+        // Text-based previews
+        if (previewContent !== null) {
+            // CSV
+            if (mime === 'text/csv' || filename.endsWith('.csv')) {
+                return <CsvPreview content={previewContent} />;
+            }
+            // Markdown
+            if (mime === 'text/markdown' || filename.endsWith('.md') || filename.endsWith('.mdx')) {
+                return <MarkdownPreview content={previewContent} />;
+            }
+            // HTML
+            if (mime === 'text/html' || filename.endsWith('.html') || filename.endsWith('.htm')) {
+                return <HtmlPreview content={previewContent} />;
+            }
+            // JSON
+            if (mime === 'application/json' || filename.endsWith('.json')) {
+                try {
+                    const formatted = JSON.stringify(JSON.parse(previewContent), null, 2);
+                    return <TxtPreview content={formatted} />;
+                } catch {
+                    return <TxtPreview content={previewContent} />;
+                }
+            }
+            // Default text
+            if (mime.startsWith('text/') || ['application/xml', 'application/javascript'].includes(mime)) {
+                return <TxtPreview content={previewContent} />;
+            }
+        }
+
+        // Unsupported
+        return (
+            <div className="flex flex-col items-center justify-center py-20 gap-3 text-muted-foreground">
+                <FileIcon className="h-12 w-12 opacity-30" />
+                <p className="text-sm">Preview not available for this file type</p>
+                <Button size="sm" variant="outline" onClick={() => { handleDownload(previewFile); }} className="gap-1.5">
+                    <Download className="h-4 w-4" /> Download instead
+                </Button>
+            </div>
+        );
     };
 
     return (
@@ -312,7 +454,7 @@ export default function FilesPage() {
                             </thead>
                             <tbody className="divide-y divide-border">
                                 {files.map((file) => (
-                                    <tr key={file.id} className="hover:bg-muted/20 transition-colors group">
+                                    <tr key={file.id} className="hover:bg-muted/20 transition-colors group cursor-pointer" onClick={() => handlePreview(file)}>
                                         <td className="px-4 py-3">
                                             <div className="flex items-center gap-2.5">
                                                 {getFileIcon(file.mimeType)}
@@ -332,7 +474,7 @@ export default function FilesPage() {
                                         </td>
                                         <td className="px-4 py-3 text-sm text-muted-foreground truncate max-w-[120px]">{file.folder}</td>
                                         <td className="px-4 py-3 text-sm text-muted-foreground">{new Date(file.createdAt).toLocaleDateString()}</td>
-                                        <td className="px-4 py-3">
+                                        <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                                             <DropdownMenu>
                                                 <DropdownMenuTrigger asChild>
                                                     <Button size="icon" variant="ghost" className="h-7 w-7 opacity-0 group-hover:opacity-100">
@@ -456,6 +598,38 @@ export default function FilesPage() {
                         }} disabled={!newFolderPath.trim() || !newFolderPath.startsWith('/')}>
                             Create
                         </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* File preview dialog */}
+            <Dialog open={!!previewFile} onOpenChange={(open) => { if (!open) closePreview(); }}>
+                <DialogContent className="max-w-[90vw] sm:max-w-[90vw] w-full max-h-[90vh] flex flex-col">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2 truncate">
+                            {previewFile && getFileIcon(previewFile.mimeType)}
+                            <span className="truncate">{previewFile?.filename}</span>
+                        </DialogTitle>
+                        <DialogDescription className="flex items-center gap-3 text-xs">
+                            {previewFile && (
+                                <>
+                                    <span>{formatFileSize(Number(previewFile.sizeBytes))}</span>
+                                    <span className="text-border">|</span>
+                                    <span>{previewFile.mimeType}</span>
+                                    <span className="text-border">|</span>
+                                    <span>{new Date(previewFile.createdAt).toLocaleDateString()}</span>
+                                </>
+                            )}
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="flex-1 overflow-auto min-h-0 rounded-lg border border-border bg-muted/20 p-4">
+                        {renderPreviewContent()}
+                    </div>
+                    <DialogFooter>
+                        <Button variant="outline" size="sm" onClick={() => { if (previewFile) handleDownload(previewFile); }} className="gap-1.5">
+                            <Download className="h-4 w-4" /> Download
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={closePreview}>Close</Button>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>

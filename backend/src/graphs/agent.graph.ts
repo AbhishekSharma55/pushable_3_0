@@ -30,6 +30,7 @@ import { buildMemoryTools } from "../tools/memory.tools.ts";
 import { buildPlanningTools, type Todo } from "../tools/planning.tools.ts";
 import { buildNotebookTools, loadNotebookEntries } from "../tools/notebook.tools.ts";
 import { buildBucketTools } from "../tools/bucket.tools.ts";
+import { buildBucketComposioBridgeTool } from "../tools/bucket-composio-bridge.tools.ts";
 import { buildPythonTools } from "../tools/python.tools.ts";
 import { memoryRepository } from "../repositories/memory.repository.ts";
 import { buildSystemPrompt } from "../lib/system-prompt-builder.ts";
@@ -1318,6 +1319,11 @@ export async function createAgentGraph(
     // --- 7b. Bucket tools ---
     if (agent.canManageBucket || agent.systemLevelAccess) {
         langchainTools.push(...buildBucketTools({ workspaceId, agentId, sessionId: chatSessionId }));
+    }
+
+    // --- 7b-2. Bucket ↔ Composio bridge tool (when agent has both bucket + active integrations) ---
+    if ((agent.canManageBucket || agent.systemLevelAccess) && composioToolCount > 0) {
+        langchainTools.push(buildBucketComposioBridgeTool({ workspaceId }));
     }
 
     // --- 7c. Python execution tools ---

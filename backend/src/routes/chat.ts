@@ -19,7 +19,7 @@ import { createLLM } from "../lib/gateway.ts";
 
 const AGENT_RECURSION_LIMIT = 50; // Safety net behind step_count-based graceful termination
 
-const HELPER_TEXT_MODEL = "meta-llama/llama-3.2-3b-instruct";
+const HELPER_TEXT_MODEL = "openai/gpt-4.1-nano";
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
@@ -479,7 +479,7 @@ async function executeRun(
                     {
                         role: "system",
                         content:
-                            "Generate a short status line (8-15 words) starting with a gerund verb. Fix typos. Output ONLY the status line.",
+                            "Generate a short status line (8-15 words) starting with a gerund verb. Fix typos. Output ONLY the status line, nothing else.",
                     },
                     { role: "user", content: "What is the cricket score of t20 men's world cup" },
                     { role: "assistant", content: "Looking up the latest T20 World Cup score and winner details" },
@@ -495,11 +495,17 @@ async function executeRun(
                     { role: "assistant", content: "Describing available capabilities and how to get started" },
                     { role: "user", content: "hello" },
                     { role: "assistant", content: "Preparing a friendly greeting and introduction" },
+                    { role: "user", content: "open the first post and show me the latest comment" },
+                    { role: "assistant", content: "Navigating to the first post and extracting the latest comment" },
+                    { role: "user", content: "book a flight to new york for next friday" },
+                    { role: "assistant", content: "Searching for available flights to New York for the upcoming Friday" },
                     { role: "user", content: message },
-                ]);
-                const text = typeof resp.content === "string"
+                ], { maxTokens: 30 });
+                const raw = typeof resp.content === "string"
                     ? resp.content.trim()
                     : "";
+                // Take only the first line — small models sometimes ramble
+                const text = raw.split("\n")[0].replace(/[.!?]$/, "").trim();
                 if (text) {
                     runEventBus.emit(runId, {
                         type: "helperText",

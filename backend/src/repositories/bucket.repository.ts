@@ -1,4 +1,4 @@
-import { eq, and, sql, desc, ilike } from "drizzle-orm";
+import { eq, and, or, sql, desc, ilike } from "drizzle-orm";
 import { db } from "../db/client.ts";
 import { bucketFiles } from "../db/schema/index.ts";
 
@@ -53,6 +53,7 @@ export const bucketRepository = {
         workspaceId: string,
         options?: {
             folder?: string;
+            folders?: string[];
             source?: string;
             search?: string;
             limit?: number;
@@ -63,6 +64,10 @@ export const bucketRepository = {
 
         if (options?.folder) {
             conditions.push(eq(bucketFiles.folder, options.folder));
+        } else if (options?.folders && options.folders.length > 0) {
+            conditions.push(
+                or(...options.folders.map((f) => eq(bucketFiles.folder, f)))!
+            );
         }
         if (options?.source) {
             conditions.push(
@@ -105,16 +110,20 @@ export const bucketRepository = {
             .orderBy(desc(bucketFiles.createdAt));
     },
 
-    async findByFilename(filename: string, workspaceId: string) {
+    async findByFilename(filename: string, workspaceId: string, folders?: string[]) {
+        const conditions = [
+            eq(bucketFiles.filename, filename),
+            eq(bucketFiles.workspaceId, workspaceId),
+        ];
+        if (folders && folders.length > 0) {
+            conditions.push(
+                or(...folders.map((f) => eq(bucketFiles.folder, f)))!
+            );
+        }
         const result = await db
             .select()
             .from(bucketFiles)
-            .where(
-                and(
-                    eq(bucketFiles.filename, filename),
-                    eq(bucketFiles.workspaceId, workspaceId)
-                )
-            )
+            .where(and(...conditions))
             .orderBy(desc(bucketFiles.createdAt))
             .limit(1);
         return result[0] ?? null;

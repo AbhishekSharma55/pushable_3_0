@@ -5,12 +5,32 @@ import { bucketRepository } from "../repositories/bucket.repository.ts";
 import { getStorage } from "../lib/storage.ts";
 import { logger } from "../lib/logger.ts";
 
+const SHARED_FOLDER = "/shared";
+
 export function buildBucketTools(config: {
     workspaceId: string;
     agentId: string;
     sessionId?: string;
+    agentFolder?: string;
 }): DynamicStructuredTool[] {
     const { workspaceId, agentId, sessionId } = config;
+    const agentFolder = config.agentFolder || "/agent-output";
+    const allowedFolders = [agentFolder, SHARED_FOLDER];
+
+    /** Check if a folder is writable by this agent */
+    function isWritableFolder(folder: string): boolean {
+        return folder === agentFolder || folder === SHARED_FOLDER || folder.startsWith(agentFolder + "/");
+    }
+
+    /** Resolve the target folder — defaults to agent folder, validates writability */
+    function resolveFolder(folder?: string): { folder: string; error?: string } {
+        if (!folder) return { folder: agentFolder };
+        if (isWritableFolder(folder)) return { folder };
+        return {
+            folder: agentFolder,
+            error: `Cannot write to "${folder}". You can only write to your folder ("${agentFolder}") or "${SHARED_FOLDER}". Saving to "${agentFolder}" instead.`,
+        };
+    }
 
     const bucketSaveFile = new DynamicStructuredTool({
         name: "bucket_save_file",
@@ -18,6 +38,8 @@ export function buildBucketTools(config: {
             "Save a file to the workspace bucket. Use this to persist any file you create " +
             "(reports, exports, generated documents, data files, etc.). The file will be stored permanently " +
             "and accessible from the Files page. Returns the file ID.\n\n" +
+            `Your folder: "${agentFolder}" (default)\n` +
+            `Shared folder: "${SHARED_FOLDER}" (accessible by all agents)\n\n` +
             "Examples:\n" +
             '- filename: "monthly-report.md", content: "# Monthly Report\\n...", encoding: "text"\n' +
             '- filename: "data-export.csv", content: "name,email\\nJohn,john@example.com", encoding: "text"',
@@ -40,7 +62,7 @@ export function buildBucketTools(config: {
                 .string()
                 .optional()
                 .describe(
-                    "Folder path (e.g. '/reports/2026'). Defaults to '/agent-output'"
+                    `Folder path. Defaults to "${agentFolder}". Use "${SHARED_FOLDER}" to share with other agents.`
                 ),
             description: z
                 .string()
@@ -49,6 +71,7 @@ export function buildBucketTools(config: {
         }),
         func: async ({ filename, content, encoding, folder, description }) => {
             try {
+                const resolved = resolveFolder(folder);
                 const buffer =
                     encoding === "base64"
                         ? Buffer.from(content, "base64")
@@ -77,14 +100,16 @@ export function buildBucketTools(config: {
                     filename,
                     buffer,
                     mimeType,
-                    folder: folder || "/agent-output",
+                    folder: resolved.folder,
                     source: "agent_generated",
                     agentId,
                     sessionId,
                     metadata: description ? { description } : {},
                 });
 
-                return `File saved successfully.\n- ID: ${file.id}\n- Path: ${file.folder}/${file.filename}\n- Size: ${(Number(file.sizeBytes) / 1024).toFixed(1)}KB\n\nThe file is now available in the workspace Files page.`;
+                let result = `File saved successfully.\n- ID: ${file.id}\n- Path: ${file.folder}/${file.filename}\n- Size: ${(Number(file.sizeBytes) / 1024).toFixed(1)}KB\n\nThe file is now available in the workspace Files page.`;
+                if (resolved.error) result = `Note: ${resolved.error}\n\n${result}`;
+                return result;
             } catch (error) {
                 logger.error({ error, filename }, "bucket_save_file failed");
                 return `Failed to save file: ${error instanceof Error ? error.message : "Unknown error"}`;
@@ -96,7 +121,8 @@ export function buildBucketTools(config: {
         name: "bucket_read_file",
         description:
             "Read a file's content from the workspace bucket by file ID or filename. " +
-            "For text files, returns the content directly. For binary files, returns base64-encoded content.",
+            "For text files, returns the content directly. For binary files, returns base64-encoded content.\n" +
+            `Searches in your folder ("${agentFolder}") and "${SHARED_FOLDER}".`,
         schema: z.object({
             fileId: z
                 .string()
@@ -112,8 +138,12 @@ export function buildBucketTools(config: {
                 let file;
                 if (fileId) {
                     file = await bucketRepository.findById(fileId, workspaceId);
+                    // Verify folder access
+                    if (file && !isWritableFolder(file.folder)) {
+                        return `Access denied: file "${file.filename}" is in folder "${file.folder}" which is outside your scope. You can access files in "${agentFolder}" and "${SHARED_FOLDER}".`;
+                    }
                 } else if (filename) {
-                    file = await bucketRepository.findByFilename(filename, workspaceId);
+                    file = await bucketRepository.findByFilename(filename, workspaceId, allowedFolders);
                 } else {
                     return "Please provide either fileId or filename.";
                 }
@@ -155,12 +185,12 @@ export function buildBucketTools(config: {
     const bucketListFiles = new DynamicStructuredTool({
         name: "bucket_list_files",
         description:
-            "List files in the workspace bucket. Shows filenames, sizes, dates, and IDs.",
+            `List files in the workspace bucket. By default shows files in your folder ("${agentFolder}") and "${SHARED_FOLDER}".`,
         schema: z.object({
             folder: z
                 .string()
                 .optional()
-                .describe("Filter by folder path (e.g. '/reports')"),
+                .describe(`Filter by specific folder. Leave empty to see your folder + shared.`),
             search: z
                 .string()
                 .optional()
@@ -169,7 +199,8 @@ export function buildBucketTools(config: {
         func: async ({ folder, search }) => {
             try {
                 const files = await bucketService.listFiles(workspaceId, {
-                    folder,
+                    folder: folder || undefined,
+                    folders: folder ? undefined : allowedFolders,
                     search,
                     limit: 50,
                 });
@@ -177,7 +208,7 @@ export function buildBucketTools(config: {
                 if (files.length === 0) {
                     return folder
                         ? `No files found in folder "${folder}".`
-                        : "No files in the bucket yet.";
+                        : `No files in your folder ("${agentFolder}") or "${SHARED_FOLDER}" yet.`;
                 }
 
                 const lines = files.map((f) => {
@@ -197,14 +228,22 @@ export function buildBucketTools(config: {
     const bucketDeleteFile = new DynamicStructuredTool({
         name: "bucket_delete_file",
         description:
-            "Delete a file from the workspace bucket. This is permanent and cannot be undone.",
+            "Delete a file from the workspace bucket. This is permanent and cannot be undone.\n" +
+            `You can only delete files in your folder ("${agentFolder}") or "${SHARED_FOLDER}".`,
         schema: z.object({
             fileId: z.string().describe("ID of the file to delete"),
         }),
         func: async ({ fileId }) => {
             try {
-                const file = await bucketService.deleteFile(fileId, workspaceId);
-                return `File deleted: "${file.filename}" from ${file.folder}`;
+                // Verify folder access before deleting
+                const file = await bucketRepository.findById(fileId, workspaceId);
+                if (!file) return `File not found with ID: ${fileId}`;
+                if (!isWritableFolder(file.folder)) {
+                    return `Access denied: cannot delete file in folder "${file.folder}". You can only delete files in "${agentFolder}" or "${SHARED_FOLDER}".`;
+                }
+
+                const deleted = await bucketService.deleteFile(fileId, workspaceId);
+                return `File deleted: "${deleted.filename}" from ${deleted.folder}`;
             } catch (error) {
                 logger.error({ error, fileId }, "bucket_delete_file failed");
                 return `Failed to delete file: ${error instanceof Error ? error.message : "Unknown error"}`;

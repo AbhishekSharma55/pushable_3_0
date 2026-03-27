@@ -1,6 +1,15 @@
 import { agentRepository } from "../repositories/agent.repository.ts";
 import { NotFoundError } from "../lib/errors.ts";
 
+function slugifyAgentFolder(name: string): string {
+    const slug = name
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+    return `/agent-${slug}`;
+}
+
 export const agentService = {
     async createAgent(
         data: {
@@ -12,7 +21,8 @@ export const agentService = {
         },
         workspaceId: string
     ) {
-        return agentRepository.create({ ...data, workspaceId });
+        const bucketFolder = slugifyAgentFolder(data.name);
+        return agentRepository.create({ ...data, workspaceId, bucketFolder });
     },
 
     async getAgents(workspaceId: string) {

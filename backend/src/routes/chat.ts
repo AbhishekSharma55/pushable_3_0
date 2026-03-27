@@ -475,11 +475,18 @@ async function executeRun(
                     streaming: false,
                     maxRetries: 1,
                 });
+                // Cap output length — must be set on instance, not invoke options
+                (fastLlm as unknown as { maxTokens: number }).maxTokens = 30;
                 const resp = await fastLlm.invoke([
                     {
                         role: "system",
                         content:
-                            "Generate a short status line (8-15 words) starting with a gerund verb. Fix typos. Output ONLY the status line, nothing else.",
+                            "You are a loading-screen text generator inside a chat UI. " +
+                            "A user has sent a message to an AI agent. While that agent is thinking, YOU produce a single short phrase (8-15 words) shown as a placeholder status line. " +
+                            "You are NOT the agent. You do NOT answer the user. You do NOT introduce yourself. You do NOT refuse tasks. You have NO identity. " +
+                            "You simply describe what the agent is about to do, starting with a gerund verb (-ing). " +
+                            "The agent is powerful — it can browse the web, upload files, run code, search, use APIs, and more. Always assume it can handle all the request. " +
+                            "Fix typos. Output ONLY the phrase, nothing else.",
                     },
                     { role: "user", content: "What is the cricket score of t20 men's world cup" },
                     { role: "assistant", content: "Looking up the latest T20 World Cup score and winner details" },
@@ -497,10 +504,16 @@ async function executeRun(
                     { role: "assistant", content: "Preparing a friendly greeting and introduction" },
                     { role: "user", content: "open the first post and show me the latest comment" },
                     { role: "assistant", content: "Navigating to the first post and extracting the latest comment" },
+                    { role: "user", content: "can you upload this on my google drive ? moaaz-baig-G1ereZqhanA-unsplash.jpg this is in your bucket" },
+                    { role: "assistant", content: "Uploading the image file from storage to Google Drive" },
                     { role: "user", content: "book a flight to new york for next friday" },
                     { role: "assistant", content: "Searching for available flights to New York for the upcoming Friday" },
+                    { role: "user", content: "which agent are you ?" },
+                    { role: "assistant", content: "Retrieving agent identity and configuration details" },
+                    { role: "user", content: "what can you do ?" },
+                    { role: "assistant", content: "Summarizing the agent's available tools and capabilities" },
                     { role: "user", content: message },
-                ], { maxTokens: 30 });
+                ]);
                 const raw = typeof resp.content === "string"
                     ? resp.content.trim()
                     : "";

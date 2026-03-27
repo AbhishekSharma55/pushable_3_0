@@ -80,6 +80,7 @@ export interface AgentCapabilities {
     channels: ChannelInfo[];
     systemLevelAccess: boolean;
     systemPermissions: SystemPermissions;
+    bucketFolder?: string;
 }
 
 export interface AgentIdentity {
@@ -614,8 +615,8 @@ Use when: User asks you to build or reorganize the agent team.
 Warning: Creating agents consumes workspace agent quota.`);
         }
 
-        if (perms.canManageBucket) {
-            systemParts.push(`
+        const agentFolder = capabilities.bucketFolder || "/agent-output";
+        systemParts.push(`
 **File Bucket (Persistent Storage)**
 - bucket_save_file: Save a file you create (reports, exports, data) to the workspace bucket
 - bucket_read_file: Read a file's content by ID or filename
@@ -623,8 +624,11 @@ Warning: Creating agents consumes workspace agent quota.`);
 - bucket_delete_file: Delete a file permanently
 - bucket_get_download_url: Get a download URL to share with the user
 - bucket_export_to_composio: **Upload a bucket file directly to an external service** (Google Drive, Dropbox, etc.) via Composio — transfers the file server-side without passing content through conversation
-Use when: You need to persist a file (document, export, generated content) so the user can access it later.
-Files are organized in folders. Your default folder is /agent-output.
+
+**Folder structure:**
+- **Your folder: \`${agentFolder}\`** — your private workspace. Files you save go here by default.
+- **Shared folder: \`/shared\`** — all agents can read and write here. Use this to share files with other agents or for collaborative workflows.
+- You can only access files in your folder and /shared. You cannot access other agents' folders.
 
 **Uploading bucket files to external services (Google Drive, Dropbox, etc.):**
 IMPORTANT: When the user asks you to upload a bucket file to an external service, use \`bucket_export_to_composio\` instead of reading the file with bucket_read_file and passing content manually.
@@ -633,7 +637,6 @@ Steps:
 2. Use COMPOSIO_SEARCH_TOOLS to discover the correct upload tool slug and its file parameter name
 3. Call bucket_export_to_composio with the file ID, tool slug, file parameter name, and any additional params (folder ID, path, etc.)
 This handles files of any size efficiently without token limits.`);
-        }
 
         systemParts.push(`
 SYSTEM ACCESS RULES:
@@ -646,9 +649,8 @@ SYSTEM ACCESS RULES:
         blocks.push(systemParts.join("\n"));
     }
 
-    // --- BLOCK 6: Python Execution Guidance ---
-    if (capabilities.systemPermissions.canExecutePython || capabilities.systemLevelAccess) {
-        blocks.push(`## Python Execution Environment (CRITICAL)
+    // --- BLOCK 6: Python Execution Guidance (always enabled) ---
+    blocks.push(`## Python Execution Environment (CRITICAL)
 
 You have access to a \`python_execute\` tool that runs Python code in a sandboxed environment with scientific libraries (numpy, pandas, scipy, sympy, matplotlib, math, statistics).
 
@@ -668,7 +670,34 @@ You have access to a \`python_execute\` tool that runs Python code in a sandboxe
 **WHY:** You are an AI and your mental math is unreliable. A wrong number in a financial summary, invoice, or report can cause serious real-world harm. Python execution is fast (< 1 second) and 100% accurate. There is zero reason to skip it.
 
 **RULE: If there is a number in your response that came from a calculation, it MUST have been computed by \`python_execute\`. No exceptions.**`);
-    }
+
+    // Bucket access in Python (always enabled)
+    blocks.push(`## Bucket Access in Python
+
+Your Python environment has direct access to workspace bucket files via a built-in helper module:
+
+\`\`\`python
+from _pushable_bucket import bucket
+
+# List files
+files = bucket.list()                              # all files
+files = bucket.list(folder="/reports", search="q1") # filtered
+
+# Read files
+text = bucket.read(filename="data.csv")            # str for text, bytes for binary
+raw = bucket.read_bytes(filename="image.png")      # always bytes
+
+# Save files back to bucket
+bucket.save("output.csv", csv_string, folder="/exports")
+bucket.save("chart.png", png_bytes, folder="/charts")
+
+# Download to sandbox, process locally, upload back
+bucket.download_to("input.png", filename="photo.jpg")
+# ... process with PIL, numpy, etc. ...
+bucket.upload_from("processed.png", folder="/processed")
+\`\`\`
+
+**USE THIS for file processing workflows:** When the user asks you to transform, analyze, resize, convert, or process a bucket file, do it all inside \`python_execute\` with the bucket helper — read the file, process it in Python, and save the result back. This is far more efficient than reading file content through bucket_read_file and passing it around.`);
 
     // --- BLOCK 7: Output Format ---
     blocks.push(`## Response Format

@@ -15,7 +15,6 @@ import {
     Plug,
     ShieldAlert,
     AlertTriangle,
-    Code2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -67,16 +66,6 @@ const SYSTEM_PERMISSION_ITEMS: {
         label: 'Manage Agents',
         description: 'Can create and update agents in this workspace',
         extraWarning: 'This includes creating agents with system access',
-    },
-    {
-        key: 'canManageBucket',
-        label: 'Manage Files (Bucket)',
-        description: 'Can save, read, list, and delete files in the workspace bucket',
-    },
-    {
-        key: 'canExecutePython',
-        label: 'Python Code Execution',
-        description: 'Can write and execute Python code for math, analysis, and calculations',
     },
 ];
 
@@ -257,8 +246,6 @@ export default function AgentPermissionsPage() {
                 canManageSchedules: false,
                 canManageChannels: false,
                 canManageAgents: false,
-                canManageBucket: false,
-                // canExecutePython is kept as-is — it's independent of system access
             }));
         }
     };
@@ -627,36 +614,6 @@ export default function AgentPermissionsPage() {
                                 })}
                             </div>
                         )}
-                    </div>
-
-                    {/* Python Code Execution Section */}
-                    <div>
-                        <div className="flex items-center gap-2 mb-1">
-                            <Code2 className="h-4 w-4 text-green-600" />
-                            <h2 className="text-lg font-semibold">Python Code Execution</h2>
-                        </div>
-                        <p className="text-xs text-muted-foreground mb-4">
-                            Allow this agent to write and run Python code for math, data analysis, and calculations.
-                        </p>
-                        <div className="flex items-center justify-between rounded-lg border border-border/60 bg-card px-4 py-3">
-                            <div className="flex items-center gap-3">
-                                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-green-500/15 to-emerald-500/15 flex-shrink-0">
-                                    <Code2 className="h-4 w-4 text-green-600" />
-                                </div>
-                                <div>
-                                    <p className="text-sm font-medium">Enable Python Environment</p>
-                                    <p className="text-xs text-muted-foreground mt-0.5">
-                                        Agent can execute Python with numpy, pandas, sympy, scipy, matplotlib
-                                    </p>
-                                </div>
-                            </div>
-                            <Switch
-                                checked={systemPerms.canExecutePython}
-                                onCheckedChange={(checked) =>
-                                    setSystemPerms(prev => ({ ...prev, canExecutePython: checked }))
-                                }
-                            />
-                        </div>
                     </div>
 
                     {/* System Access Section */}

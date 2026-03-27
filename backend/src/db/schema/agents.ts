@@ -19,8 +19,9 @@ export const agents = pgTable("agents", {
     canManageSchedules: boolean("can_manage_schedules").default(false).notNull(),
     canManageChannels: boolean("can_manage_channels").default(false).notNull(),
     canManageAgents: boolean("can_manage_agents").default(false).notNull(),
-    canManageBucket: boolean("can_manage_bucket").default(false).notNull(),
+    canManageBucket: boolean("can_manage_bucket").default(true).notNull(),
     canExecutePython: boolean("can_execute_python").default(true).notNull(),
+    bucketFolder: text("bucket_folder"),
     requireApprovalForAll: boolean("require_approval_for_all").default(false).notNull(),
     // Browser automation
     browserType: text("browser_type").default("cloud").notNull(),

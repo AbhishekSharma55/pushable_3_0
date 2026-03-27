@@ -36,6 +36,7 @@ export interface Agent {
     canManageAgents: boolean;
     canManageBucket: boolean;
     canExecutePython: boolean;
+    bucketFolder: string | null;
     requireApprovalForAll: boolean;
     browserType: 'cloud' | 'extension';
     browserEnabled: boolean;

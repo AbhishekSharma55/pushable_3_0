@@ -1316,20 +1316,20 @@ export async function createAgentGraph(
         langchainTools.push(...buildSystemTools({ agentId, workspaceId, permissions: systemPermissions }));
     }
 
-    // --- 7b. Bucket tools ---
-    if (agent.canManageBucket || agent.systemLevelAccess) {
-        langchainTools.push(...buildBucketTools({ workspaceId, agentId, sessionId: chatSessionId }));
-    }
+    // --- 7b. Bucket tools (always enabled for all agents) ---
+    langchainTools.push(...buildBucketTools({ workspaceId, agentId, sessionId: chatSessionId, agentFolder: agent.bucketFolder || undefined }));
 
-    // --- 7b-2. Bucket ↔ Composio bridge tool (when agent has both bucket + active integrations) ---
-    if ((agent.canManageBucket || agent.systemLevelAccess) && composioToolCount > 0) {
+    // --- 7b-2. Bucket ↔ Composio bridge tool (when agent has active integrations) ---
+    if (composioToolCount > 0) {
         langchainTools.push(buildBucketComposioBridgeTool({ workspaceId }));
     }
 
-    // --- 7c. Python execution tools ---
-    if (agent.canExecutePython || agent.systemLevelAccess) {
-        langchainTools.push(...buildPythonTools());
-    }
+    // --- 7c. Python execution tools (always enabled for all agents) ---
+    langchainTools.push(...buildPythonTools({
+        workspaceId,
+        userId,
+        hasBucketAccess: true,
+    }));
 
     // --- 8. Memory & notebook tools ---
     if (userId) {
@@ -1377,6 +1377,7 @@ export async function createAgentGraph(
         channels: channelInfos,
         systemLevelAccess: agent.systemLevelAccess,
         systemPermissions,
+        bucketFolder: agent.bucketFolder || undefined,
     };
 
     const baseSystemPrompt = buildSystemPrompt(

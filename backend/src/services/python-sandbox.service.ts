@@ -15,6 +15,11 @@ export interface PythonExecResult {
 const MAX_TIMEOUT_MS = 30_000; // 30 seconds
 const MAX_OUTPUT_BYTES = 100_000; // ~100KB output cap
 
+export interface PythonHelperFile {
+    filename: string;
+    content: string;
+}
+
 /**
  * Execute Python code in a sandboxed subprocess with resource limits.
  *
@@ -26,7 +31,11 @@ const MAX_OUTPUT_BYTES = 100_000; // ~100KB output cap
  */
 export async function executePython(
     code: string,
-    timeoutMs: number = MAX_TIMEOUT_MS
+    timeoutMs: number = MAX_TIMEOUT_MS,
+    options?: {
+        extraEnv?: Record<string, string>;
+        helperFiles?: PythonHelperFile[];
+    }
 ): Promise<PythonExecResult> {
     const effectiveTimeout = Math.min(timeoutMs, MAX_TIMEOUT_MS);
     const start = Date.now();
@@ -48,6 +57,13 @@ matplotlib.use('Agg')
 ${code}
 `;
 
+    // Write helper files (e.g. _pushable_bucket.py) into the temp directory
+    if (options?.helperFiles) {
+        for (const helper of options.helperFiles) {
+            await writeFile(join(tempDir, helper.filename), helper.content, "utf-8");
+        }
+    }
+
     await writeFile(scriptPath, wrappedCode, "utf-8");
 
     return new Promise<PythonExecResult>((resolve) => {
@@ -63,6 +79,7 @@ ${code}
                 PYTHONDONTWRITEBYTECODE: "1",
                 PYTHONUNBUFFERED: "1",
                 MPLBACKEND: "Agg",
+                ...(options?.extraEnv || {}),
             },
         });
 

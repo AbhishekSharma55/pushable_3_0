@@ -12,6 +12,7 @@ export const agentRepository = {
         browserType?: string;
         browserEnabled?: boolean;
         browserProxyId?: string | null;
+        bucketFolder?: string;
     }) {
         const result = await db.insert(agents).values(data).returning();
         return result[0];

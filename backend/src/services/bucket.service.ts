@@ -133,6 +133,7 @@ export const bucketService = {
         workspaceId: string,
         options?: {
             folder?: string;
+            folders?: string[];
             source?: string;
             search?: string;
             limit?: number;

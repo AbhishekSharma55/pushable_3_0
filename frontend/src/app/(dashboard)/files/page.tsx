@@ -51,10 +51,11 @@ import { CsvPreview } from '@/components/artifact/previews/csv-preview';
 import { HtmlPreview } from '@/components/artifact/previews/html-preview';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
 import { listFiles, listFolders, uploadFile, deleteFile, renameFile, moveFile, getStorageUsage, getFileDownloadUrl } from '@/lib/api/bucket';
+import { getAgents } from '@/lib/api/agents';
 import { getToken } from '@/lib/auth';
 import { API_URL } from '@/lib/constants';
 import { cn } from '@/lib/utils';
-import type { BucketFile } from '@/types';
+import type { Agent, BucketFile } from '@/types';
 
 function formatFileSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -111,16 +112,21 @@ export default function FilesPage() {
         if (!workspace?.id) return;
         try {
             setLoading(true);
-            const [fileData, folderData, usageData] = await Promise.all([
+            const [fileData, folderData, usageData, agentsData] = await Promise.all([
                 listFiles(workspace.id, {
                     folder: selectedFolder || undefined,
                     search: search || undefined,
                 }),
                 listFolders(workspace.id),
                 getStorageUsage(workspace.id),
+                getAgents(workspace.id).catch(() => [] as Agent[]),
             ]);
             setFiles(fileData);
-            setFolders(Array.from(new Set(['/', ...folderData])));
+            // Merge: root + existing folders + agent folders + /shared
+            const agentFolders = agentsData
+                .map((a: Agent) => a.bucketFolder)
+                .filter((f: string | null): f is string => !!f);
+            setFolders(Array.from(new Set(['/', '/shared', ...agentFolders, ...folderData])));
             setUsage(usageData);
         } catch {
             toast.error('Failed to load files');

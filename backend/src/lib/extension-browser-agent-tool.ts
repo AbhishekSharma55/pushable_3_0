@@ -25,9 +25,8 @@ const ExtBrowserAgentState = Annotation.Root({
 });
 
 /** Max supersteps for the extension browser agent graph.
- *  30 handles complex multi-step tasks with Gemini Flash (cheap tokens).
- *  Each "step" = one LLM call + tool execution. Most tasks need 4-10 steps. */
-const EXT_BROWSER_AGENT_RECURSION_LIMIT = 30;
+ *  12 = 6 agent+tool cycles. Prevents runaway loops and saves cost. */
+const EXT_BROWSER_AGENT_RECURSION_LIMIT = 12;
 
 /**
  * Build a single "extension_browser_agent" tool that wraps an internal,

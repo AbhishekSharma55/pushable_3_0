@@ -294,7 +294,7 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
         new DynamicStructuredTool({
             name: "ext_browser_click",
             description:
-                "Click an element in Chrome. Use [data-psh-id=\"N\"] selectors from get_elements. Works with shadow DOM.",
+                "Click an element in Chrome using real mouse events (CDP). Use [data-psh-id=\"N\"] selectors from get_elements.",
             schema: z.object({
                 selector: z
                     .string()
@@ -307,9 +307,24 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
         }),
 
         new DynamicStructuredTool({
+            name: "ext_browser_click_text",
+            description:
+                "Click the first visible element containing the given text. Use this when you know the text of what to click (e.g., a person's name, button label) — no need to scan elements first. This is the FASTEST way to click something.",
+            schema: z.object({
+                text: z
+                    .string()
+                    .describe('Text to find and click, e.g. "Abhishek Sharma" or "Send" or "Message"'),
+            }),
+            func: async ({ text }: { text: string }) =>
+                safe(async () =>
+                    fmt(await exec("clickText", { text }))
+                ),
+        }),
+
+        new DynamicStructuredTool({
             name: "ext_browser_type",
             description:
-                "Type text into an input/textarea/contenteditable in Chrome. Use [data-psh-id=\"N\"] selectors.",
+                "Type text into an input/textarea/contenteditable in Chrome using CDP. Handles LinkedIn message boxes, Slack editors, Prosemirror, Slate, and all contenteditable divs automatically. Use [data-psh-id=\"N\"] selectors.",
             schema: z.object({
                 selector: z
                     .string()
@@ -373,7 +388,7 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
         new DynamicStructuredTool({
             name: "ext_browser_screenshot",
             description:
-                "[CRITICAL: USE THIS TOOL instead of browser_screenshot when using the Chrome extension] Take a screenshot of the current Chrome tab.",
+                "Take a screenshot of the current Chrome tab. NOTE: This is for USER VIEWING ONLY — never use screenshots to make automation decisions. Use ext_browser_get_elements() instead for all decision-making.",
             schema: z.object({}),
             func: async () =>
                 safe(async () => {

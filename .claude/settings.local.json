@@ -65,7 +65,11 @@
       "Bash(sudo docker:*)",
       "Read(//run/**)",
       "Bash(python3 -c \"from PIL import Image; print\\(''''ok''''\\)\")",
-      "Bash(pip3 install:*)"
+      "Bash(pip3 install:*)",
+      "Bash(wc -l /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-trial/*.js /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-trial/*.json)",
+      "Bash(node -e \"require\\(''''@anthropic-ai/sdk''''\\)\")",
+      "Bash(npx playwright:*)",
+      "Bash(docker-compose -f /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/docker-compose.yml restart backend)"
     ]
   }
 }

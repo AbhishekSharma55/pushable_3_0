@@ -1,6 +1,6 @@
 # Agent Tools
 
-Tools are capabilities that agents can invoke during conversations. Pushable AI provides 8 categories of built-in tools plus support for MCP servers, Composio integrations, and agent delegation.
+Tools are capabilities that agents can invoke during conversations. Pushable AI provides 9 categories of built-in tools plus support for MCP servers, Composio integrations, and agent delegation.
 
 ---
 
@@ -166,6 +166,7 @@ The agent can use this for:
 |------|-------------|
 | `bucket_save_file` | Save a file to workspace storage |
 | `bucket_read_file` | Read a file's contents |
+| `bucket_update_file` | Update an existing file's content in-place (text files only) |
 | `bucket_list_files` | List files in the workspace bucket |
 | `bucket_delete_file` | Delete a file |
 
@@ -178,6 +179,22 @@ Saves files with:
 - **Description** for metadata
 
 Supported MIME types are auto-detected from extension: `.txt`, `.md`, `.csv`, `.json`, `.html`, `.xml`, `.pdf`, `.png`, `.jpg`, `.gif`, `.webp`
+
+### bucket_update_file
+
+Updates an existing text file's content in-place (overwrites). Accepts `fileId` or `filename` to locate the file, and `content` with the new full content. Only works for text-based MIME types (text/*, application/json, application/xml, application/javascript). Used heavily for the "Bucket as Database" CSV tables pattern.
+
+### Bucket as Database (CSV Tables)
+
+Agents can use the bucket as a lightweight database by storing structured data in CSV files. Each CSV file acts as a table — rows are records, columns are fields. The system prompt instructs agents to:
+- Use naming convention `db_{table_name}.csv` (e.g., `db_leads.csv`, `db_tasks.csv`)
+- Always include `id` and `created_at` columns
+- Use `bucket_update_file` to modify rows in-place
+- Save table metadata to notebook (key: `bucket_db_{table_name}`) for cross-session persistence
+- Save a memory that the user uses bucket-as-DB so it carries across sessions
+- Use `python_execute` with pandas for queries, filtering, and aggregation on larger tables
+
+This is offered as a fallback when the user has no external integrations (Google Sheets, Airtable, etc.) connected.
 
 Files are stored in MinIO (dev) or S3 (prod) and tracked in the `bucket_files` table.
 
@@ -412,6 +429,33 @@ The tool appears in the agent's tool list as `agent_research_assistant` with the
 
 ---
 
+## 9. CEO Tools
+
+CEO-only tools for managing projects, milestones, agents, and monitoring. Only injected when `agent.isCeo === true`.
+
+| Tool | Description |
+|------|-------------|
+| `ceo_create_project` | Create a new project |
+| `ceo_update_project` | Update project details/status |
+| `ceo_delete_project` | Delete a project (requires name confirmation) |
+| `ceo_list_projects` | List all projects with status/progress |
+| `ceo_get_project_details` | Full project details with milestones, agents, KBs, reports |
+| `ceo_create_milestone` | Add milestone to a project |
+| `ceo_update_milestone` | Update milestone status/details |
+| `ceo_delete_milestone` | Remove a milestone |
+| `ceo_evaluate_milestones` | Auto-evaluate milestone progress from run reports |
+| `ceo_assign_agent_to_project` | Assign agent to project |
+| `ceo_remove_agent_from_project` | Remove agent from project |
+| `ceo_assign_kb_to_project` | Link KB to project |
+| `ceo_remove_kb_from_project` | Unlink KB from project |
+| `ceo_get_project_reports` | Get run reports for a project |
+| `ceo_get_agent_reports` | Get run reports for an agent |
+| `ceo_message_agent` | Send instruction to agent, trigger on-demand run |
+
+CEO does NOT get browser tools, planning tools, or execution-level tools. The CEO manages and delegates.
+
+---
+
 ## Tool Execution Safety
 
 ### HITL (Human-in-the-Loop) Approval
@@ -467,11 +511,12 @@ When agents discover the right way to use tools (e.g., correct Composio tool slu
 | **System** | system_create_kb, system_delete_kb, system_add_document, system_create_skill, system_update_skill, system_delete_skill, system_create_tool, system_update_tool, system_delete_tool, system_create_schedule, system_update_schedule, system_delete_schedule, system_list_schedules, system_list_channels, system_create_agent, system_update_agent | Individual `canManage*` flags |
 | **Browser** | browser_navigate, browser_click, browser_type, browser_scroll, browser_screenshot, browser_get_page_state, browser_wait | `browserEnabled` |
 | **Python** | python_execute | `canExecutePython` |
-| **Bucket** | bucket_save_file, bucket_read_file, bucket_list_files, bucket_delete_file | Always available (write: `canManageBucket`) |
+| **Bucket** | bucket_save_file, bucket_read_file, bucket_update_file, bucket_list_files, bucket_delete_file | Always available (write: `canManageBucket`) |
 | **Vault** | vault_get_credential | Active vault connection |
 | **Memory** | save_memory | Always available |
 | **Planning** | write_todos, update_todo | Always available |
 | **Notebook** | write_notebook, read_notebook, delete_notebook_entry | Always available |
+| **CEO** | ceo_create_project, ceo_update_project, ceo_delete_project, ceo_list_projects, ceo_get_project_details, ceo_create_milestone, ceo_update_milestone, ceo_delete_milestone, ceo_evaluate_milestones, ceo_assign_agent_to_project, ceo_remove_agent_from_project, ceo_assign_kb_to_project, ceo_remove_kb_from_project, ceo_get_project_reports, ceo_get_agent_reports, ceo_message_agent | `agent.isCeo === true` |
 | **MCP** | Dynamic (discovered from MCP servers) | Assigned via permissions |
 | **Composio** | Dynamic (from connected integrations) | Assigned via permissions |
 | **Delegation** | agent_<name> (one per connected agent) | Assigned via permissions |

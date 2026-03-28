@@ -135,6 +135,7 @@ export const bucketRepository = {
         data: Partial<{
             filename: string;
             folder: string;
+            sizeBytes: number;
             metadata: Record<string, unknown>;
         }>
     ) {

@@ -152,6 +152,54 @@ export const bucketService = {
         return bucketRepository.updateFile(id, workspaceId, { filename: newFilename });
     },
 
+    async updateFileContent(id: string, workspaceId: string, content: string) {
+        const file = await this.getFile(id, workspaceId);
+
+        // Only allow text-based file edits
+        const editable =
+            file.mimeType.startsWith("text/") ||
+            [
+                "application/json",
+                "application/xml",
+                "application/javascript",
+                "application/xhtml+xml",
+            ].includes(file.mimeType);
+
+        if (!editable) {
+            throw new AppError(
+                "This file type cannot be edited",
+                400,
+                "FILE_NOT_EDITABLE"
+            );
+        }
+
+        const buffer = Buffer.from(content, "utf-8");
+
+        if (buffer.length > MAX_FILE_SIZE) {
+            throw new AppError(
+                `Content exceeds maximum size of ${MAX_FILE_SIZE / (1024 * 1024)}MB`,
+                400,
+                "FILE_TOO_LARGE"
+            );
+        }
+
+        // Overwrite file on disk
+        const storage = getStorage();
+        await storage.put(file.storageKey, buffer, file.mimeType);
+
+        // Update size in DB
+        const updated = await bucketRepository.updateFile(id, workspaceId, {
+            sizeBytes: buffer.length,
+        });
+
+        logger.info(
+            { fileId: id, filename: file.filename, newSize: buffer.length },
+            "File content updated"
+        );
+
+        return updated;
+    },
+
     async getStorageUsage(workspaceId: string) {
         const usage = await bucketRepository.getStorageUsage(workspaceId);
         return {

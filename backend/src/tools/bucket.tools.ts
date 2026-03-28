@@ -251,6 +251,56 @@ export function buildBucketTools(config: {
         },
     });
 
+    const bucketUpdateFile = new DynamicStructuredTool({
+        name: "bucket_update_file",
+        description:
+            "Update the content of an existing text file in the bucket (overwrite). " +
+            "Use this to update CSV tables, markdown docs, JSON configs, etc. in-place without creating a new file.\n" +
+            "Only works for text-based files (txt, md, csv, json, html, xml, etc.).\n\n" +
+            `You can only update files in your folder ("${agentFolder}") or "${SHARED_FOLDER}".`,
+        schema: z.object({
+            fileId: z
+                .string()
+                .optional()
+                .describe("File ID (UUID). Use this if you know the exact ID."),
+            filename: z
+                .string()
+                .optional()
+                .describe("Filename to search for. Finds the most recent match in your accessible folders."),
+            content: z
+                .string()
+                .describe("The new full content to write to the file (replaces existing content entirely)."),
+        }),
+        func: async ({ fileId, filename, content }) => {
+            try {
+                let file;
+                if (fileId) {
+                    file = await bucketRepository.findById(fileId, workspaceId);
+                    if (file && !isWritableFolder(file.folder)) {
+                        return `Access denied: file "${file.filename}" is in folder "${file.folder}" which is outside your scope. You can update files in "${agentFolder}" and "${SHARED_FOLDER}".`;
+                    }
+                } else if (filename) {
+                    file = await bucketRepository.findByFilename(filename, workspaceId, allowedFolders);
+                } else {
+                    return "Please provide either fileId or filename.";
+                }
+
+                if (!file) {
+                    return `File not found${filename ? `: "${filename}"` : ""}. Use bucket_save_file to create a new file, or bucket_list_files to see available files.`;
+                }
+
+                const updated = await bucketService.updateFileContent(file.id, workspaceId, content);
+                if (!updated) {
+                    return "Failed to update file: unknown error";
+                }
+                return `File updated successfully.\n- ID: ${file.id}\n- Path: ${file.folder}/${file.filename}\n- New size: ${(Buffer.from(content, "utf-8").length / 1024).toFixed(1)}KB`;
+            } catch (error) {
+                logger.error({ error, fileId, filename }, "bucket_update_file failed");
+                return `Failed to update file: ${error instanceof Error ? error.message : "Unknown error"}`;
+            }
+        },
+    });
+
     const bucketGetDownloadUrl = new DynamicStructuredTool({
         name: "bucket_get_download_url",
         description:
@@ -277,6 +327,7 @@ export function buildBucketTools(config: {
     return [
         bucketSaveFile,
         bucketReadFile,
+        bucketUpdateFile,
         bucketListFiles,
         bucketDeleteFile,
         bucketGetDownloadUrl,

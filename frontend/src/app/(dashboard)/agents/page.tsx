@@ -327,10 +327,16 @@ export default function AgentsPage() {
             setLoading(true);
             const data = await getAgents(workspace.id);
             setAgents(data);
-            // Auto-select agent from URL param
+            // Auto-select agent from URL param, or default to CEO
             if (agentIdParam) {
                 const found = data.find((a: Agent) => a.id === agentIdParam);
                 if (found) setSelectedAgent(found);
+            } else {
+                const ceo = data.find((a: Agent) => a.isCeo);
+                if (ceo) {
+                    setSelectedAgent(ceo);
+                    updateParams({ agent: ceo.id });
+                }
             }
         } catch {
             toast.error('Failed to load agents');
@@ -1171,9 +1177,17 @@ export default function AgentsPage() {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
     };
 
+    const sortedAgents = useMemo(() => {
+        // Pin CEO and Tester agents to top
+        const ceo = agents.filter((a) => a.isCeo);
+        const tester = agents.filter((a) => a.isTester);
+        const rest = agents.filter((a) => !a.isCeo && !a.isTester);
+        return [...ceo, ...tester, ...rest];
+    }, [agents]);
+
     const filteredAgents = agentSearch
-        ? agents.filter((a) => a.name.toLowerCase().includes(agentSearch.toLowerCase()))
-        : agents;
+        ? sortedAgents.filter((a) => a.name.toLowerCase().includes(agentSearch.toLowerCase()))
+        : sortedAgents;
 
     return (
         <div className="space-y-6 relative" onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
@@ -1235,12 +1249,17 @@ export default function AgentsPage() {
                                     onClick={() => handleSelectAgent(agent)}
                                 >
                                     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 flex-shrink-0">
-                                        <Bot className="h-4 w-4 text-primary" />
+                                        {agent.emoji ? <span className="text-lg leading-none">{agent.emoji}</span> : <Bot className="h-4 w-4 text-primary" />}
                                     </div>
                                     <div className="flex-1 min-w-0">
-                                        <p className="text-sm font-medium truncate">{agent.name}</p>
+                                        <div className="flex items-center gap-1.5">
+                                            <p className="text-sm font-medium truncate">{agent.name}</p>
+                                            {agent.isCeo && <Badge variant="outline" className="text-[9px] px-1.5 py-0 bg-amber-500/10 text-amber-500 border-amber-500/20">CEO</Badge>}
+                                            {agent.isTester && <Badge variant="outline" className="text-[9px] px-1.5 py-0 bg-purple-500/10 text-purple-500 border-purple-500/20">QA</Badge>}
+                                        </div>
                                         <p className="text-[11px] text-muted-foreground truncate">{agent.model.split('/').pop()}</p>
                                     </div>
+                                    {!agent.isCeo && !agent.isTester && (
                                     <AlertDialog>
                                         <AlertDialogTrigger asChild>
                                             <button className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive" onClick={(e) => e.stopPropagation()}>
@@ -1252,6 +1271,7 @@ export default function AgentsPage() {
                                             <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => handleDelete(agent.id)} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">Delete</AlertDialogAction></AlertDialogFooter>
                                         </AlertDialogContent>
                                     </AlertDialog>
+                                    )}
                                 </div>
                             ))
                         )}
@@ -1266,7 +1286,7 @@ export default function AgentsPage() {
                             <div className="h-14 border-b border-border px-4 flex items-center justify-between">
                                 <div className="flex items-center gap-3">
                                     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-                                        <Bot className="h-4 w-4 text-primary" />
+                                        {selectedAgent.emoji ? <span className="text-lg leading-none">{selectedAgent.emoji}</span> : <Bot className="h-4 w-4 text-primary" />}
                                     </div>
                                     <p className="text-sm font-semibold">{selectedAgent.name}</p>
 

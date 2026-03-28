@@ -129,6 +129,25 @@ export async function bucketRoutes(fastify: FastifyInstance) {
         return { ok: true };
     });
 
+    // ── PUT /bucket/files/:id/content ───────────────────────────────────────
+    fastify.put("/bucket/files/:id/content", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { id } = request.params as { id: string };
+        const { content } = request.body as { content: string };
+
+        if (typeof content !== "string") {
+            throw new AppError("content must be a string", 400, "INVALID_BODY");
+        }
+
+        const updated = await bucketService.updateFileContent(
+            id,
+            workspaceId,
+            content
+        );
+
+        return { data: updated };
+    });
+
     // ── PUT /bucket/files/:id ────────────────────────────────────────────────
     fastify.put("/bucket/files/:id", async (request) => {
         const workspaceId = request.headers["x-workspace-id"] as string;

@@ -6,6 +6,8 @@ import { toolService } from "../services/tool.service.ts";
 import { scheduleService } from "../services/schedule.service.ts";
 import { channelService } from "../services/channel.service.ts";
 import { agentService } from "../services/agent.service.ts";
+import { permissionService } from "../services/permission.service.ts";
+import { integrationService } from "../services/integration.service.ts";
 import { logger } from "../lib/logger.ts";
 import type { SystemPermissions } from "../lib/system-prompt-builder.ts";
 
@@ -545,6 +547,215 @@ export function buildSystemTools(config: SystemToolsConfig): DynamicStructuredTo
                     } catch (error) {
                         logger.error({ error }, "system_update_agent failed");
                         return `Failed to update agent: ${error instanceof Error ? error.message : "Unknown error"}`;
+                    }
+                },
+            }),
+
+            // --- Resource Assignment Tools ---
+            new DynamicStructuredTool({
+                name: "system_assign_resource_to_agent",
+                description:
+                    "Grant an agent access to a resource (KB, tool, skill, or another agent for delegation). " +
+                    "This sets a permission so the agent can use that resource at runtime.",
+                schema: z.object({
+                    agentId: z.string().describe("ID of the agent to grant access to"),
+                    resourceType: z.enum(["kb", "tool", "skill", "agent"]).describe("Type of resource"),
+                    resourceId: z.string().describe("ID of the resource to grant access to"),
+                }),
+                func: async ({ agentId: targetAgentId, resourceType, resourceId }) => {
+                    try {
+                        await permissionService.setPermissions(targetAgentId, workspaceId, [
+                            { resourceType, resourceId, allowed: true },
+                        ]);
+                        return `Granted ${resourceType} access (${resourceId}) to agent ${targetAgentId}.`;
+                    } catch (error) {
+                        logger.error({ error }, "system_assign_resource_to_agent failed");
+                        return `Failed to assign resource: ${error instanceof Error ? error.message : "Unknown error"}`;
+                    }
+                },
+            }),
+
+            new DynamicStructuredTool({
+                name: "system_remove_resource_from_agent",
+                description:
+                    "Revoke an agent's access to a resource (KB, tool, skill, or another agent).",
+                schema: z.object({
+                    agentId: z.string().describe("ID of the agent to revoke access from"),
+                    resourceType: z.enum(["kb", "tool", "skill", "agent"]).describe("Type of resource"),
+                    resourceId: z.string().describe("ID of the resource to revoke"),
+                }),
+                func: async ({ agentId: targetAgentId, resourceType, resourceId }) => {
+                    try {
+                        await permissionService.setPermissions(targetAgentId, workspaceId, [
+                            { resourceType, resourceId, allowed: false },
+                        ]);
+                        return `Revoked ${resourceType} access (${resourceId}) from agent ${targetAgentId}.`;
+                    } catch (error) {
+                        logger.error({ error }, "system_remove_resource_from_agent failed");
+                        return `Failed to remove resource: ${error instanceof Error ? error.message : "Unknown error"}`;
+                    }
+                },
+            }),
+
+            new DynamicStructuredTool({
+                name: "system_get_agent_permissions",
+                description:
+                    "List all resource permissions for an agent — shows which KBs, tools, skills, and agents it has access to.",
+                schema: z.object({
+                    agentId: z.string().describe("ID of the agent"),
+                }),
+                func: async ({ agentId: targetAgentId }) => {
+                    try {
+                        const perms = await permissionService.getAgentPermissions(targetAgentId, workspaceId);
+                        if (perms.length === 0) return "This agent has no resource permissions.";
+                        const lines = perms.map(
+                            (p) => `- [${p.resourceType}] ${p.resourceId} — ${p.allowed ? "allowed" : "denied"}`
+                        );
+                        return `Permissions (${perms.length}):\n${lines.join("\n")}`;
+                    } catch (error) {
+                        logger.error({ error }, "system_get_agent_permissions failed");
+                        return `Failed to get permissions: ${error instanceof Error ? error.message : "Unknown error"}`;
+                    }
+                },
+            }),
+
+            new DynamicStructuredTool({
+                name: "system_set_agent_system_permissions",
+                description:
+                    "Set system-level permissions for an agent (manage KBs, tools, skills, schedules, channels, agents, bucket, python). " +
+                    "systemLevelAccess must be true for management permissions to take effect.",
+                schema: z.object({
+                    agentId: z.string().describe("ID of the agent"),
+                    systemLevelAccess: z.boolean().describe("Enable system-level access"),
+                    canManageKB: z.boolean().default(false).describe("Can create/delete knowledge bases"),
+                    canManageSkills: z.boolean().default(false).describe("Can create/delete skills"),
+                    canManageTools: z.boolean().default(false).describe("Can create/delete tools"),
+                    canManageSchedules: z.boolean().default(false).describe("Can create/delete schedules"),
+                    canManageChannels: z.boolean().default(false).describe("Can manage channels"),
+                    canManageAgents: z.boolean().default(false).describe("Can create/update agents"),
+                    canManageBucket: z.boolean().default(true).describe("Can manage file storage"),
+                    canExecutePython: z.boolean().default(true).describe("Can execute Python code"),
+                }),
+                func: async ({ agentId: targetAgentId, ...perms }) => {
+                    try {
+                        await agentService.updateSystemPermissions(targetAgentId, workspaceId, perms);
+                        return `Updated system permissions for agent ${targetAgentId}. systemLevelAccess: ${perms.systemLevelAccess}`;
+                    } catch (error) {
+                        logger.error({ error }, "system_set_agent_system_permissions failed");
+                        return `Failed to set permissions: ${error instanceof Error ? error.message : "Unknown error"}`;
+                    }
+                },
+            }),
+
+            new DynamicStructuredTool({
+                name: "system_assign_integration_to_agent",
+                description:
+                    "Assign a Composio integration (Gmail, Slack, LinkedIn, etc.) to an agent so it can use that integration's tools.",
+                schema: z.object({
+                    agentId: z.string().describe("ID of the agent"),
+                    integrationId: z.string().describe("ID of the integration to assign"),
+                }),
+                func: async ({ agentId: targetAgentId, integrationId }) => {
+                    try {
+                        await integrationService.assignToAgent(targetAgentId, integrationId, workspaceId);
+                        return `Assigned integration ${integrationId} to agent ${targetAgentId}.`;
+                    } catch (error) {
+                        logger.error({ error }, "system_assign_integration_to_agent failed");
+                        return `Failed to assign integration: ${error instanceof Error ? error.message : "Unknown error"}`;
+                    }
+                },
+            }),
+
+            new DynamicStructuredTool({
+                name: "system_remove_integration_from_agent",
+                description: "Remove a Composio integration from an agent.",
+                schema: z.object({
+                    agentId: z.string().describe("ID of the agent"),
+                    integrationId: z.string().describe("ID of the integration to remove"),
+                }),
+                func: async ({ agentId: targetAgentId, integrationId }) => {
+                    try {
+                        await integrationService.removeFromAgent(targetAgentId, integrationId, workspaceId);
+                        return `Removed integration ${integrationId} from agent ${targetAgentId}.`;
+                    } catch (error) {
+                        logger.error({ error }, "system_remove_integration_from_agent failed");
+                        return `Failed to remove integration: ${error instanceof Error ? error.message : "Unknown error"}`;
+                    }
+                },
+            }),
+
+            new DynamicStructuredTool({
+                name: "system_list_integrations",
+                description: "List all Composio integrations in the workspace (Gmail, Slack, LinkedIn, etc.).",
+                schema: z.object({}),
+                func: async () => {
+                    try {
+                        const integrations = await integrationService.getIntegrations(workspaceId);
+                        if (integrations.length === 0) return "No integrations in this workspace.";
+                        const lines = integrations.map(
+                            (i) => `- ${i.connectionLabel || i.name} (${i.composioToolkitSlug}) — ${i.status} — ID: ${i.id}`
+                        );
+                        return `Integrations (${integrations.length}):\n${lines.join("\n")}`;
+                    } catch (error) {
+                        logger.error({ error }, "system_list_integrations failed");
+                        return `Failed to list integrations: ${error instanceof Error ? error.message : "Unknown error"}`;
+                    }
+                },
+            }),
+
+            new DynamicStructuredTool({
+                name: "system_list_tools",
+                description: "List all tools (MCP and function) available in the workspace.",
+                schema: z.object({}),
+                func: async () => {
+                    try {
+                        const allTools = await toolService.getTools(workspaceId);
+                        if (allTools.length === 0) return "No tools in this workspace.";
+                        const lines = allTools.map(
+                            (t) => `- ${t.name} (${t.type}) — ID: ${t.id}${t.description ? ` — ${t.description}` : ""}`
+                        );
+                        return `Tools (${allTools.length}):\n${lines.join("\n")}`;
+                    } catch (error) {
+                        logger.error({ error }, "system_list_tools failed");
+                        return `Failed to list tools: ${error instanceof Error ? error.message : "Unknown error"}`;
+                    }
+                },
+            }),
+
+            new DynamicStructuredTool({
+                name: "system_list_kbs",
+                description: "List all knowledge bases in the workspace.",
+                schema: z.object({}),
+                func: async () => {
+                    try {
+                        const kbs = await kbService.getKBs(workspaceId);
+                        if (kbs.length === 0) return "No knowledge bases in this workspace.";
+                        const lines = kbs.map(
+                            (k) => `- ${k.name} — ID: ${k.id}${k.description ? ` — ${k.description}` : ""}`
+                        );
+                        return `Knowledge Bases (${kbs.length}):\n${lines.join("\n")}`;
+                    } catch (error) {
+                        logger.error({ error }, "system_list_kbs failed");
+                        return `Failed to list KBs: ${error instanceof Error ? error.message : "Unknown error"}`;
+                    }
+                },
+            }),
+
+            new DynamicStructuredTool({
+                name: "system_list_skills",
+                description: "List all skills in the workspace.",
+                schema: z.object({}),
+                func: async () => {
+                    try {
+                        const allSkills = await skillService.getSkills(workspaceId);
+                        if (allSkills.length === 0) return "No skills in this workspace.";
+                        const lines = allSkills.map(
+                            (s) => `- ${s.name} — ID: ${s.id}${s.description ? ` — ${s.description}` : ""}`
+                        );
+                        return `Skills (${allSkills.length}):\n${lines.join("\n")}`;
+                    } catch (error) {
+                        logger.error({ error }, "system_list_skills failed");
+                        return `Failed to list skills: ${error instanceof Error ? error.message : "Unknown error"}`;
                     }
                 },
             })

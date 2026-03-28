@@ -6,6 +6,7 @@ export const agentRepository = {
     async create(data: {
         workspaceId: string;
         name: string;
+        emoji?: string;
         systemPrompt?: string;
         model?: string;
         temperature?: number;
@@ -88,6 +89,7 @@ export const agentRepository = {
         workspaceId: string,
         data: Partial<{
             name: string;
+            emoji: string;
             systemPrompt: string;
             model: string;
             temperature: number;

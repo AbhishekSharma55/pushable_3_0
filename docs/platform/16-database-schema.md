@@ -36,6 +36,13 @@ Scheduling
   ├── schedules
   └── schedule_runs
 
+Projects & CEO
+  ├── projects
+  ├── project_milestones
+  ├── project_agents
+  ├── project_knowledge_bases
+  └── run_reports
+
 Browser Automation
   ├── browser_profiles
   ├── browser_sessions
@@ -377,6 +384,93 @@ CREATE TYPE ledger_type AS ENUM (
 | `duration_ms` | INTEGER | Nullable |
 | `created_at` | TIMESTAMP | NOT NULL, default NOW |
 | `updated_at` | TIMESTAMP | NOT NULL, default NOW |
+
+---
+
+## Projects & CEO
+
+### projects
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `name` | TEXT | NOT NULL |
+| `description` | TEXT | Nullable |
+| `instructions` | TEXT | Nullable |
+| `status` | TEXT | NOT NULL, default 'active' |
+| `created_by` | UUID | Nullable |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+| `updated_at` | TIMESTAMP | NOT NULL, default NOW |
+
+### project_milestones
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `project_id` | UUID | NOT NULL, FK → projects(id) CASCADE |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `title` | TEXT | NOT NULL |
+| `description` | TEXT | Nullable |
+| `status` | TEXT | NOT NULL, default 'pending' |
+| `target_date` | TIMESTAMP | Nullable |
+| `completed_at` | TIMESTAMP | Nullable |
+| `evaluation_notes` | TEXT | Nullable |
+| `sort_order` | INTEGER | NOT NULL, default 0 |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+| `updated_at` | TIMESTAMP | NOT NULL, default NOW |
+
+### project_agents
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `project_id` | UUID | NOT NULL, FK → projects(id) CASCADE |
+| `agent_id` | UUID | NOT NULL, FK → agents(id) CASCADE |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `role_in_project` | TEXT | Nullable |
+| `assigned_at` | TIMESTAMP | NOT NULL, default NOW |
+
+**Unique constraint:** `(project_id, agent_id)`
+
+### project_knowledge_bases
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `project_id` | UUID | NOT NULL, FK → projects(id) CASCADE |
+| `kb_id` | UUID | NOT NULL, FK → knowledge_bases(id) CASCADE |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `assigned_at` | TIMESTAMP | NOT NULL, default NOW |
+
+**Unique constraint:** `(project_id, kb_id)`
+
+### run_reports
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `agent_id` | UUID | NOT NULL, FK → agents(id) CASCADE |
+| `project_id` | UUID | Nullable, FK → projects(id) SET NULL |
+| `session_id` | UUID | Nullable |
+| `schedule_id` | UUID | Nullable |
+| `summary` | TEXT | Nullable |
+| `actions_taken` | TEXT | Nullable |
+| `outcomes` | TEXT | Nullable |
+| `issues` | TEXT | Nullable |
+| `metrics` | JSONB | Nullable |
+| `data` | JSONB | Nullable |
+| `run_type` | TEXT | Nullable |
+| `started_at` | TIMESTAMP | Nullable |
+| `completed_at` | TIMESTAMP | Nullable |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+
+### New columns on existing tables
+
+**agents:** Added `is_ceo` (BOOLEAN, default false) and `agent_type` (TEXT, default 'agent').
+
+**schedules:** Added `project_id` (UUID, Nullable, FK → projects(id) SET NULL).
 
 ---
 

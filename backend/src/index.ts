@@ -36,6 +36,9 @@ import { creditRoutes } from "./routes/credits.ts";
 import { blogRoutes } from "./routes/blogs.ts";
 import { contactRoutes } from "./routes/contact.ts";
 import { extensionDownloadRoutes } from "./routes/extension-download.ts";
+import { projectRoutes } from "./routes/projects.ts";
+import { runReportRoutes } from "./routes/runReports.ts";
+import { testingRoutes } from "./routes/testing.ts";
 import { browserService } from "./services/browser.service.ts";
 
 const app = Fastify({ logger: false });
@@ -104,6 +107,9 @@ await app.register(creditRoutes, { prefix: "/api" });
 await app.register(blogRoutes, { prefix: "/api" });
 await app.register(contactRoutes, { prefix: "/api" });
 await app.register(extensionDownloadRoutes, { prefix: "/api" });
+await app.register(projectRoutes, { prefix: "/api" });
+await app.register(runReportRoutes, { prefix: "/api" });
+await app.register(testingRoutes, { prefix: "/api" });
 
 // Webhook routes — NO auth, external platforms call these
 await app.register(webhookRoutes);

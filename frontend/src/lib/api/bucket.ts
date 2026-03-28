@@ -30,6 +30,9 @@ export const renameFile = (workspaceId: string, id: string, filename: string) =>
 export const moveFile = (workspaceId: string, id: string, folder: string) =>
     apiClient.put(`/api/bucket/files/${id}`, { folder }, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
 
+export const updateFileContent = (workspaceId: string, id: string, content: string) =>
+    apiClient.put(`/api/bucket/files/${id}/content`, { content }, { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
+
 export const listFolders = (workspaceId: string): Promise<string[]> =>
     apiClient.get('/api/bucket/folders', { headers: { 'x-workspace-id': workspaceId } }).then(r => r.data.data);
 

@@ -5,6 +5,8 @@ import { scheduleRepository } from "../repositories/schedule.repository.ts";
 import { scheduleRunRepository } from "../repositories/schedule-run.repository.ts";
 import { checkCredits, deductCredits, calculateCreditCost } from "../lib/credit-engine.ts";
 import { logger } from "../lib/logger.ts";
+import { runReportRepository } from "../repositories/runReport.repository.ts";
+import { projectRepository } from "../repositories/project.repository.ts";
 
 export async function processSchedule(data: {
     scheduleId: string;
@@ -76,11 +78,56 @@ export async function processSchedule(data: {
         // Update last run timestamp
         await scheduleRepository.updateLastRunAt(scheduleId);
 
+        // Generate run report
+        try {
+            const agentProjects = await projectRepository.getProjectsForAgent(agentId, workspaceId);
+            await runReportRepository.create({
+                workspaceId,
+                agentId,
+                projectId: agentProjects.length > 0 ? agentProjects[0].id : null,
+                scheduleId,
+                summary: resultText.substring(0, 1000),
+                actionsTaken: `Executed scheduled task: ${prompt.substring(0, 500)}`,
+                outcomes: resultText.substring(0, 2000),
+                issues: null,
+                metrics: {},
+                data: {},
+                runType: "scheduled",
+                startedAt: new Date(startTime),
+                completedAt: new Date(),
+            });
+        } catch (reportError) {
+            logger.warn({ reportError, scheduleId }, "Failed to create run report for scheduled run");
+        }
+
         logger.info({ scheduleId, resultLength: resultText.length, creditsUsed: estimatedCost }, "Scheduled prompt completed");
     } catch (error) {
         const errMsg = error instanceof Error ? error.message : "Unknown error";
         const durationMs = Date.now() - startTime;
         await scheduleRunRepository.updateFailed(run.id, errMsg, durationMs);
+
+        // Save failed run report
+        try {
+            const agentProjects = await projectRepository.getProjectsForAgent(agentId, workspaceId);
+            await runReportRepository.create({
+                workspaceId,
+                agentId,
+                projectId: agentProjects.length > 0 ? agentProjects[0].id : null,
+                scheduleId,
+                summary: `Scheduled run failed: ${errMsg}`,
+                actionsTaken: null,
+                outcomes: null,
+                issues: errMsg,
+                metrics: {},
+                data: {},
+                runType: "scheduled",
+                startedAt: new Date(startTime),
+                completedAt: new Date(),
+            });
+        } catch (reportError) {
+            logger.warn({ reportError, scheduleId }, "Failed to create failed run report");
+        }
+
         logger.error({ scheduleId, error: errMsg }, "Scheduled prompt failed");
     }
 }

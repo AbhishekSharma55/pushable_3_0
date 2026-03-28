@@ -10,10 +10,22 @@ function slugifyAgentFolder(name: string): string {
     return `/agent-${slug}`;
 }
 
+const AGENT_EMOJIS = [
+    "😎", "🤖", "🧠", "🦊", "🐱", "🐶", "🦁", "🐼", "🐸", "🐵",
+    "🦄", "🐲", "👻", "🤠", "🥷", "🧑‍💻", "🧑‍🔬", "🧑‍🚀", "🦸", "🧙",
+    "💀", "👽", "🤡", "🥸", "😈", "🫡", "🫠", "🤓", "😏", "🧐",
+    "🦅", "🐝", "🦈", "🐙", "🦉", "🐺", "🦇", "🐢", "🦎", "🐧",
+];
+
+function randomEmoji(): string {
+    return AGENT_EMOJIS[Math.floor(Math.random() * AGENT_EMOJIS.length)];
+}
+
 export const agentService = {
     async createAgent(
         data: {
             name: string;
+            emoji?: string;
             systemPrompt?: string;
             model?: string;
             temperature?: number;
@@ -22,7 +34,8 @@ export const agentService = {
         workspaceId: string
     ) {
         const bucketFolder = slugifyAgentFolder(data.name);
-        return agentRepository.create({ ...data, workspaceId, bucketFolder });
+        const emoji = data.emoji || randomEmoji();
+        return agentRepository.create({ ...data, emoji, workspaceId, bucketFolder });
     },
 
     async getAgents(workspaceId: string) {

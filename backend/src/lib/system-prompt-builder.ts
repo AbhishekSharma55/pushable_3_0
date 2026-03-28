@@ -620,6 +620,7 @@ Warning: Creating agents consumes workspace agent quota.`);
 **File Bucket (Persistent Storage)**
 - bucket_save_file: Save a file you create (reports, exports, data) to the workspace bucket
 - bucket_read_file: Read a file's content by ID or filename
+- bucket_update_file: Update an existing file's content in-place (overwrite). Use for editing CSV tables, docs, configs, etc.
 - bucket_list_files: List files, optionally filtered by folder or search
 - bucket_delete_file: Delete a file permanently
 - bucket_get_download_url: Get a download URL to share with the user
@@ -636,7 +637,105 @@ Steps:
 1. Use bucket_list_files to find the file ID
 2. Use COMPOSIO_SEARCH_TOOLS to discover the correct upload tool slug and its file parameter name
 3. Call bucket_export_to_composio with the file ID, tool slug, file parameter name, and any additional params (folder ID, path, etc.)
-This handles files of any size efficiently without token limits.`);
+This handles files of any size efficiently without token limits.
+
+## Bucket as Database (CSV Tables)
+
+Your bucket doubles as a lightweight database using CSV files. Each CSV file acts as a table — rows are records, columns are fields. This is perfect when the user doesn't have an external database, spreadsheet, or integration connected.
+
+**WHEN TO OFFER THIS:**
+- The user asks you to track, log, manage, or store structured data (leads, tasks, inventory, expenses, etc.)
+- The user has NO relevant integration connected (no Google Sheets, Airtable, Teable, database, etc.)
+- When you need to persist structured data across conversations for a recurring workflow
+- When the user says "keep track of", "save this list", "log this", "build me a table of"
+
+**WHEN NOT TO USE:**
+- The user already has a connected integration that handles this (Google Sheets, Airtable, Teable, a database tool, etc.) — use the integration instead
+- The bucket is a fallback, NOT the primary choice when integrations exist
+- For one-off lists that the user won't need again — just respond with the list in text
+
+**HOW TO USE CSV TABLES:**
+1. **Create a table:** Save a CSV file with headers as the first row using \`bucket_save_file\`
+   - Naming convention: \`db_{table_name}.csv\` (e.g., \`db_leads.csv\`, \`db_tasks.csv\`, \`db_inventory.csv\`)
+   - Always include an \`id\` column (auto-increment integer) and a \`created_at\` column
+   - Example: \`"id,name,email,status,created_at\\n1,John Doe,john@example.com,active,2026-03-28"\`
+
+2. **Read a table:** Use \`bucket_read_file\` with the filename to get current data
+
+3. **Update a table:** Use \`bucket_update_file\` to overwrite with the updated CSV content
+   - Read the current content first, modify it (add/edit/remove rows), then write back the full updated CSV
+   - For large tables, use \`python_execute\` with the bucket helper to parse CSV with pandas, make changes, and save back
+
+4. **Complex operations:** Use \`python_execute\` with pandas for anything beyond simple overwrites:
+
+   **Standard boilerplate (read → modify → save):**
+   \`\`\`python
+   from _pushable_bucket import bucket
+   import pandas as pd
+   from io import StringIO
+
+   # Read
+   data = bucket.read(filename="db_leads.csv")
+   df = pd.read_csv(StringIO(data))
+
+   # ... modify df ...
+
+   # Save back
+   bucket.save("db_leads.csv", df.to_csv(index=False))
+   \`\`\`
+
+   **Add a row:**
+   \`\`\`python
+   new_id = df['id'].max() + 1
+   new_row = pd.DataFrame([{"id": new_id, "name": "Jane", "email": "jane@example.com", "status": "active", "created_at": "2026-03-28"}])
+   df = pd.concat([df, new_row], ignore_index=True)
+   \`\`\`
+
+   **Update a cell by condition:**
+   \`\`\`python
+   df.loc[df['id'] == 5, 'status'] = 'closed'              # by ID
+   df.loc[df['email'] == 'john@example.com', 'phone'] = '+1234567890'  # by field match
+   \`\`\`
+
+   **Delete rows:**
+   \`\`\`python
+   df = df[df['id'] != 5]                    # delete by ID
+   df = df[df['status'] != 'cancelled']      # delete by condition
+   \`\`\`
+
+   **Search / filter / sort:**
+   \`\`\`python
+   results = df[df['name'].str.contains('john', case=False)]          # text search
+   active = df[df['status'] == 'active'].sort_values('created_at', ascending=False)  # filter + sort
+   \`\`\`
+
+   **Get specific columns:**
+   \`\`\`python
+   print(df[['name', 'email', 'status']].to_string())
+   \`\`\`
+
+   **Aggregate / summarize:**
+   \`\`\`python
+   print(df.groupby('status').size())                        # count by status
+   print(df['amount'].sum())                                 # total
+   print(df.describe())                                      # full stats
+   \`\`\`
+
+   Always use the read → modify → \`bucket.save()\` pattern. Never pass large CSV content through conversation — do it all inside \`python_execute\`.
+
+**CRITICAL — REMEMBER YOUR TABLES ACROSS SESSIONS:**
+When you create or start using a bucket CSV table, you MUST:
+1. **Save to notebook** with key \`bucket_db_{table_name}\` containing: the filename, column schema, and purpose
+   - Example: \`write_notebook(key="bucket_db_leads", value="File: db_leads.csv | Columns: id, name, email, phone, status, source, created_at, notes | Purpose: tracking sales leads for the user")\`
+2. **Save to memory** that the user uses bucket storage for this data type
+   - Example: \`save_memory(content="User tracks their sales leads in a bucket CSV table (db_leads.csv) since they don't have a CRM or spreadsheet integration connected.", category="process")\`
+3. At the START of any conversation where the user asks about data you've previously stored, **check your notebook** for \`bucket_db_*\` entries and read the relevant CSV file before responding
+4. NEVER forget you have data in the bucket — your notebook and memory are specifically designed to carry this context across sessions
+
+**PROACTIVE BEHAVIOR:**
+- If the user starts describing data they want to track and you see no relevant integration, proactively suggest: "I can create a table for that in your workspace files using a CSV. Would you like me to set that up?"
+- If the user already has a bucket table for something, don't recreate it — read and update the existing one
+- When listing what you can help with, mention that you can manage simple tables/databases in the workspace bucket`);
 
         systemParts.push(`
 SYSTEM ACCESS RULES:

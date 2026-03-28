@@ -25,6 +25,7 @@ import type { Agent } from '@/types';
 
 const agentSchema = z.object({
     name: z.string().min(1, 'Name is required'),
+    emoji: z.string().optional(),
     systemPrompt: z.string().optional(),
     model: z.string().min(1, 'Model is required'),
     temperature: z.number().min(0).max(2).default(0.7),
@@ -61,6 +62,7 @@ export function CreateAgentSheet({
         resolver: zodResolver(agentSchema),
         defaultValues: {
             name: '',
+            emoji: '',
             systemPrompt: '',
             model: '',
             temperature: 0.7,
@@ -77,6 +79,7 @@ export function CreateAgentSheet({
         if (agent) {
             reset({
                 name: agent.name,
+                emoji: agent.emoji ?? '',
                 systemPrompt: agent.systemPrompt ?? '',
                 model: agent.model,
                 temperature: agent.temperature,
@@ -85,6 +88,7 @@ export function CreateAgentSheet({
         } else {
             reset({
                 name: '',
+                emoji: '',
                 systemPrompt: '',
                 model: '',
                 temperature: 0.7,
@@ -124,17 +128,29 @@ export function CreateAgentSheet({
                     </SheetDescription>
                 </SheetHeader>
                 <form onSubmit={handleSubmit(onSubmit)} className="space-y-6 mt-6 px-1">
-                    {/* Name */}
-                    <div className="space-y-2">
-                        <Label htmlFor="agent-name">Name</Label>
-                        <Input
-                            id="agent-name"
-                            placeholder="e.g. Customer Support Agent"
-                            {...register('name')}
-                        />
-                        {errors.name && (
-                            <p className="text-sm text-destructive">{errors.name.message}</p>
-                        )}
+                    {/* Name + Emoji */}
+                    <div className="flex gap-3">
+                        <div className="space-y-2 flex-1">
+                            <Label htmlFor="agent-name">Name</Label>
+                            <Input
+                                id="agent-name"
+                                placeholder="e.g. Customer Support Agent"
+                                {...register('name')}
+                            />
+                            {errors.name && (
+                                <p className="text-sm text-destructive">{errors.name.message}</p>
+                            )}
+                        </div>
+                        <div className="space-y-2 w-20">
+                            <Label htmlFor="agent-emoji">Emoji</Label>
+                            <Input
+                                id="agent-emoji"
+                                placeholder="😎"
+                                className="text-center text-lg"
+                                maxLength={2}
+                                {...register('emoji')}
+                            />
+                        </div>
                     </div>
 
                     {/* System Prompt */}

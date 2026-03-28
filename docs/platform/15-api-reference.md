@@ -56,6 +56,7 @@ All authenticated endpoints require:
 | `DELETE` | `/api/agents/:id` | JWT + WS | Delete agent |
 | `PUT` | `/api/agents/:id/system-permissions` | JWT + WS | Update system permissions |
 | `GET` | `/api/agents/:id/debug/context` | JWT + WS | Get memories and notebook |
+| `GET` | `/api/agents/ceo` | JWT + WS | Get or create CEO agent |
 
 ---
 
@@ -153,6 +154,35 @@ All authenticated endpoints require:
 
 ---
 
+## Projects
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/projects` | List all projects |
+| GET | `/api/projects/:id` | Get project with milestones, agents, KBs |
+| POST | `/api/projects` | Create project |
+| PUT | `/api/projects/:id` | Update project |
+| DELETE | `/api/projects/:id` | Delete project |
+| POST | `/api/projects/:id/agents` | Assign agent to project |
+| DELETE | `/api/projects/:id/agents/:agentId` | Remove agent |
+| POST | `/api/projects/:id/milestones` | Create milestone |
+| PUT | `/api/projects/:id/milestones/:milestoneId` | Update milestone |
+| DELETE | `/api/projects/:id/milestones/:milestoneId` | Delete milestone |
+| POST | `/api/projects/:id/kb` | Link KB to project |
+| DELETE | `/api/projects/:id/kb/:kbId` | Unlink KB |
+| GET | `/api/projects/:id/reports` | Get run reports for project |
+
+---
+
+## Run Reports
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/run-reports` | List run reports (filterable) |
+| GET | `/api/run-reports/:id` | Get single run report |
+
+---
+
 ## Integrations
 
 | Method | Path | Auth | Description |
@@ -241,6 +271,7 @@ All authenticated endpoints require:
 | `GET` | `/api/bucket/files/:id/download` | JWT + WS | Download file |
 | `DELETE` | `/api/bucket/files/:id` | JWT + WS | Delete file |
 | `PUT` | `/api/bucket/files/:id` | JWT + WS | Rename or move file |
+| `PUT` | `/api/bucket/files/:id/content` | JWT + WS | Update file content (text files only, body: `{ content: string }`) |
 | `GET` | `/api/bucket/folders` | JWT + WS | List folders |
 | `POST` | `/api/bucket/folders` | JWT + WS | Create folder |
 | `GET` | `/api/bucket/usage` | JWT + WS | Get storage usage |

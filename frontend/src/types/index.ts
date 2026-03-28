@@ -24,6 +24,7 @@ export interface Agent {
     id: string;
     workspaceId: string;
     name: string;
+    emoji: string | null;
     systemPrompt: string | null;
     model: string;
     temperature: number;
@@ -41,6 +42,9 @@ export interface Agent {
     browserType: 'cloud' | 'extension';
     browserEnabled: boolean;
     browserProxyId: string | null;
+    isCeo: boolean;
+    isTester: boolean;
+    agentType: 'ceo' | 'worker' | 'tester';
     createdAt: string;
     updatedAt: string;
 }
@@ -311,6 +315,125 @@ export interface BrowserSession {
     status: 'starting' | 'active' | 'closed' | 'error';
     createdAt: string;
     closedAt: string | null;
+}
+
+// --- Projects ---
+
+export interface Project {
+    id: string;
+    workspaceId: string;
+    name: string;
+    description: string | null;
+    instructions: string | null;
+    status: 'active' | 'paused' | 'completed' | 'archived';
+    createdBy: string | null;
+    createdAt: string;
+    updatedAt: string;
+    milestones?: ProjectMilestone[];
+    agents?: ProjectAgent[];
+    knowledgeBases?: ProjectKB[];
+}
+
+export interface ProjectMilestone {
+    id: string;
+    projectId: string;
+    workspaceId: string;
+    title: string;
+    description: string | null;
+    status: 'not_started' | 'in_progress' | 'completed' | 'blocked';
+    targetDate: string | null;
+    completedAt: string | null;
+    evaluationNotes: string | null;
+    sortOrder: number;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface ProjectAgent {
+    id: string;
+    projectId: string;
+    agentId: string;
+    roleInProject: string | null;
+    assignedAt: string;
+    agent?: {
+        id: string;
+        name: string;
+        model: string;
+        isCeo: boolean;
+        agentType: string;
+    };
+}
+
+export interface ProjectKB {
+    id: string;
+    projectId: string;
+    kbId: string;
+    assignedAt: string;
+    knowledgeBase?: {
+        id: string;
+        name: string;
+        description: string | null;
+    };
+}
+
+export interface RunReport {
+    id: string;
+    workspaceId: string;
+    agentId: string;
+    projectId: string | null;
+    sessionId: string | null;
+    scheduleId: string | null;
+    summary: string;
+    actionsTaken: string | null;
+    outcomes: string | null;
+    issues: string | null;
+    metrics: Record<string, unknown>;
+    data: Record<string, unknown>;
+    runType: 'scheduled' | 'on_demand' | 'ceo_triggered';
+    startedAt: string;
+    completedAt: string | null;
+    createdAt: string;
+    agent?: { id: string; name: string };
+}
+
+// --- Testing ---
+
+export interface TestSuite {
+    id: string;
+    workspaceId: string;
+    agentId: string;
+    name: string;
+    description: string | null;
+    status: 'draft' | 'running' | 'completed';
+    createdBy: string | null;
+    createdAt: string;
+    updatedAt: string;
+    agent?: { id: string; name: string; emoji: string | null };
+    cases?: TestCase[];
+    stats?: TestStats;
+}
+
+export interface TestCase {
+    id: string;
+    suiteId: string;
+    workspaceId: string;
+    title: string;
+    input: string;
+    expectedBehavior: string;
+    actualResponse: string | null;
+    status: 'pending' | 'passed' | 'failed' | 'error';
+    evaluationNotes: string | null;
+    executionTimeMs: number | null;
+    createdAt: string;
+    executedAt: string | null;
+}
+
+export interface TestStats {
+    total: number;
+    passed: number;
+    failed: number;
+    pending: number;
+    error: number;
 }
 
 export interface BrowserProxy {

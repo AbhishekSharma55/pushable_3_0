@@ -20,6 +20,8 @@ import {
     LogOut,
     User,
     FolderOpen,
+    Layers,
+    FlaskConical,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -52,7 +54,9 @@ import type { Workspace } from '@/types';
 const navItems = [
     { label: 'Dashboard', href: '/', icon: LayoutDashboard },
     { label: 'Agents', href: '/agents', icon: Bot },
-    {label: 'Integrations', href: '/integrations', icon: Blocks },
+    { label: 'Projects', href: '/projects', icon: Layers },
+    { label: 'Testing', href: '/testing', icon: FlaskConical },
+    { label: 'Integrations', href: '/integrations', icon: Blocks },
     { label: 'Extension', href: '/extension-settings', icon: PlugZap },
     { label: 'Knowledge Base', href: '/kb', icon: BookOpen },
     { label: 'Files', href: '/files', icon: FolderOpen },

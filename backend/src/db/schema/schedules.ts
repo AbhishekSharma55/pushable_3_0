@@ -9,6 +9,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { workspaces } from "./workspaces.ts";
 import { agents } from "./agents.ts";
+import { projects } from "./projects.ts";
 
 export const scheduleTypeEnum = pgEnum("schedule_type", [
     "natural",
@@ -43,4 +44,5 @@ export const schedules = pgTable("schedules", {
     scheduleType: scheduleTypeEnum("schedule_type").default("natural").notNull(),
     presetKey: text("preset_key"),
     nextRunDescription: text("next_run_description"),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
 });

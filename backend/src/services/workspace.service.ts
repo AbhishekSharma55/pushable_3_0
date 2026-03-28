@@ -1,6 +1,9 @@
 import { workspaceRepository } from "../repositories/workspace.repository.ts";
+import { ceoService } from "./ceo.service.ts";
+import { testerService } from "./tester.service.ts";
 import { ForbiddenError } from "../lib/errors.ts";
 import { randomUUID } from "crypto";
+import { logger } from "../lib/logger.ts";
 
 function generateSlug(name: string): string {
     const base = name.toLowerCase().replace(/\s+/g, "-");
@@ -33,6 +36,18 @@ export const workspaceService = {
 
         // Create credits row
         await workspaceRepository.createCredits(workspace.id);
+
+        // Auto-create CEO and Tester agents
+        try {
+            await ceoService.getOrCreateCEO(workspace.id);
+        } catch (error) {
+            logger.warn({ error, workspaceId: workspace.id }, "Failed to auto-create CEO agent for workspace");
+        }
+        try {
+            await testerService.getOrCreateTester(workspace.id);
+        } catch (error) {
+            logger.warn({ error, workspaceId: workspace.id }, "Failed to auto-create Tester agent for workspace");
+        }
 
         return workspace;
     },

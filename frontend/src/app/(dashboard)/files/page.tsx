@@ -17,6 +17,8 @@ import {
     MoreVertical,
     Pencil,
     FolderInput,
+    Save,
+    Eye,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -50,7 +52,7 @@ import { MarkdownPreview } from '@/components/artifact/previews/markdown-preview
 import { CsvPreview } from '@/components/artifact/previews/csv-preview';
 import { HtmlPreview } from '@/components/artifact/previews/html-preview';
 import { useActiveWorkspace } from '@/hooks/use-active-workspace';
-import { listFiles, listFolders, uploadFile, deleteFile, renameFile, moveFile, getStorageUsage, getFileDownloadUrl } from '@/lib/api/bucket';
+import { listFiles, listFolders, uploadFile, deleteFile, renameFile, moveFile, getStorageUsage, getFileDownloadUrl, updateFileContent } from '@/lib/api/bucket';
 import { getAgents } from '@/lib/api/agents';
 import { getToken } from '@/lib/auth';
 import { API_URL } from '@/lib/constants';
@@ -68,6 +70,16 @@ function getFileIcon(mimeType: string) {
     if (mimeType === 'application/pdf') return <FileText className="h-4 w-4 text-red-500" />;
     if (mimeType.startsWith('text/')) return <FileText className="h-4 w-4 text-green-500" />;
     return <FileIcon className="h-4 w-4 text-muted-foreground" />;
+}
+
+function isFileEditable(file: BucketFile): boolean {
+    const mime = file.mimeType;
+    const filename = file.filename.toLowerCase();
+    if (mime.startsWith('text/')) return true;
+    if (['application/json', 'application/xml', 'application/javascript', 'application/xhtml+xml'].includes(mime)) return true;
+    // Extension fallback for common editable types
+    if (/\.(txt|md|mdx|html|htm|css|js|ts|jsx|tsx|json|xml|csv|yaml|yml|toml|ini|cfg|conf|sh|py|rb|go|rs|java|c|cpp|h|hpp|sql|graphql|env|log)$/.test(filename)) return true;
+    return false;
 }
 
 function getSourceLabel(source: string) {
@@ -105,6 +117,11 @@ export default function FilesPage() {
     const [previewContent, setPreviewContent] = useState<string | null>(null);
     const [previewBlobUrl, setPreviewBlobUrl] = useState<string | null>(null);
     const [previewLoading, setPreviewLoading] = useState(false);
+
+    // Edit mode
+    const [isEditing, setIsEditing] = useState(false);
+    const [editContent, setEditContent] = useState('');
+    const [saving, setSaving] = useState(false);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -259,6 +276,24 @@ export default function FilesPage() {
         setPreviewFile(null);
         setPreviewContent(null);
         setPreviewBlobUrl(null);
+        setIsEditing(false);
+        setEditContent('');
+    };
+
+    const handleSaveContent = async () => {
+        if (!workspace?.id || !previewFile) return;
+        setSaving(true);
+        try {
+            await updateFileContent(workspace.id, previewFile.id, editContent);
+            setPreviewContent(editContent);
+            setIsEditing(false);
+            toast.success('File saved');
+            fetchFiles(); // refresh file list to update size
+        } catch {
+            toast.error('Failed to save file');
+        } finally {
+            setSaving(false);
+        }
     };
 
     const renderPreviewContent = () => {
@@ -270,6 +305,18 @@ export default function FilesPage() {
             );
         }
         if (!previewFile) return null;
+
+        // Edit mode — show textarea
+        if (isEditing && previewContent !== null) {
+            return (
+                <textarea
+                    value={editContent}
+                    onChange={(e) => setEditContent(e.target.value)}
+                    className="w-full h-full min-h-[60vh] bg-background text-foreground font-mono text-sm p-4 rounded-lg border border-border resize-none focus:outline-none focus:ring-2 focus:ring-primary/50"
+                    spellCheck={false}
+                />
+            );
+        }
 
         const mime = previewFile.mimeType;
         const filename = previewFile.filename.toLowerCase();
@@ -631,11 +678,32 @@ export default function FilesPage() {
                     <div className="flex-1 overflow-auto min-h-0 rounded-lg border border-border bg-muted/20 p-4">
                         {renderPreviewContent()}
                     </div>
-                    <DialogFooter>
-                        <Button variant="outline" size="sm" onClick={() => { if (previewFile) handleDownload(previewFile); }} className="gap-1.5">
-                            <Download className="h-4 w-4" /> Download
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={closePreview}>Close</Button>
+                    <DialogFooter className="flex-row gap-2 sm:justify-between">
+                        <div className="flex gap-2">
+                            <Button variant="outline" size="sm" onClick={() => { if (previewFile) handleDownload(previewFile); }} className="gap-1.5">
+                                <Download className="h-4 w-4" /> Download
+                            </Button>
+                        </div>
+                        <div className="flex gap-2">
+                            {previewFile && isFileEditable(previewFile) && previewContent !== null && (
+                                isEditing ? (
+                                    <>
+                                        <Button variant="outline" size="sm" onClick={() => setIsEditing(false)} className="gap-1.5">
+                                            <Eye className="h-4 w-4" /> Preview
+                                        </Button>
+                                        <Button size="sm" onClick={handleSaveContent} disabled={saving} className="gap-1.5">
+                                            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                                            Save
+                                        </Button>
+                                    </>
+                                ) : (
+                                    <Button variant="outline" size="sm" onClick={() => { setEditContent(previewContent); setIsEditing(true); }} className="gap-1.5">
+                                        <Pencil className="h-4 w-4" /> Edit
+                                    </Button>
+                                )
+                            )}
+                            <Button variant="outline" size="sm" onClick={closePreview}>Close</Button>
+                        </div>
                     </DialogFooter>
                 </DialogContent>
             </Dialog>

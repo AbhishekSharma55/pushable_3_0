@@ -43,6 +43,8 @@ agents
   ├── browserType           TEXT (default: "cloud" | "extension")
   ├── browserEnabled        BOOLEAN (default: true)
   ├── browserProxyId        UUID (FK → browser_proxies, set null on delete)
+  ├── isCeo                 BOOLEAN (default: false)
+  ├── agentType             TEXT (default: "agent", values: "agent" | "ceo")
   ├── createdAt             TIMESTAMP
   └── updatedAt             TIMESTAMP
 ```
@@ -369,6 +371,17 @@ Deleting an agent cascades to:
 - The agent's **graph cache** is invalidated
 
 The agent's **browser profile** and **browser sessions** have their `agentId` set to null (not deleted) to allow cleanup.
+
+---
+
+## CEO Agent
+
+Each workspace has exactly one CEO agent, auto-created on first access via `GET /api/agents/ceo`.
+
+- **One per workspace** -- The CEO is identified by `is_ceo = true`. If none exists, it is created automatically with sensible defaults.
+- **CEO-specific system prompt** -- The CEO receives a specialized system prompt focused on project management, delegation, and oversight rather than task execution.
+- **CEO tools only** -- The CEO gets CEO tools (project/milestone/agent management, `ceo_message_agent`) plus system tools. It does NOT receive browser tools, planning tools, or execution-level tools. The CEO manages and delegates.
+- **Full system permissions** -- The CEO is created with all system permissions enabled (`systemLevelAccess`, `canManageKB`, `canManageSkills`, `canManageTools`, `canManageSchedules`, `canManageChannels`, `canManageAgents`, `canManageBucket`).
 
 ---
 

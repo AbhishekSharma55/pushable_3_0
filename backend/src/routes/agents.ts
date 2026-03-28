@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { agentService } from "../services/agent.service.ts";
+import { ceoService } from "../services/ceo.service.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
 import { invalidateGraphCache, getStore } from "../graphs/agent.graph.ts";
 import { memoryRepository } from "../repositories/memory.repository.ts";
@@ -8,6 +9,7 @@ import { logger } from "../lib/logger.ts";
 
 const createAgentSchema = z.object({
     name: z.string().min(1, "Name is required"),
+    emoji: z.string().optional(),
     systemPrompt: z.string().optional(),
     model: z.string().default("gpt-4o-mini"),
     temperature: z.number().min(0).max(2).default(0.7),
@@ -16,6 +18,7 @@ const createAgentSchema = z.object({
 
 const updateAgentSchema = z.object({
     name: z.string().min(1).optional(),
+    emoji: z.string().nullable().optional(),
     systemPrompt: z.string().optional(),
     model: z.string().optional(),
     temperature: z.number().min(0).max(2).optional(),
@@ -55,6 +58,13 @@ export async function agentRoutes(fastify: FastifyInstance) {
                 "MISSING_WORKSPACE"
             );
         }
+    });
+
+    // GET /agents/ceo — get or create the CEO agent for this workspace
+    fastify.get("/agents/ceo", async (request) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const ceo = await ceoService.getOrCreateCEO(workspaceId);
+        return { data: ceo };
     });
 
     // GET /agents

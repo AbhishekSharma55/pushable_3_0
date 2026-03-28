@@ -32,6 +32,10 @@ import { buildNotebookTools, loadNotebookEntries } from "../tools/notebook.tools
 import { buildBucketTools } from "../tools/bucket.tools.ts";
 import { buildBucketComposioBridgeTool } from "../tools/bucket-composio-bridge.tools.ts";
 import { buildPythonTools } from "../tools/python.tools.ts";
+import { buildCEOTools } from "../tools/ceo.tools.ts";
+import { CEO_SYSTEM_PROMPT } from "../lib/ceo-prompt.ts";
+import { buildTesterTools } from "../tools/tester.tools.ts";
+import { TESTER_SYSTEM_PROMPT } from "../lib/tester-prompt.ts";
 import { memoryRepository } from "../repositories/memory.repository.ts";
 import { buildSystemPrompt } from "../lib/system-prompt-builder.ts";
 import { browserRepository } from "../repositories/browser.repository.ts";
@@ -827,6 +831,7 @@ export async function createAgentGraph(
     });
 
     // --- Fetch all capability data in parallel ---
+    // CEO and Tester agents get access to ALL workspace resources (no permission filtering)
     const [
         allowedToolIds,
         allowedAgentIds,
@@ -834,14 +839,23 @@ export async function createAgentGraph(
         allowedSkillIds,
         browserProfile,
         agentIntegrations,
-    ] = await Promise.all([
-        permissionRepository.getAllowedResourceIds(agentId, workspaceId, "tool"),
-        permissionRepository.getAllowedResourceIds(agentId, workspaceId, "agent"),
-        permissionRepository.getAllowedResourceIds(agentId, workspaceId, "kb"),
-        permissionRepository.getAllowedResourceIds(agentId, workspaceId, "skill"),
-        browserRepository.findProfileByAgentId(agentId, workspaceId),
-        integrationRepository.findByAgent(agentId, workspaceId),
-    ]);
+    ] = (agent.isCeo || agent.isTester)
+        ? await Promise.all([
+            toolRepository.findByWorkspace(workspaceId).then((t) => t.map((r) => r.id)),
+            agentRepository.findByWorkspace(workspaceId).then((a) => a.filter((r) => r.id !== agentId).map((r) => r.id)),
+            kbRepository.findKBsByWorkspace(workspaceId).then((k) => k.map((r) => r.id)),
+            skillRepository.findByWorkspace(workspaceId).then((s) => s.map((r) => r.id)),
+            browserRepository.findProfileByAgentId(agentId, workspaceId),
+            integrationRepository.findByWorkspace(workspaceId).then((i) => i.filter((r) => r.status === "active")),
+        ])
+        : await Promise.all([
+            permissionRepository.getAllowedResourceIds(agentId, workspaceId, "tool"),
+            permissionRepository.getAllowedResourceIds(agentId, workspaceId, "agent"),
+            permissionRepository.getAllowedResourceIds(agentId, workspaceId, "kb"),
+            permissionRepository.getAllowedResourceIds(agentId, workspaceId, "skill"),
+            browserRepository.findProfileByAgentId(agentId, workspaceId),
+            integrationRepository.findByAgent(agentId, workspaceId),
+        ]);
 
     const langchainTools: DynamicStructuredTool[] = [];
     const mcpClients: MultiServerMCPClient[] = [];
@@ -1316,6 +1330,16 @@ export async function createAgentGraph(
         langchainTools.push(...buildSystemTools({ agentId, workspaceId, permissions: systemPermissions }));
     }
 
+    // --- 7a. CEO tools (only for CEO agents) ---
+    if (agent.isCeo) {
+        langchainTools.push(...buildCEOTools({ agentId, workspaceId }));
+    }
+
+    // --- 7a2. Tester tools (only for Tester agents) ---
+    if (agent.isTester) {
+        langchainTools.push(...buildTesterTools({ agentId, workspaceId }));
+    }
+
     // --- 7b. Bucket tools (always enabled for all agents) ---
     langchainTools.push(...buildBucketTools({ workspaceId, agentId, sessionId: chatSessionId, agentFolder: agent.bucketFolder || undefined }));
 
@@ -1380,14 +1404,25 @@ export async function createAgentGraph(
         bucketFolder: agent.bucketFolder || undefined,
     };
 
-    const baseSystemPrompt = buildSystemPrompt(
-        {
-            name: agent.name,
-            role: agent.systemPrompt?.split("\n")[0] || "",
-            description: agent.systemPrompt || "",
-        },
-        capabilities
-    );
+    // For CEO/Tester agents, use their specialized system prompts
+    const baseSystemPrompt = agent.isCeo
+        ? CEO_SYSTEM_PROMPT + "\n\n" + buildSystemPrompt(
+            { name: "CEO", role: "Workspace CEO — strategic manager", description: "" },
+            capabilities
+        )
+        : agent.isTester
+        ? TESTER_SYSTEM_PROMPT + "\n\n" + buildSystemPrompt(
+            { name: "Tester", role: "Workspace QA Engineer — agent testing", description: "" },
+            capabilities
+        )
+        : buildSystemPrompt(
+            {
+                name: agent.name,
+                role: agent.systemPrompt?.split("\n")[0] || "",
+                description: agent.systemPrompt || "",
+            },
+            capabilities
+        );
 
     logger.info(
         {
@@ -1591,6 +1626,7 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
 - You are **working through data** and need to track position (e.g. last row processed) → save it
 - You found a **name-to-ID mapping** you'll need again (e.g. "Leads Sheet" → "1Bxi...") → save it
 - You **successfully used a Composio tool slug** → save the slug + parameter pattern (e.g. key: \`composio_gmail_list\`, value: \`"slug: GMAIL_LIST_EMAILS, params: {max_results, label_ids, q}"\`) so you can skip COMPOSIO_SEARCH_TOOLS next time
+- You **created or used a bucket CSV table** as a database → save with key \`bucket_db_{table_name}\` including filename, column schema, and purpose so you can find and use it in future sessions
 - Any **operational reference** you'd lose if the conversation restarted → save it
 
 ### Before searching for resources:
@@ -1600,6 +1636,7 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
 
 ### Key format:
 - Use descriptive snake_case keys: \`leads_sheet_id\`, \`email_template_doc_id\`, \`crm_api_base\`
+- For bucket database tables: \`bucket_db_leads\`, \`bucket_db_tasks\`, \`bucket_db_inventory\`
 - Include a brief description when saving so future-you knows what it's for`);
         }
 

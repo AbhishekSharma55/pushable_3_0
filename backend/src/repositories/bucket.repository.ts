@@ -137,6 +137,21 @@ export const bucketRepository = {
         return result[0] ?? null;
     },
 
+    async findByFilenameInFolder(filename: string, workspaceId: string, folder: string) {
+        const result = await db
+            .select()
+            .from(bucketFiles)
+            .where(
+                and(
+                    eq(bucketFiles.filename, filename),
+                    eq(bucketFiles.workspaceId, workspaceId),
+                    eq(bucketFiles.folder, folder),
+                )
+            )
+            .limit(1);
+        return result[0] ?? null;
+    },
+
     async updateFile(
         id: string,
         workspaceId: string,

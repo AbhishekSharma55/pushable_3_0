@@ -64,8 +64,8 @@ export const bucketService = {
             );
         }
 
-        // Check for duplicate filename in the same folder
-        const existing = await bucketRepository.findByFilename(filename, workspaceId, [folder]);
+        // Check for duplicate filename in the exact same folder (not subfolders)
+        const existing = await bucketRepository.findByFilenameInFolder(filename, workspaceId, folder);
         if (existing) {
             throw new AppError(
                 `File "${filename}" already exists in folder "${folder}". Use a different name, or delete/update the existing file.`,

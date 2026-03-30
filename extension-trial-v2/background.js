@@ -306,24 +306,66 @@ async function handleType(tabId, selector, text) {
   const attached = await cdpAttach(tabId);
   if (!attached) throw new Error('Cannot attach CDP');
 
-  // Click to focus
+  // Step 1: Click to focus
   const entry = resolveBackendNode(tabId, selector);
   if (entry) {
     try {
       const { x, y } = await getNodeCenter(tabId, entry.backendDOMNodeId);
       await cdpMouseClick(tabId, x, y);
-      await new Promise(r => setTimeout(r, 100));
     } catch { /* focus best-effort */ }
   }
 
-  // Ctrl+A to select all existing content, then Delete to clear it
+  // Step 2: Wait for lazy editor activation (Reddit, LinkedIn, etc.)
+  await new Promise(r => setTimeout(r, 600));
+
+  // Step 3: Ensure an editable element is focused
+  await cdpSend(tabId, 'Runtime.evaluate', {
+    expression: `(() => {
+      let el = document.activeElement;
+      while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+      if (el && (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) return true;
+      const selectors = '[contenteditable="true"], [contenteditable=""], textarea:not([disabled]), .ProseMirror, .ql-editor, [role="textbox"][contenteditable]';
+      function find(root, d) {
+        if (d > 8) return null;
+        try { for (const c of root.querySelectorAll(selectors)) { if (c.getBoundingClientRect().width > 0) { c.focus(); return c; } }
+          for (const c of root.querySelectorAll('*')) { if (c.shadowRoot) { const f = find(c.shadowRoot, d+1); if (f) return f; } }
+        } catch {} return null;
+      }
+      find(document, 0); return true;
+    })()`,
+    returnByValue: true,
+  }).catch(() => {});
+
+  // Step 4: Ctrl+A + Delete
   await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', modifiers: 2, code: 'KeyA', windowsVirtualKeyCode: 65 });
   await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp',   key: 'a', modifiers: 2, code: 'KeyA', windowsVirtualKeyCode: 65 });
   await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
   await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp',   key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
+  await new Promise(r => setTimeout(r, 50));
 
-  // Insert text atomically — works for inputs, textareas, contentEditable, Prosemirror, Slate, etc.
+  // Step 5: Insert text
   await cdpSend(tabId, 'Input.insertText', { text });
+
+  // Step 6: Verify and fallback to char-by-char if needed
+  await new Promise(r => setTimeout(r, 200));
+  const verify = await cdpSend(tabId, 'Runtime.evaluate', {
+    expression: `(() => {
+      let el = document.activeElement;
+      while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+      if (!el) return false;
+      const c = el.isContentEditable ? (el.innerText || '').trim() : (el.value || '').trim();
+      return c.length > 0;
+    })()`,
+    returnByValue: true,
+  }).catch(() => ({ result: { value: true } }));
+
+  if (!verify?.result?.value) {
+    for (const char of text) {
+      await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: char, text: char, unmodifiedText: char });
+      await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: char });
+      await new Promise(r => setTimeout(r, 40));
+    }
+  }
 
   return { ok: true };
 }
@@ -345,8 +387,7 @@ async function handleTypeChar(tabId, selector, text, delay = 80) {
 
   for (const char of text) {
     await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: char, text: char, unmodifiedText: char });
-    await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'char',    key: char, text: char, unmodifiedText: char });
-    await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp',   key: char, text: char, unmodifiedText: char });
+    await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp',   key: char });
     if (delay > 0) await new Promise(r => setTimeout(r, delay));
   }
 
@@ -808,6 +849,96 @@ async function executeCommand(cmd, tabId) {
         break;
       }
 
+      /* ── Click by visible text ── */
+      case 'clickText': {
+        const searchText = (cmd.text || '').trim();
+        if (!searchText) { sendResult(cmd, false, null, 'No text provided'); break; }
+
+        let urlBefore = '';
+        try { const tb = await chrome.tabs.get(tabId); urlBefore = tb.url || ''; } catch {}
+
+        try {
+          const [{ result: found }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: (text) => {
+              const SUBMIT_WORDS = ['send', 'comment', 'post', 'submit', 'reply', 'publish', 'save', 'done', 'ok', 'confirm'];
+              const isSubmitAction = SUBMIT_WORDS.includes(text.toLowerCase().trim());
+              const candidates = [];
+              function walk(root, depth) {
+                if (depth > 8) return;
+                try {
+                  for (const el of root.querySelectorAll('*')) {
+                    const elText = (el.textContent || '').trim().replace(/\s+/g, ' ');
+                    if (!elText.toLowerCase().includes(text.toLowerCase())) continue;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
+                    if (rect.width > window.innerWidth * 0.8 && rect.height > window.innerHeight * 0.5) continue;
+                    try { const s = getComputedStyle(el); if (s.display === 'none' || s.visibility === 'hidden') continue; } catch { continue; }
+                    const tag = el.tagName;
+                    const hasPopup = el.getAttribute('aria-haspopup');
+                    if (hasPopup === 'true' || hasPopup === 'menu') continue;
+                    if (tag === 'BUTTON' && el.getAttribute('aria-expanded') !== null) continue;
+                    let score = 0;
+                    if (tag === 'A' && el.href) { score += 20; if (el.href.includes('/in/')) score += 10; }
+                    else if (el.tabIndex >= 0 && !['BUTTON', 'A', 'INPUT'].includes(tag)) score += 15;
+                    else if (tag === 'A') score += 12;
+                    else if (tag === 'BUTTON') score += 6;
+                    else if (el.getAttribute('role') === 'button') score += 6;
+                    score += Math.max(0, 5 - Math.floor(elText.length / 50));
+                    if (elText.trim().toLowerCase() === text.toLowerCase()) score += 10;
+                    if (elText.trim().toLowerCase().startsWith(text.toLowerCase())) score += 7;
+                    // Submit button detection — prefer actual submit over action-bar duplicates
+                    if (isSubmitAction && (tag === 'BUTTON' || el.getAttribute('role') === 'button')) {
+                      if (el.type === 'submit') score += 25;
+                      if (el.closest('form, [role="form"], .msg-form, .comments-comment-box, .editor-container')) score += 20;
+                      const cls = (el.className || '').toLowerCase();
+                      if (cls.includes('submit') || cls.includes('send') || cls.includes('post') || cls.includes('primary')) score += 15;
+                      try { const bg = getComputedStyle(el).backgroundColor; if (bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'rgb(255, 255, 255)') score += 12; } catch {}
+                      const parent = el.parentElement;
+                      if (parent) { if (parent.querySelector('[contenteditable], textarea, .ql-editor')) score += 15; const gp = parent.parentElement; if (gp && gp.querySelector('[contenteditable], textarea')) score += 10; }
+                      score += Math.min(15, Math.floor(rect.top / 50));
+                    }
+                    const lbl = elText.toLowerCase();
+                    if (lbl.includes('premium') || lbl.includes('upgrade')) score -= 20;
+                    if (tag === 'BUTTON' && (lbl.includes('connect') || lbl.includes('follow'))) score -= 5;
+                    if (isSubmitAction && tag === 'SPAN' && el.closest('[class*="social-action"]')) score -= 15;
+                    candidates.push({ el, score, text: elText.slice(0, 80) });
+                    if (el.shadowRoot) walk(el.shadowRoot, depth + 1);
+                  }
+                } catch {}
+              }
+              walk(document, 0);
+              if (candidates.length === 0) return null;
+              candidates.sort((a, b) => b.score - a.score);
+              const best = candidates[0];
+              best.el.scrollIntoView({ block: 'center', behavior: 'instant' });
+              const r = best.el.getBoundingClientRect();
+              return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: best.text, tag: best.el.tagName.toLowerCase() };
+            },
+            args: [searchText]
+          });
+
+          if (!found) { sendResult(cmd, false, null, `No visible element found containing "${searchText}"`); break; }
+
+          const cdpOk2 = await canUseCDP(tabId);
+          if (cdpOk2) {
+            const attached2 = await cdpAttach(tabId);
+            if (attached2) {
+              try { await cdpMouseClick(tabId, found.x, found.y); }
+              catch { await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: (x, y) => { const el = document.elementFromPoint(x, y); if (el) el.click(); }, args: [found.x, found.y] }); }
+            }
+          } else {
+            await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: (x, y) => { const el = document.elementFromPoint(x, y); if (el) el.click(); }, args: [found.x, found.y] });
+          }
+
+          await new Promise(r => setTimeout(r, 400));
+          let urlChanged = false;
+          try { const ta = await chrome.tabs.get(tabId); urlChanged = ta.url !== urlBefore; } catch { urlChanged = true; }
+          sendResult(cmd, true, { ok: true, clicked: found.text, tag: found.tag, urlChanged });
+        } catch (err) { sendResult(cmd, false, null, err.message); }
+        break;
+      }
+
       /* ── Click by viewport coordinates (normalized 0-1) ── */
       case 'clickPoint': {
         const cdpOk = await canUseCDP(tabId);
@@ -843,6 +974,191 @@ async function executeCommand(cmd, tabId) {
             args: [cmd.x, cmd.y]
           });
           sendResult(cmd, result?.ok !== false, result, result?.error);
+        } catch (err) { sendResult(cmd, false, null, err.message); }
+        break;
+      }
+
+      /* ── Type into editor — atomic click-placeholder → find-editor → type ── */
+      /* ── Click overflow/three-dot menu near content, then click a menu item ── */
+      case 'clickOverflowMenu': {
+        const nearText = (cmd.nearText || '').trim();
+        const menuAction = (cmd.menuAction || '').trim();
+        if (!menuAction) { sendResult(cmd, false, null, 'No menuAction specified'); break; }
+        try {
+          // Step 1: Find and click overflow button near text
+          const [{ result: mb }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: (nearText) => {
+              const buttons = [];
+              function fb(root, d) { if (d > 12) return; try {
+                for (const el of root.querySelectorAll('button,[role="button"]')) {
+                  const l = (el.getAttribute('aria-label') || '').toLowerCase();
+                  const t = (el.textContent || '').trim().toLowerCase();
+                  if (l.includes('more') || l.includes('option') || l.includes('overflow') || l.includes('menu') || l.includes('action') || t === '...' || t === '⋯' || t === '⋮' || t === '…' || (t === '' && el.querySelector('svg'))) {
+                    const r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) buttons.push({ el, rect: r, label: l || t || 'menu' });
+                  }
+                }
+                for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) fb(el.shadowRoot, d + 1); }
+              } catch {} }
+              fb(document, 0);
+              if (!buttons.length) return { ok: false, error: 'No overflow buttons found' };
+              let best = buttons[0];
+              if (nearText) {
+                let nearEl = null;
+                function fn(root, d) { if (d > 12 || nearEl) return; try {
+                  for (const el of root.querySelectorAll('*')) { const t = (el.textContent || '').trim(); if (t.toLowerCase().includes(nearText.toLowerCase()) && t.length < 500) { const r = el.getBoundingClientRect(); if (r.width > 20 && r.height > 10) { nearEl = { rect: r }; return; } } }
+                  for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) fn(el.shadowRoot, d + 1); }
+                } catch {} }
+                fn(document, 0);
+                if (nearEl) { let bd = Infinity; for (const b of buttons) { const d = Math.abs(b.rect.top - nearEl.rect.top) * 2 + Math.abs(b.rect.left - nearEl.rect.left); if (d < bd) { bd = d; best = b; } } }
+              }
+              best.el.scrollIntoView({ block: 'center', behavior: 'instant' }); best.el.click();
+              const r = best.el.getBoundingClientRect();
+              return { ok: true, x: r.left + r.width / 2, y: r.top + r.height / 2, label: best.label };
+            }, args: [nearText]
+          });
+          if (!mb?.ok) { sendResult(cmd, false, null, mb?.error || 'Could not find overflow button'); break; }
+          const cdpOk3 = await canUseCDP(tabId);
+          if (cdpOk3) { const a = await cdpAttach(tabId); if (a) try { await cdpMouseClick(tabId, mb.x, mb.y); } catch {} }
+          await new Promise(r => setTimeout(r, 800));
+          // Step 2: Click menu action — scan ALL elements (Reddit renders menus as overlays)
+          const [{ result: ar }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: (action) => {
+              const cands = []; const aLow = action.toLowerCase();
+              function scan(root, d) { if (d > 12) return; try {
+                for (const el of root.querySelectorAll('*')) {
+                  const t = (el.textContent || '').trim();
+                  if (!t.toLowerCase().includes(aLow) || t.length > 200) continue;
+                  const r = el.getBoundingClientRect();
+                  if (!r.width || !r.height || r.top < -100 || r.top > window.innerHeight + 100) continue;
+                  try { if (getComputedStyle(el).display === 'none') continue; } catch { continue; }
+                  let sc = 0; const role = el.getAttribute('role'); const tag = el.tagName;
+                  if (role === 'menuitem') sc += 20; if (tag === 'BUTTON') sc += 10; if (tag === 'A') sc += 8; if (tag === 'LI') sc += 5;
+                  sc += Math.max(0, 10 - Math.floor(t.length / 20));
+                  if (t.toLowerCase() === aLow) sc += 15; if (t.toLowerCase().startsWith(aLow)) sc += 10;
+                  if (r.width < 400 && r.height < 60) sc += 5;
+                  cands.push({ el, text: t.slice(0, 80), score: sc, x: r.left + r.width / 2, y: r.top + r.height / 2 });
+                  if (el.shadowRoot) scan(el.shadowRoot, d + 1);
+                }
+              } catch {} }
+              scan(document, 0);
+              if (!cands.length) return { ok: false, error: 'Menu item "' + action + '" not found' };
+              cands.sort((a, b) => b.score - a.score);
+              const best = cands[0]; best.el.click();
+              return { ok: true, clicked: best.text, x: best.x, y: best.y };
+            }, args: [menuAction]
+          });
+          if (!ar?.ok) { sendResult(cmd, false, null, ar?.error || 'Could not find menu action'); break; }
+          if (cdpOk3 && ar.x) { try { await cdpMouseClick(tabId, ar.x, ar.y); } catch {} }
+          // Step 3: Auto-confirm dialog
+          await new Promise(r => setTimeout(r, 800));
+          const [{ result: cr2 }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: (action) => {
+              function fc(root, d) { if (d > 12) return null; try {
+                const words = [action.toLowerCase(), 'yes', 'confirm', 'ok', 'delete'];
+                for (const el of root.querySelectorAll('button,[role="button"]')) { const t = (el.textContent || '').trim().toLowerCase(); if (words.some(w => t.includes(w))) { const r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) { el.click(); return { ok: true, confirmed: t }; } } }
+                for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) { const f = fc(el.shadowRoot, d + 1); if (f) return f; } }
+              } catch {} return null; }
+              return fc(document, 0) || { ok: true, confirmed: false };
+            }, args: [menuAction]
+          });
+          sendResult(cmd, true, { ok: true, menuClicked: mb.label, actionClicked: ar.clicked, confirmed: cr2?.confirmed || false });
+        } catch (err) { sendResult(cmd, false, null, err.message); }
+        break;
+      }
+
+      case 'typeIntoEditor': {
+        const editorText = cmd.text || '';
+        const placeholderHint = cmd.placeholder || 'Join the conversation';
+        if (!editorText) { sendResult(cmd, false, null, 'No text to type'); break; }
+        try {
+          const cdpOk2 = await canUseCDP(tabId);
+          const attached2 = cdpOk2 ? await cdpAttach(tabId) : false;
+          // Step 1: Find and click placeholder via MAIN world (walks all shadow DOMs)
+          const [{ result: cr }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: (hint) => {
+              function find(root, d) {
+                if (d > 12) return null;
+                try {
+                  for (const el of root.querySelectorAll('[contenteditable="true"],[contenteditable=""],textarea,.ProseMirror,.ql-editor,[role="textbox"]')) {
+                    const r = el.getBoundingClientRect(); if (r.width > 50 && r.height > 10) { try { if (getComputedStyle(el).display === 'none') continue; } catch {} return el; }
+                  }
+                  for (const el of root.querySelectorAll('*')) {
+                    const t = (el.textContent || '').trim();
+                    if (t.toLowerCase().includes(hint.toLowerCase()) && t.length < 200) { const r = el.getBoundingClientRect(); if (r.width > 50 && r.height > 10) return el; }
+                  }
+                  for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) { const f = find(el.shadowRoot, d + 1); if (f) return f; } }
+                } catch {} return null;
+              }
+              const t = find(document, 0);
+              if (!t) return { ok: false, error: 'No editor or placeholder found' };
+              t.scrollIntoView({ block: 'center', behavior: 'instant' }); t.click();
+              const r = t.getBoundingClientRect();
+              return { ok: true, x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            }, args: [placeholderHint]
+          });
+          if (!cr?.ok) { sendResult(cmd, false, null, cr?.error || 'Could not find editor'); break; }
+          if (attached2) { try { await cdpMouseClick(tabId, cr.x, cr.y); } catch {} }
+          // Step 2: Wait for editor
+          await new Promise(r => setTimeout(r, 1200));
+          // Step 3: Focus the editor
+          const [{ result: fr }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: () => {
+              function find(root, d) {
+                if (d > 12) return null;
+                try {
+                  for (const el of root.querySelectorAll('[contenteditable="true"],[contenteditable=""],textarea,.ProseMirror,.ql-editor')) {
+                    const r = el.getBoundingClientRect(); if (r.width > 50 && r.height > 10) { try { if (getComputedStyle(el).display === 'none') continue; } catch {} el.focus(); el.click(); return { ok: true, r: { x: r.left + r.width / 2, y: r.top + r.height / 2 } }; }
+                  }
+                  for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) { const f = find(el.shadowRoot, d + 1); if (f) return f; } }
+                } catch {} return null;
+              }
+              return find(document, 0) || { ok: false };
+            }, args: []
+          });
+          if (attached2 && fr?.r) { try { await cdpMouseClick(tabId, fr.r.x, fr.r.y); } catch {} await new Promise(r => setTimeout(r, 300)); }
+          // Step 4: Type char-by-char via CDP
+          if (attached2) {
+            // Method A: insertText (atomic, no double chars)
+            await cdpSend(tabId, 'Input.insertText', { text: editorText });
+            await new Promise(r => setTimeout(r, 300));
+            // Check and fallback to execCommand if needed
+            const [{ result: chkA }] = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN',
+              func: () => { function f(r,d){if(d>12)return null;try{for(const e of r.querySelectorAll('[contenteditable="true"],[contenteditable=""],textarea,.ProseMirror')){const t=e.isContentEditable?(e.innerText||'').trim():(e.value||'').trim();if(t.length>0)return true;}for(const e of r.querySelectorAll('*')){if(e.shadowRoot){const x=f(e.shadowRoot,d+1);if(x)return x;}}}catch{}return null;}return f(document,0)||false; },
+              args: [] });
+            if (!chkA?.result) {
+              await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN',
+                func: (text) => { function f(r,d){if(d>12)return null;try{for(const e of r.querySelectorAll('[contenteditable="true"],[contenteditable=""],textarea,.ProseMirror')){if(e.getBoundingClientRect().width>50){e.focus();return e;}}for(const e of r.querySelectorAll('*')){if(e.shadowRoot){const x=f(e.shadowRoot,d+1);if(x)return x;}}}catch{}return null;}const el=f(document,0);if(el&&el.isContentEditable){el.focus();document.execCommand('insertText',false,text);}else if(el){el.value=text;el.dispatchEvent(new Event('input',{bubbles:true}));} },
+                args: [editorText] });
+            }
+          } else {
+            await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN',
+              func: (text) => { const el = document.activeElement; if (el?.isContentEditable) document.execCommand('insertText', false, text); else if (el) { el.value = text; el.dispatchEvent(new Event('input', { bubbles: true })); } },
+              args: [editorText] });
+          }
+          // Step 5: Verify
+          await new Promise(r => setTimeout(r, 300));
+          const [{ result: vr }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: () => {
+              function check(root, d) {
+                if (d > 12) return null;
+                try {
+                  for (const el of root.querySelectorAll('[contenteditable="true"],[contenteditable=""],textarea,.ProseMirror')) {
+                    const t = el.isContentEditable ? (el.innerText || '').trim() : (el.value || '').trim();
+                    if (t.length > 0) return { ok: true, content: t.slice(0, 100) };
+                  }
+                  for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) { const f = check(el.shadowRoot, d + 1); if (f) return f; } }
+                } catch {} return null;
+              }
+              return check(document, 0) || { ok: false };
+            }, args: []
+          });
+          sendResult(cmd, true, { ok: true, typed: editorText, verified: vr?.ok || false, content: vr?.content || '' });
         } catch (err) { sendResult(cmd, false, null, err.message); }
         break;
       }

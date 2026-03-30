@@ -126,6 +126,16 @@ services:
       - ./public-frontend/src:/app/src
       - ./public-frontend/next.config.ts:/app/next.config.ts
 
+  cdp-analyzer:
+    build: ./cdp-analyzer
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "5050:5050"
+    volumes:
+      - ./cdp-analyzer:/app
+
   admin-panel:
     build: ./admin-panel
     restart: unless-stopped

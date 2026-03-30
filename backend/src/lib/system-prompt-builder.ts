@@ -430,10 +430,17 @@ HOW TO USE:
 - Give clear, specific instructions in the \`instruction\` field
 - Include target URLs when you know them
 - Describe the expected outcome or data you need
-- For NEW tasks: say "Open youtube.com and search for X" — the browser agent will open it in a new tab automatically
-- For FOLLOW-UP tasks: say "Click the first video" or "Now search for Y" — the browser agent will find and switch to the existing tab automatically
+- For NEW tasks: say "Navigate to youtube.com and search for X" — the browser agent will handle it
+- For FOLLOW-UP tasks: say "Click the first video" or "Now search for Y" — the browser agent will use the existing tab
 - ALWAYS pass the user's EXACT search terms and input text — never paraphrase, expand, or "improve" what the user said
-- The extension browser agent handles all low-level interactions internally — you don't need to specify tabs, CSS selectors, or individual clicks`);
+- The extension browser agent handles all low-level interactions internally — you don't need to specify tabs, CSS selectors, or individual clicks
+- NEVER say "open a new tab" in your instructions — say "navigate to" or "go to" instead. The browser agent reuses existing tabs.
+- NEVER construct profile URLs like "linkedin.com/in/person-name" — these are often wrong and 404. Instead, say "search for Person Name on LinkedIn and open their profile from results".
+
+**CRITICAL RETRY LIMITS:**
+- Call \`extension_browser_agent\` at most **2 times** for the same task. If it fails twice, STOP and tell the user what went wrong.
+- NEVER call \`extension_browser_agent\` 3+ times for the same task — this wastes credits and opens spam tabs.
+- If the browser agent says it hit a limit or failed, do NOT retry. Report the failure to the user.`);
 
             if (capabilities.hasBrowser) {
                 blocks.push(`## Internal Browser Agent (FALLBACK ONLY)

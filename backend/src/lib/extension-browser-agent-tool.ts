@@ -25,8 +25,9 @@ const ExtBrowserAgentState = Annotation.Root({
 });
 
 /** Max supersteps for the extension browser agent graph.
- *  12 = 6 agent+tool cycles. Prevents runaway loops and saves cost. */
-const EXT_BROWSER_AGENT_RECURSION_LIMIT = 12;
+ *  18 = 9 agent+tool cycles. Allows up to ~8 tool calls before forced stop.
+ *  The real protection is MAX_INVOCATIONS (3 calls per conversation turn). */
+const EXT_BROWSER_AGENT_RECURSION_LIMIT = 18;
 
 /**
  * Build a single "extension_browser_agent" tool that wraps an internal,
@@ -93,6 +94,13 @@ export function buildExtensionBrowserAgentTool(
     }
 
     // ---------------------------------------------------------------
+    // Invocation counter — hard cap at 3 calls per tool instance (per conversation turn)
+    // Prevents the parent agent from retrying the browser sub-agent endlessly
+    // ---------------------------------------------------------------
+    let invocationCount = 0;
+    const MAX_INVOCATIONS = 3;
+
+    // ---------------------------------------------------------------
     // Return the single tool the calling agent sees
     // ---------------------------------------------------------------
     return new DynamicStructuredTool({
@@ -105,7 +113,8 @@ export function buildExtensionBrowserAgentTool(
             "extract data, and return a clean summary. " +
             "Include the target URL and expected outcome in your instruction. " +
             "The result is a human-readable summary — relay it to the user as-is, " +
-            "never include raw HTML, DOM elements, or CSS selectors.",
+            "never include raw HTML, DOM elements, or CSS selectors. " +
+            "IMPORTANT: Do NOT call this tool more than 2 times for the same task. If it fails twice, tell the user.",
         schema: z.object({
             instruction: z
                 .string()
@@ -115,6 +124,16 @@ export function buildExtensionBrowserAgentTool(
                 ),
         }),
         func: async ({ instruction }) => {
+            // Hard cap: refuse after MAX_INVOCATIONS calls
+            invocationCount++;
+            if (invocationCount > MAX_INVOCATIONS) {
+                logger.warn(
+                    { agentId, invocationCount },
+                    "Extension browser agent invocation BLOCKED — exceeded max invocations"
+                );
+                return `STOPPED: The browser agent has already been called ${MAX_INVOCATIONS} times for this conversation turn. ` +
+                    `Do NOT call it again. Report the current status to the user and ask for guidance.`;
+            }
             const invocationId = `ext-browser-agent-${agentId}-${Date.now()}`;
 
             logger.info(

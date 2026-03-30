@@ -1,7 +1,7 @@
 import { StateGraph, Annotation, MessagesAnnotation, interrupt } from "@langchain/langgraph";
 import type { RunnableConfig } from "@langchain/core/runnables";
 import { createLLM } from "../lib/gateway.ts";
-import { SystemMessage, AIMessage, HumanMessage, RemoveMessage, ToolMessage, type BaseMessage, trimMessages } from "@langchain/core/messages";
+import { SystemMessage, AIMessage, HumanMessage, RemoveMessage, ToolMessage, type BaseMessage } from "@langchain/core/messages";
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { PostgresStore } from "@langchain/langgraph-checkpoint-postgres/store";
@@ -62,114 +62,9 @@ import type {
     SystemPermissions,
 } from "../lib/system-prompt-builder.ts";
 
-const SUMMARIZE_THRESHOLD = 30; // Fallback: trigger summarization when messages exceed this count
-const TOKEN_SUMMARIZE_THRESHOLD = 24000; // Primary: trigger summarization when estimated tokens exceed this
+const SUMMARIZE_THRESHOLD = 30; // Trigger summarization when messages exceed this count
 const KEEP_MESSAGES = 10; // Keep the last N messages after summarization
 const MAX_TOOL_ITERATIONS = 25; // Maximum agent→tool cycles before graceful termination
-const MAX_TOOL_RESULT_CHARS = 12000; // Truncate tool results beyond this to save tokens
-
-/** Names of tools that are always included regardless of conversation context. */
-const CORE_TOOL_NAMES = new Set([
-    "bucket_save_file", "bucket_read_file", "bucket_update_file", "bucket_list_files",
-    "bucket_delete_file", "bucket_get_download_url", "bucket_export_to_composio",
-    "python_execute", "write_todos", "update_todo", "get_todos",
-    "save_memory", "write_notebook", "read_notebook", "list_notebook", "delete_notebook_entry",
-    "get_current_user", "ask_user_confirmation", "vault_get_credential",
-]);
-
-/**
- * Estimates total token count for a list of messages using character-based approximation.
- * ~4 characters ≈ 1 token (conservative estimate).
- */
-function estimateMessageTokens(messages: BaseMessage[]): number {
-    let totalChars = 0;
-    for (const msg of messages) {
-        const content = typeof msg.content === "string"
-            ? msg.content
-            : JSON.stringify(msg.content);
-        totalChars += content.length;
-        // Also count tool call args if present
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const toolCalls = (msg as any).tool_calls;
-        if (Array.isArray(toolCalls)) {
-            for (const tc of toolCalls as Array<{ args?: Record<string, unknown> }>) {
-                totalChars += JSON.stringify(tc.args || {}).length;
-            }
-        }
-    }
-    return Math.ceil(totalChars / 4);
-}
-
-/**
- * Selects relevant tools for the current turn to reduce tool-definition token overhead.
- *
- * Strategy:
- * - Turn 1: include ALL tools (LLM needs to see full capabilities to plan)
- * - Turn 2+: include core tools + groups that are either (a) already used in conversation
- *   or (b) relevant based on user message / active plan keywords
- * - Function tools, MCP tools, and delegation tools are always included (they're user-configured)
- */
-function selectRelevantTools(
-    allTools: DynamicStructuredTool[],
-    messages: BaseMessage[],
-    todos: Todo[],
-    stepCount: number,
-): DynamicStructuredTool[] {
-    // On first turn, include all tools so LLM sees full capabilities
-    if (stepCount <= 1) return allTools;
-
-    // Identify which tool groups have been used in conversation
-    const activeGroups = new Set<string>();
-    for (const msg of messages) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const toolCalls = (msg as any).tool_calls;
-        if (Array.isArray(toolCalls)) {
-            for (const tc of toolCalls as Array<{ name: string }>) {
-                if (tc.name.startsWith("system_")) activeGroups.add("system");
-                else if (tc.name.startsWith("ceo_")) activeGroups.add("ceo");
-                else if (tc.name.startsWith("tester_")) activeGroups.add("tester");
-                else if (tc.name.startsWith("COMPOSIO_")) activeGroups.add("composio");
-                else if (tc.name === "browser_agent" || tc.name === "extension_browser_agent") activeGroups.add("browser");
-                else if (tc.name === "send_channel_message") activeGroups.add("channel");
-            }
-        }
-    }
-
-    // Check active plan steps for keyword hints
-    for (const todo of todos) {
-        const text = (todo.title + " " + (todo.result || "")).toLowerCase();
-        if (/\b(create|delete|manage|agent|kb|knowledge|skill|schedule|channel|tool|permission)\b/.test(text)) activeGroups.add("system");
-        if (/\b(project|milestone|report|assign)\b/.test(text)) activeGroups.add("ceo");
-        if (/\b(brows|website|url|scrape|navigate|open.*page)\b/.test(text)) activeGroups.add("browser");
-        if (/\b(email|gmail|sheet|drive|slack|github|integration|composio)\b/.test(text)) activeGroups.add("composio");
-        if (/\b(message|telegram|slack|notify|send.*to)\b/.test(text)) activeGroups.add("channel");
-    }
-
-    // Check last user message for intent keywords
-    const lastUserMsg = [...messages].reverse().find((m) => m instanceof HumanMessage);
-    if (lastUserMsg) {
-        const content = typeof lastUserMsg.content === "string" ? lastUserMsg.content.toLowerCase() : "";
-        if (/\b(create|delete|manage|setup|configure|agent|kb|knowledge|skill|schedule|channel|tool|permission)\b/.test(content)) activeGroups.add("system");
-        if (/\b(project|milestone|report|assign|status|progress|team)\b/.test(content)) activeGroups.add("ceo");
-        if (/\b(brows|website|url|https?|search.*web|scrape|navigate|open.*page|go to)\b/.test(content)) activeGroups.add("browser");
-        if (/\b(email|gmail|sheet|drive|slack|github|integration|composio|send.*email|calendar)\b/.test(content)) activeGroups.add("composio");
-        if (/\b(message|telegram|slack|notify|tell.*user|send.*message)\b/.test(content)) activeGroups.add("channel");
-    }
-
-    // Filter tools: keep core + active groups + all user-configured tools (function, MCP, delegation)
-    return allTools.filter((tool) => {
-        const name = tool.name;
-        if (CORE_TOOL_NAMES.has(name)) return true;
-        if (name.startsWith("system_")) return activeGroups.has("system");
-        if (name.startsWith("ceo_")) return activeGroups.has("ceo");
-        if (name.startsWith("tester_")) return activeGroups.has("tester");
-        if (name.startsWith("COMPOSIO_")) return activeGroups.has("composio");
-        if (name === "browser_agent" || name === "extension_browser_agent") return activeGroups.has("browser");
-        if (name === "send_channel_message") return activeGroups.has("channel");
-        // Function tools, MCP tools, delegation tools — always included
-        return true;
-    });
-}
 
 /**
  * Scans conversation history and builds a concise summary of tool call outcomes.
@@ -1582,8 +1477,10 @@ export async function createAgentGraph(
         timestamp: Date.now(),
     });
 
-    // NOTE: Tools are now bound per-turn inside agentNode (dynamic tool selection)
-    // to reduce token overhead. The full tool set remains in toolsByName for execution.
+    // Bind tools to LLM
+    const llmWithTools = langchainTools.length > 0
+        ? llm.bindTools(langchainTools)
+        : llm;
 
     // Build skills section once
     let skillsSection = "";
@@ -1666,22 +1563,85 @@ export async function createAgentGraph(
         // Artifact generation instructions
         stableParts.push(`## File & Document Generation
 
-When generating documents/files, use artifact blocks at the END of your message:
+When the user asks you to create, write, or generate any document,
+report, file, spreadsheet, webpage, or content — respond using
+an artifact block.
+
+Format:
 <artifact type="TYPE" filename="FILENAME">
 CONTENT
 </artifact>
 
-Types: html, markdown, mdx, txt, csv, xlsx (CSV inside, frontend converts), pdf (HTML inside, frontend converts). Filename: lowercase with hyphens.`);
+Supported types and when to use them:
+- html → webpages, styled reports, dashboards, emails
+- markdown → documentation, notes, READMEs, reports
+- mdx → rich docs with components
+- txt → plain text, logs, config files, scripts
+- csv → tabular data, exports, datasets
+- xlsx → spreadsheets (output as CSV inside the artifact — frontend converts)
+- pdf → formal documents (output as HTML inside artifact — frontend converts)
+
+Rules:
+- ALWAYS use an artifact when generating file content
+- Put the artifact tag at the END of your message
+- You may write a brief message before the artifact (e.g. "Here's your report:")
+- Never put the artifact inline inside a sentence
+- For xlsx: output valid CSV inside the artifact, set type="xlsx"
+- For pdf: output styled HTML inside the artifact, set type="pdf"
+- Filename should be descriptive and lowercase with hyphens`);
 
         // Memory & Notebook capability instructions (static how-to, not the actual memory content)
         if (userId) {
-            stableParts.push(`## Memory & Notebook
+            stableParts.push(`## Memory — IMPORTANT
+You have a \`save_memory\` tool. You MUST use it aggressively to learn from every conversation. The user should NEVER have to repeat themselves.
 
-**save_memory** — Save facts about the user: processes, preferences, corrections, decisions, facts. Write detailed standalone statements. Categories: process, preference, fact, decision. The user should NEVER have to repeat themselves. When in doubt, SAVE IT.
+### When to save (DO THIS EVERY TIME):
+- **Processes & Workflows:** If the user explains how to do something step-by-step, save the ENTIRE process immediately. This is the most important type of memory.
+- **Corrections:** If the user corrects you ("no, do it this way", "that's wrong"), save their correction as a process or preference so you never repeat the mistake.
+- **Preferences & Rules:** How they want things done, formatting rules, communication style, tools they prefer.
+- **Facts:** Names, roles, project details, technical stack, team structure, important context.
+- **Decisions:** Choices made, reasons behind them, trade-offs considered.
 
-Saved memories appear in this prompt — read and follow them automatically.
+### How to save:
+- Write memories as **detailed, standalone statements** that your future self can act on without any other context.
+- For processes, include ALL steps in order with enough detail to execute them independently.
+- Use category "process" for workflows/instructions, "preference" for how they like things, "fact" for information, "decision" for choices made.
+- BAD: "User told me about deployment" — too vague, useless.
+- GOOD: "Deployment process: 1) Run 'npm test' 2) Build with 'docker build -t app .' 3) Push to staging with 'kubectl apply -f staging.yaml' 4) Wait for user approval 5) Push to production with 'kubectl apply -f prod.yaml'"
 
-**write_notebook** — Save things you discovered during work: resource IDs, API URLs, Composio tool slugs, config values, bucket table schemas. Use snake_case keys. Check notebook before searching for resources — if an entry has what you need, use it directly.`);
+### How to use saved memories:
+- Your previously saved memories are included at the top of this prompt. READ THEM CAREFULLY before every response.
+- If a saved memory describes a process relevant to the user's current request, FOLLOW IT exactly without asking.
+- If a saved memory contains a preference, APPLY IT automatically.
+- If you're unsure whether a memory applies, follow it — the user saved it for a reason.
+
+### Rule: When in doubt, SAVE IT. It's better to save too much than to forget something the user told you.`);
+
+            stableParts.push(`## Notebook — Your Persistent Scratchpad
+You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\`, \`delete_notebook_entry\`) for saving working references that persist across all sessions.
+
+### Notebook vs Memory — When to use which:
+- **save_memory** → Facts *about the user*: preferences, processes, decisions, corrections
+- **write_notebook** → Things *you discovered* during work: resource IDs, sheet names, API URLs, config values, last-processed positions
+
+### When to write to notebook (DO THIS AUTOMATICALLY):
+- You **looked up** a resource ID (Google Sheet ID, document ID, database record ID) → save it immediately
+- You **discovered** an API endpoint, URL, or service address → save it
+- You are **working through data** and need to track position (e.g. last row processed) → save it
+- You found a **name-to-ID mapping** you'll need again (e.g. "Leads Sheet" → "1Bxi...") → save it
+- You **successfully used a Composio tool slug** → save the slug + parameter pattern (e.g. key: \`composio_gmail_list\`, value: \`"slug: GMAIL_LIST_EMAILS, params: {max_results, label_ids, q}"\`) so you can skip COMPOSIO_SEARCH_TOOLS next time
+- You **created or used a bucket CSV table** as a database → save with key \`bucket_db_{table_name}\` including filename, column schema, and purpose so you can find and use it in future sessions
+- Any **operational reference** you'd lose if the conversation restarted → save it
+
+### Before searching for resources:
+- ALWAYS check your notebook first (entries are shown at the top of this prompt)
+- If a notebook entry has the ID you need, use it directly — do NOT search again
+- If the notebook is empty or doesn't have what you need, search normally and then save the result
+
+### Key format:
+- Use descriptive snake_case keys: \`leads_sheet_id\`, \`email_template_doc_id\`, \`crm_api_base\`
+- For bucket database tables: \`bucket_db_leads\`, \`bucket_db_tasks\`, \`bucket_db_inventory\`
+- Include a brief description when saving so future-you knows what it's for`);
         }
 
         // ── Dynamic parts (change between turns) ──
@@ -1830,56 +1790,21 @@ Saved memories appear in this prompt — read and follow them automatically.
         let response;
         try {
             const sanitizedMessages = sanitizeMessagesForProvider(state.messages);
-
-            // Trim message history to prevent unbounded token growth between summarization cycles.
-            // Uses character-based estimation (~4 chars per token). This provides per-call protection
-            // complementing the per-session summarization that triggers at 30 messages.
-            const trimmedMessages = await trimMessages(sanitizedMessages, {
-                maxTokens: 32000, // ~32K tokens budget for message history
-                strategy: "last",
-                allowPartial: false,
-                startOn: "human",
-                tokenCounter: (msgs) => {
-                    // Character-based approximation: ~4 chars per token
-                    let totalChars = 0;
-                    for (const msg of msgs) {
-                        const content = typeof msg.content === "string"
-                            ? msg.content
-                            : JSON.stringify(msg.content);
-                        totalChars += content.length;
-                    }
-                    return Math.ceil(totalChars / 4);
-                },
-            });
-
-            // Dynamic tool selection: on turn 2+ only bind tools relevant to the
-            // current conversation context. This reduces tool-definition token overhead
-            // (e.g., CEO agent: ~82 tools × ~200 tokens each → only ~20 relevant tools).
-            // Turn 1 always gets the full set so the LLM can see all capabilities.
-            const filteredTools = selectRelevantTools(langchainTools, state.messages, currentTodos, stepCount);
-            const llmForThisTurn = filteredTools.length > 0
-                ? llm.bindTools(filteredTools)
-                : llm;
-
             logger.info({
                 messageCount: state.messages.length,
                 sanitizedMessageCount: sanitizedMessages.length,
-                trimmedMessageCount: trimmedMessages.length,
-                messagesTrimmed: sanitizedMessages.length - trimmedMessages.length,
                 systemPromptLength: stableText.length + (dynamicText ? dynamicText.length + 2 : 0),
                 stablePromptLength: stableText.length,
                 dynamicPromptLength: dynamicText.length,
                 promptCaching: supportsPromptCaching,
-                totalToolCount: langchainTools.length,
-                filteredToolCount: filteredTools.length,
-                toolsFiltered: langchainTools.length - filteredTools.length,
+                toolCount: langchainTools.length,
                 isClaudeDirect,
                 modelId,
                 stepCount,
                 maxToolIterations: MAX_TOOL_ITERATIONS,
                 lastMessageType: state.messages[state.messages.length - 1]?.constructor?.name,
             }, "Invoking LLM");
-            response = await llmForThisTurn.invoke([systemMsg, ...trimmedMessages], config);
+            response = await llmWithTools.invoke([systemMsg, ...sanitizedMessages], config);
 
             // Debug: log what the model returned
             const aiResponse = response as AIMessage;
@@ -1956,7 +1881,7 @@ Saved memories appear in this prompt — read and follow them automatically.
                     });
 
                     const retryMessages = [...sanitizedMessages, response, correctionMsg];
-                    const retryResponse = await llmForThisTurn.invoke([systemMsg, ...retryMessages], config);
+                    const retryResponse = await llmWithTools.invoke([systemMsg, ...retryMessages], config);
 
                     const retryAiResponse = retryResponse as AIMessage;
                     const retryToolCalls = retryAiResponse.tool_calls ?? [];
@@ -2192,16 +2117,9 @@ Saved memories appear in this prompt — read and follow them automatically.
             }, "shouldContinue → tools");
             return "tools";
         }
-        // Check if conversation needs summarization — token-based (primary) or message-count (fallback).
-        // Token-based catches cases where few messages contain huge tool results.
-        const estimatedTokens = estimateMessageTokens(state.messages);
-        if (estimatedTokens > TOKEN_SUMMARIZE_THRESHOLD || state.messages.length > SUMMARIZE_THRESHOLD) {
-            logger.info({
-                route: "summarize",
-                messageCount: state.messages.length,
-                estimatedTokens,
-                trigger: estimatedTokens > TOKEN_SUMMARIZE_THRESHOLD ? "token_count" : "message_count",
-            }, "shouldContinue → summarize");
+        // Check if conversation is long enough to warrant summarization
+        if (state.messages.length > SUMMARIZE_THRESHOLD) {
+            logger.info({ route: "summarize", messageCount: state.messages.length }, "shouldContinue → summarize");
             return "summarize_conversation";
         }
         // End the graph — reflection runs post-stream (fire-and-forget) so [DONE] is not blocked
@@ -2303,16 +2221,10 @@ Saved memories appear in this prompt — read and follow them automatically.
 
             try {
                 const result = await tool.invoke(tc.args);
-                let resultContent = typeof result === "string" ? result : JSON.stringify(result);
-                const originalLength = resultContent.length;
-                if (resultContent.length > MAX_TOOL_RESULT_CHARS) {
-                    resultContent = resultContent.slice(0, MAX_TOOL_RESULT_CHARS) +
-                        `\n\n... [truncated — showing first ${MAX_TOOL_RESULT_CHARS} of ${originalLength} chars. Use python_execute for full data processing.]`;
-                }
+                const resultContent = typeof result === "string" ? result : JSON.stringify(result);
                 logger.info({
                     toolName: tc.name,
-                    resultLength: originalLength,
-                    truncated: originalLength > MAX_TOOL_RESULT_CHARS,
+                    resultLength: resultContent.length,
                     resultPreview: resultContent.slice(0, 300),
                 }, "Tool executed successfully");
                 results.push(new ToolMessage({

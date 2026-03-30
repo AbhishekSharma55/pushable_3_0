@@ -5,7 +5,6 @@ import { scheduleRepository } from "../repositories/schedule.repository.ts";
 import { scheduleRunRepository } from "../repositories/schedule-run.repository.ts";
 import { checkCredits, deductCredits, calculateCreditCost } from "../lib/credit-engine.ts";
 import { logger } from "../lib/logger.ts";
-import { removeJob } from "../lib/scheduler.ts";
 import { runReportRepository } from "../repositories/runReport.repository.ts";
 import { projectRepository } from "../repositories/project.repository.ts";
 
@@ -17,14 +16,6 @@ export async function processSchedule(data: {
 }) {
     const { scheduleId, agentId, prompt, workspaceId } = data;
     logger.info({ scheduleId, agentId }, "Processing scheduled prompt");
-
-    // Verify schedule still exists before creating a run
-    const schedule = await scheduleRepository.findById(scheduleId, workspaceId);
-    if (!schedule) {
-        logger.warn({ scheduleId }, "Schedule no longer exists — removing orphaned job");
-        await removeJob(scheduleId);
-        return;
-    }
 
     // Create run record
     const run = await scheduleRunRepository.create({ scheduleId, workspaceId });

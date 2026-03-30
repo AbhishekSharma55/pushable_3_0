@@ -751,7 +751,15 @@ SYSTEM ACCESS RULES:
     // --- BLOCK 6: Python Execution Guidance (always enabled) ---
     blocks.push(`## Python Execution Environment (CRITICAL)
 
-You have access to a \`python_execute\` tool that runs Python code in a sandboxed environment with scientific libraries (numpy, pandas, scipy, sympy, matplotlib, math, statistics).
+You have access to a \`python_execute\` tool that runs Python code in a sandboxed environment with a rich set of libraries:
+
+**Available libraries:**
+- **Scientific/Data:** numpy, pandas, scipy, sympy, matplotlib, seaborn, math, statistics
+- **Document generation:** fpdf2 (PDF creation), openpyxl (Excel .xlsx), python-docx (Word .docx)
+- **Image processing:** Pillow (PIL) — resize, crop, convert, watermark, composite images
+- **Web/Data:** requests (HTTP), beautifulsoup4 (HTML/XML parsing), json, csv
+- **Formatting:** tabulate (pretty tables in text, HTML, LaTeX)
+- **Built-in:** datetime, re, collections, itertools, os, base64, io
 
 **YOU MUST USE \`python_execute\` for the following — NEVER do these in your head:**
 
@@ -764,7 +772,11 @@ You have access to a \`python_execute\` tool that runs Python code in a sandboxe
 7. **Date/time calculations** — Days between dates, business days, deadlines, duration calculations.
 8. **Percentage calculations** — Growth rates, completion rates, error rates.
 9. **Equation solving** — Use sympy for algebra, calculus, or symbolic math.
-10. **Chart/graph generation** — Use matplotlib to create visualizations. Save to file with plt.savefig().
+10. **Chart/graph generation** — Use matplotlib/seaborn to create visualizations. Save to file with plt.savefig().
+11. **Create PDFs** — Use fpdf2: \`from fpdf import FPDF\`. Build reports, invoices, letters, then upload to bucket.
+12. **Create Excel files** — Use openpyxl: \`from openpyxl import Workbook\`. Build spreadsheets with formatting, formulas, charts.
+13. **Create Word documents** — Use python-docx: \`from docx import Document\`. Build documents with headings, tables, paragraphs.
+14. **Process/edit images** — Use Pillow: \`from PIL import Image\`. Resize, crop, watermark, convert formats, generate thumbnails.
 
 **WHY:** You are an AI and your mental math is unreliable. A wrong number in a financial summary, invoice, or report can cause serious real-world harm. Python execution is fast (< 1 second) and 100% accurate. There is zero reason to skip it.
 
@@ -796,7 +808,28 @@ bucket.download_to("input.png", filename="photo.jpg")
 bucket.upload_from("processed.png", folder="/processed")
 \`\`\`
 
-**USE THIS for file processing workflows:** When the user asks you to transform, analyze, resize, convert, or process a bucket file, do it all inside \`python_execute\` with the bucket helper — read the file, process it in Python, and save the result back. This is far more efficient than reading file content through bucket_read_file and passing it around.`);
+**USE THIS for file processing workflows:** When the user asks you to transform, analyze, resize, convert, or process a bucket file, do it all inside \`python_execute\` with the bucket helper — read the file, process it in Python, and save the result back. This is far more efficient than reading file content through bucket_read_file and passing it around.
+
+**Document generation workflow:** Create files (PDF, Excel, Word, images, charts) inside \`python_execute\` and upload them to the bucket so the user can access them:
+\`\`\`python
+# Example: Generate a PDF report and upload to bucket
+from fpdf import FPDF
+from _pushable_bucket import bucket
+
+pdf = FPDF()
+pdf.add_page()
+pdf.set_font("Helvetica", size=16)
+pdf.cell(text="Monthly Report", new_x="LMARGIN", new_y="NEXT")
+pdf.set_font("Helvetica", size=12)
+pdf.cell(text="Revenue: $45,000")
+pdf.output("report.pdf")
+result = bucket.upload_from("report.pdf", folder="/reports")
+print(f"PDF uploaded: {result}")
+\`\`\`
+
+This pattern works for any file type — Excel (\`openpyxl\`), Word (\`python-docx\`), images (\`Pillow\`), charts (\`matplotlib\`/\`seaborn\`). Always generate locally → \`bucket.upload_from()\` to make it available to the user.
+
+**IMPORTANT:** The \`_pushable_bucket\` module is ONLY available inside \`python_execute\`. It is NOT available in COMPOSIO_REMOTE_WORKBENCH or COMPOSIO_REMOTE_BASH_TOOL — those run in Composio's cloud sandbox which does not have access to the workspace bucket helper. To upload bucket files to external services (Google Drive, Dropbox, etc.), use \`bucket_export_to_composio\` instead.`);
 
     // --- BLOCK 7: Output Format ---
     blocks.push(`## Response Format

@@ -33,7 +33,7 @@ SELECT
     'CEO',
     '🧠',
     '',
-    'claude-sonnet-4-20250514',
+    'claude-opus-4.6',
     0.7,
     true,       -- system_level_access
     true,       -- can_manage_kb

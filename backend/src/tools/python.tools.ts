@@ -28,31 +28,46 @@ export function buildPythonTools(config?: PythonToolsConfig): DynamicStructuredT
     const pythonExecute = new DynamicStructuredTool({
         name: "python_execute",
         description:
-            "Execute Python code to perform calculations, data analysis, math, statistics, " +
-            "or any computation. The code runs in a sandboxed environment with Python 3 and " +
-            "common scientific libraries available: numpy, pandas, scipy, sympy, matplotlib, " +
-            "math, statistics, json, csv, datetime, re, collections, itertools.\n\n" +
+            "Execute Python code in a sandboxed environment with a rich set of libraries.\n\n" +
+            "**Available libraries:**\n" +
+            "- **Scientific:** numpy, pandas, scipy, sympy, matplotlib, seaborn, statistics\n" +
+            "- **Document generation:** fpdf2 (PDF creation), openpyxl (Excel .xlsx), python-docx (Word .docx)\n" +
+            "- **Image processing:** Pillow (PIL) — resize, crop, convert, watermark, composite\n" +
+            "- **Web/data:** requests (HTTP), beautifulsoup4 (HTML parsing), json, csv\n" +
+            "- **Formatting:** tabulate (pretty tables)\n" +
+            "- **Built-in:** math, datetime, re, collections, itertools, os, base64\n\n" +
             "USE THIS TOOL whenever you need to:\n" +
             "- Perform arithmetic, algebra, calculus, or any math computation\n" +
             "- Analyze or transform data (sorting, filtering, aggregation)\n" +
-            "- Verify calculations instead of doing mental math\n" +
-            "- Generate charts/graphs (use matplotlib, they will be saved as files)\n" +
-            "- Solve equations symbolically (use sympy)\n" +
-            "- Run statistical analysis\n" +
-            "- Process or format structured data\n\n" +
+            "- **Create PDFs** — use fpdf2: `from fpdf import FPDF`\n" +
+            "- **Create Excel files** — use openpyxl: `from openpyxl import Workbook`\n" +
+            "- **Create Word docs** — use python-docx: `from docx import Document`\n" +
+            "- **Process images** — use Pillow: `from PIL import Image`\n" +
+            "- Generate charts/graphs (matplotlib/seaborn, saved as files)\n" +
+            "- Fetch data from URLs (use requests)\n" +
+            "- Parse HTML/XML (use beautifulsoup4)\n" +
+            "- Solve equations symbolically (use sympy)\n\n" +
+            "**File output workflow:** Generate a file (PDF, Excel, image, etc.) → save locally → " +
+            "upload to workspace bucket with `bucket.upload_from('file.pdf')`. " +
+            "The file then appears in the user's bucket and can be shared/downloaded.\n\n" +
             "IMPORTANT: Use print() to output results — only printed output is captured.\n\n" +
             "Examples:\n" +
-            '- Simple math: print(2**100)\n' +
-            '- Sympy: from sympy import *; x = symbols("x"); print(solve(x**2 - 5*x + 6, x))\n' +
-            '- Numpy: import numpy as np; a = np.array([1,2,3]); print(np.mean(a))\n' +
-            '- Pandas: import pandas as pd; df = pd.DataFrame({"a":[1,2,3]}); print(df.describe())' +
+            '- PDF: from fpdf import FPDF; pdf = FPDF(); pdf.add_page(); pdf.set_font("Helvetica", size=12); ' +
+            'pdf.cell(text="Hello"); pdf.output("report.pdf"); bucket.upload_from("report.pdf")\n' +
+            '- Excel: from openpyxl import Workbook; wb = Workbook(); ws = wb.active; ws.append(["Name","Score"]); ' +
+            'wb.save("data.xlsx"); bucket.upload_from("data.xlsx")\n' +
+            '- Image: from PIL import Image; img = Image.new("RGB",(200,200),"red"); img.save("out.png"); ' +
+            'bucket.upload_from("out.png")\n' +
+            '- Chart: import matplotlib.pyplot as plt; plt.plot([1,2,3]); plt.savefig("chart.png"); ' +
+            'bucket.upload_from("chart.png")' +
             bucketDescription,
         schema: z.object({
             code: z
                 .string()
                 .describe(
                     "Python code to execute. Use print() for output. " +
-                    "Available: numpy, pandas, scipy, sympy, matplotlib, math, statistics, etc." +
+                    "Available: numpy, pandas, scipy, sympy, matplotlib, seaborn, fpdf2, openpyxl, " +
+                    "python-docx, Pillow, requests, beautifulsoup4, tabulate, and more." +
                     (hasBucketAccess ? " Bucket: from _pushable_bucket import bucket" : "")
                 ),
             timeout_seconds: z

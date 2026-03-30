@@ -226,6 +226,7 @@ export default function AgentsPage() {
     const [loadingSessions, setLoadingSessions] = useState(false);
     const [loadingMessages, setLoadingMessages] = useState(false);
     const [sending, setSending] = useState(false);
+    const [activeRunId, setActiveRunId] = useState<string | null>(null);
     const [activeArtifact, setActiveArtifact] = useState<Artifact | null>(null);
     const [pendingApproval, setPendingApproval] = useState<{ msgId: string; request: ApprovalRequest } | null>(null);
 
@@ -476,6 +477,7 @@ export default function AgentsPage() {
                         reconnectAbortRef.current = abortController;
 
                         const runId = runData.data.id as string;
+                        setActiveRunId(runId);
                         const sseUrl = snapshot?.eventCount
                             ? `${API_URL}/api/runs/${runId}/events?from=${snapshot.eventCount}`
                             : `${API_URL}/api/runs/${runId}/events`;
@@ -496,6 +498,7 @@ export default function AgentsPage() {
                             // SSE failed — polling will deliver
                         }).finally(() => {
                             setSending(false);
+                            setActiveRunId(null);
                         });
                     } else if (runStatus === 'interrupted') {
                         // Restore approval state: find the last assistant message with approvalRequest
@@ -943,6 +946,10 @@ export default function AgentsPage() {
                         // Returning lets the caller abort polling to prevent duplicates.
                         return;
                     }
+                    if (parsed.stopped) {
+                        // Agent was stopped by user — finalize the message
+                        setMessages((prev) => prev.map((m) => m.id === assistantMsgId ? { ...m, content: fullContent, isStreaming: false, segments: [...segments] } : m));
+                    }
                     if (parsed.error) toast.error(parsed.error);
                 } catch { /* ignore */ }
             }
@@ -1093,6 +1100,8 @@ export default function AgentsPage() {
                 runId = result.runId;
             }
 
+            setActiveRunId(runId);
+
             // Start polling fallback in parallel
             pollForCompletion(activeSession.id, assistantMsg.id, abortController.signal).catch(() => {});
 
@@ -1114,6 +1123,7 @@ export default function AgentsPage() {
             abortController.abort();
         } finally {
             setSending(false);
+            setActiveRunId(null);
         }
     };
 
@@ -1144,6 +1154,7 @@ export default function AgentsPage() {
             const activeRunData = await activeRunRes.json();
             const runId = activeRunData.data?.id;
             if (!runId) throw new Error('No active run found');
+            setActiveRunId(runId);
 
             // POST approval
             const approveRes = await fetch(`${API_URL}/api/runs/${runId}/approve`, {
@@ -1170,6 +1181,20 @@ export default function AgentsPage() {
             toast.error('Failed to process approval');
         } finally {
             setSending(false);
+            setActiveRunId(null);
+        }
+    };
+
+    const stopRun = async () => {
+        if (!workspace || !activeRunId) return;
+        try {
+            const token = getToken();
+            await fetch(`${API_URL}/api/runs/${activeRunId}/stop`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
+            });
+        } catch {
+            toast.error('Failed to stop the agent');
         }
     };
 
@@ -1740,9 +1765,15 @@ export default function AgentsPage() {
                                                         <Button onClick={() => fileInputRef.current?.click()} size="icon" variant="ghost" className="h-8 w-8 rounded-lg" title="Attach files">
                                                             <Paperclip className="h-4 w-4 text-muted-foreground" />
                                                         </Button>
-                                                        <Button onClick={sendMessage} disabled={(!chatInput.trim() && pendingFiles.length === 0) || sending} size="icon" variant="ghost" className="h-8 w-8 rounded-lg">
-                                                            {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
-                                                        </Button>
+                                                        {sending ? (
+                                                            <Button onClick={stopRun} size="icon" variant="ghost" className="h-8 w-8 rounded-lg" title="Stop agent">
+                                                                <Square className="h-3.5 w-3.5 fill-current" />
+                                                            </Button>
+                                                        ) : (
+                                                            <Button onClick={sendMessage} disabled={(!chatInput.trim() && pendingFiles.length === 0)} size="icon" variant="ghost" className="h-8 w-8 rounded-lg">
+                                                                <ArrowUp className="h-4 w-4" />
+                                                            </Button>
+                                                        )}
                                                     </div>
                                                 </div>
                                             </div>

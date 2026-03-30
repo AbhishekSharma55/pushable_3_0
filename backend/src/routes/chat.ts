@@ -21,6 +21,10 @@ const AGENT_RECURSION_LIMIT = 50; // Safety net behind step_count-based graceful
 
 const HELPER_TEXT_MODEL = "openai/gpt-4.1-nano";
 
+// ─── Run abort registry ──────────────────────────────────────────────────────
+// Tracks AbortControllers per runId so runs can be stopped via the stop endpoint.
+const runAbortControllers = new Map<string, AbortController>();
+
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
 const chatBodySchema = z.object({
@@ -552,6 +556,10 @@ async function executeRun(
             });
         }
 
+        // Register an AbortController so this run can be stopped externally
+        const abortController = new AbortController();
+        runAbortControllers.set(runId, abortController);
+
         logger.info({ runId, sessionId, attachmentCount: attachments?.length ?? 0 }, "Starting graph stream for run");
 
         // Build message content — multimodal if attachments present
@@ -611,12 +619,16 @@ async function executeRun(
                 configurable: { thread_id: sessionId },
                 streamMode: "messages",
                 recursionLimit: AGENT_RECURSION_LIMIT,
+                signal: abortController.signal,
             }
         );
 
         const streamResult = await processGraphStream(stream, runId);
 
         mergeBrowserEvents(streamResult, browserToolCalls, browserSegments);
+
+        // Clean up abort controller now that stream is done
+        runAbortControllers.delete(runId);
 
         logger.info(
             {
@@ -681,6 +693,16 @@ async function executeRun(
                 .catch((err: unknown) => logger.warn({ err, runId }, "Post-run reflection failed"));
         }
     } catch (error) {
+        // Clean up abort controller on any exit path
+        runAbortControllers.delete(runId);
+
+        // Abort = user-initiated stop via the stop endpoint. The stop endpoint
+        // already updated the run status and closed the SSE stream, so just exit.
+        if (error instanceof Error && error.name === "AbortError") {
+            logger.info({ runId }, "Run aborted by user");
+            return;
+        }
+
         // GraphRecursionError means the step_count-based graceful termination
         // didn't fire (edge case). Treat the run as completed with whatever
         // content was streamed, rather than failing the entire run.
@@ -744,18 +766,26 @@ async function resumeRun(
             sessionId
         );
 
+        // Register an AbortController so this resumed run can be stopped
+        const abortController = new AbortController();
+        runAbortControllers.set(runId, abortController);
+
         const stream = await graph.stream(
             new Command({ resume: { decisions } }),
             {
                 configurable: { thread_id: sessionId },
                 streamMode: "messages",
                 recursionLimit: AGENT_RECURSION_LIMIT,
+                signal: abortController.signal,
             }
         );
 
         const streamResult = await processGraphStream(stream, runId);
 
         mergeBrowserEvents(streamResult, browserToolCalls, browserSegments);
+
+        // Clean up abort controller
+        runAbortControllers.delete(runId);
 
         // Check for further interrupts (returns the payload to avoid a second getState call)
         const interruptResult = await checkAndEmitInterrupts(graph, sessionId, runId);
@@ -805,6 +835,15 @@ async function resumeRun(
                 .catch((err: unknown) => logger.warn({ err, runId }, "Post-run reflection failed (resumed run)"));
         }
     } catch (error) {
+        // Clean up abort controller on any exit path
+        runAbortControllers.delete(runId);
+
+        // Abort = user-initiated stop
+        if (error instanceof Error && error.name === "AbortError") {
+            logger.info({ runId }, "Resumed run aborted by user");
+            return;
+        }
+
         if (error instanceof GraphRecursionError) {
             logger.warn({ runId, error: error.message }, "Resumed run hit recursion limit — completing gracefully");
             await runRepository.updateStatus(runId, "completed").catch((e) => logger.error({ e, runId }, "Failed to update run status"));
@@ -1161,6 +1200,61 @@ export async function chatRoutes(fastify: FastifyInstance) {
             logger.error({ err, runId }, "Unhandled error in run resume");
         });
 
+        return reply.send({ ok: true });
+    });
+
+    // ── POST /runs/:runId/stop ──────────────────────────────────────────────
+    // Stop a running agent graph. Aborts the stream, saves partial content,
+    // and closes the SSE connection so the frontend can show what was generated.
+    fastify.post("/runs/:runId/stop", async (request, reply) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { runId } = request.params as { runId: string };
+
+        const run = await runRepository.findById(runId, workspaceId);
+        if (!run) {
+            throw new AppError("Run not found", 404, "RUN_NOT_FOUND");
+        }
+        if (run.status !== "in_progress" && run.status !== "queued") {
+            throw new AppError(
+                `Run is not active (status: ${run.status})`,
+                409,
+                "RUN_NOT_ACTIVE"
+            );
+        }
+
+        // Abort the graph stream
+        const controller = runAbortControllers.get(runId);
+        if (controller) {
+            controller.abort();
+            runAbortControllers.delete(runId);
+        }
+
+        // Save partial content from the event bus snapshot
+        const snapshot = runEventBus.getSnapshot(runId);
+        if (snapshot && (snapshot.content || snapshot.toolCalls.length > 0)) {
+            await messageRepository.create({
+                workspaceId,
+                sessionId: run.sessionId,
+                role: "assistant",
+                content: snapshot.content || "(Stopped by user)",
+                tokenCount: 0,
+                metadata: {
+                    toolCalls: snapshot.toolCalls,
+                    stopped: true,
+                },
+            }).catch((e) => logger.error({ e, runId }, "Failed to save partial message on stop"));
+        }
+
+        // Update run status and close SSE
+        await runRepository.updateStatus(runId, "cancelled", "Stopped by user");
+        runEventBus.emit(runId, {
+            type: "stopped",
+            data: { stopped: true, reason: "Stopped by user" },
+            timestamp: Date.now(),
+        });
+        runEventBus.complete(runId);
+
+        logger.info({ runId }, "Run stopped by user");
         return reply.send({ ok: true });
     });
 

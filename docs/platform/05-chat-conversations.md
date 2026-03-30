@@ -213,7 +213,7 @@ Agent debug information emitted at the start of a run.
   "data": {
     "debug": {
       "agentName": "Research Assistant",
-      "modelId": "anthropic/claude-sonnet-4-20250514",
+      "modelId": "anthropic/claude-opus-4.6",
       "temperature": 0.3,
       "tools": [...],
       "capabilities": { "kbCount": 2, "toolCount": 5, ... }

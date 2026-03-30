@@ -19,7 +19,9 @@ export function buildBucketTools(config: {
 
     /** Check if a folder is writable by this agent */
     function isWritableFolder(folder: string): boolean {
-        return folder === agentFolder || folder === SHARED_FOLDER || folder.startsWith(agentFolder + "/");
+        return folder === agentFolder || folder === SHARED_FOLDER
+            || folder.startsWith(agentFolder + "/")
+            || folder.startsWith(SHARED_FOLDER + "/");
     }
 
     /** Resolve the target folder — defaults to agent folder, validates writability */
@@ -62,7 +64,9 @@ export function buildBucketTools(config: {
                 .string()
                 .optional()
                 .describe(
-                    `Folder path. Defaults to "${agentFolder}". Use "${SHARED_FOLDER}" to share with other agents.`
+                    `Folder path. Defaults to "${agentFolder}". Use "${SHARED_FOLDER}" to share with other agents. ` +
+                    `Supports nested subfolders (e.g. "${agentFolder}/reports/2026", "${SHARED_FOLDER}/exports"). ` +
+                    `Folders are created automatically — no need to create them first.`
                 ),
             description: z
                 .string()
@@ -185,7 +189,7 @@ export function buildBucketTools(config: {
     const bucketListFiles = new DynamicStructuredTool({
         name: "bucket_list_files",
         description:
-            `List files in the workspace bucket. By default shows files in your folder ("${agentFolder}") and "${SHARED_FOLDER}".`,
+            `List files in the workspace bucket. By default shows files in your folder ("${agentFolder}") and "${SHARED_FOLDER}", including any subfolders.`,
         schema: z.object({
             folder: z
                 .string()
@@ -305,7 +309,8 @@ export function buildBucketTools(config: {
         name: "bucket_get_download_url",
         description:
             "Get a download URL for a file in the bucket. Use this when you need to share " +
-            "a file link with the user or reference it in a message.",
+            "a file link with the user or reference it in a message. " +
+            "Returns both a relative URL (for frontend use) and an absolute internal URL (for tool-to-tool operations).",
         schema: z.object({
             fileId: z.string().describe("ID of the file"),
         }),
@@ -315,8 +320,11 @@ export function buildBucketTools(config: {
                 if (!file) {
                     return `File not found with ID: ${fileId}`;
                 }
-                // Return a relative download URL — the frontend will prepend the API base
-                return `Download URL for "${file.filename}": /api/bucket/files/${file.id}/download\n\nNote: This URL requires authentication. Share the file ID with the user if they need to download it.`;
+                const apiPort = process.env.PORT || "4000";
+                const apiBase = process.env.API_BASE_URL || `http://localhost:${apiPort}`;
+                const relativePath = `/api/bucket/files/${file.id}/download`;
+                const absoluteUrl = `${apiBase}${relativePath}`;
+                return `Download URL for "${file.filename}":\n- Relative: ${relativePath}\n- Absolute: ${absoluteUrl}\n\nNote: This URL requires authentication (Authorization header + x-workspace-id). Share the file ID with the user if they need to download it.`;
             } catch (error) {
                 logger.error({ error, fileId }, "bucket_get_download_url failed");
                 return `Failed to get download URL: ${error instanceof Error ? error.message : "Unknown error"}`;

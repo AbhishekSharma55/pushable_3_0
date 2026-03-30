@@ -32,6 +32,7 @@ import { buildNotebookTools, loadNotebookEntries } from "../tools/notebook.tools
 import { buildBucketTools } from "../tools/bucket.tools.ts";
 import { buildBucketComposioBridgeTool } from "../tools/bucket-composio-bridge.tools.ts";
 import { buildPythonTools } from "../tools/python.tools.ts";
+import { buildWorkspaceUserTools } from "../tools/workspace-user.tools.ts";
 import { buildCEOTools } from "../tools/ceo.tools.ts";
 import { CEO_SYSTEM_PROMPT } from "../lib/ceo-prompt.ts";
 import { buildTesterTools } from "../tools/tester.tools.ts";
@@ -1360,6 +1361,9 @@ export async function createAgentGraph(
         langchainTools.push(...buildMemoryTools({ workspaceId, agentId, userId }));
         langchainTools.push(...buildNotebookTools({ store, workspaceId, agentId, userId }));
     }
+
+    // --- 8a. Workspace user info tool ---
+    langchainTools.push(...buildWorkspaceUserTools({ workspaceId }));
 
     // --- 8b. Planning tools ---
     let currentTodos: Todo[] = [];

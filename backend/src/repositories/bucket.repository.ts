@@ -1,4 +1,4 @@
-import { eq, and, or, sql, desc, ilike } from "drizzle-orm";
+import { eq, and, or, sql, desc, ilike, like } from "drizzle-orm";
 import { db } from "../db/client.ts";
 import { bucketFiles } from "../db/schema/index.ts";
 
@@ -65,8 +65,12 @@ export const bucketRepository = {
         if (options?.folder) {
             conditions.push(eq(bucketFiles.folder, options.folder));
         } else if (options?.folders && options.folders.length > 0) {
+            // Match exact folder OR any subfolder (e.g. /agent-steve matches /agent-steve/reports/q1)
             conditions.push(
-                or(...options.folders.map((f) => eq(bucketFiles.folder, f)))!
+                or(...options.folders.flatMap((f) => [
+                    eq(bucketFiles.folder, f),
+                    like(bucketFiles.folder, `${f}/%`),
+                ]))!
             );
         }
         if (options?.source) {
@@ -116,8 +120,12 @@ export const bucketRepository = {
             eq(bucketFiles.workspaceId, workspaceId),
         ];
         if (folders && folders.length > 0) {
+            // Match exact folder OR any subfolder
             conditions.push(
-                or(...folders.map((f) => eq(bucketFiles.folder, f)))!
+                or(...folders.flatMap((f) => [
+                    eq(bucketFiles.folder, f),
+                    like(bucketFiles.folder, `${f}/%`),
+                ]))!
             );
         }
         const result = await db

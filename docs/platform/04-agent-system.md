@@ -107,7 +107,7 @@ x-workspace-id: <workspace-id>
 {
   "name": "Research Assistant",
   "systemPrompt": "You are a research assistant that helps find and summarize information.",
-  "model": "anthropic/claude-sonnet-4-20250514",
+  "model": "anthropic/claude-opus-4.6",
   "temperature": 0.3,
   "browserType": "cloud"
 }

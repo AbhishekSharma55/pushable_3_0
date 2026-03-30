@@ -1,5 +1,8 @@
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
+import { writeFile, mkdtemp } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 import { bucketRepository } from "../repositories/bucket.repository.ts";
 import { getStorage } from "../lib/storage.ts";
 import { getComposioClient } from "../lib/composio.ts";
@@ -26,8 +29,8 @@ export function buildBucketComposioBridgeTool(config: {
             "2. Use COMPOSIO_SEARCH_TOOLS to discover the correct tool slug and its parameter names (e.g. GOOGLEDRIVE_UPLOAD_FILE)\n" +
             "3. Call this tool with the file reference, tool slug, and the parameter name the Composio tool expects for file content\n\n" +
             "Examples:\n" +
-            '- Upload to Google Drive: composioToolSlug: "GOOGLEDRIVE_UPLOAD_FILE", fileParamName: "file", additionalParams: { name: "report.pdf", parent: "folder_id" }\n' +
-            '- Upload to Dropbox: composioToolSlug: "DROPBOX_UPLOAD_FILE", fileParamName: "file_content", additionalParams: { path: "/reports/report.pdf" }',
+            '- Upload to Google Drive: composioToolSlug: "GOOGLEDRIVE_UPLOAD_FILE", fileParamName: "file_to_upload", additionalParams: { name: "report.pdf", parent: "folder_id" }\n' +
+            '- Upload to Dropbox: composioToolSlug: "DROPBOX_UPLOAD_FILE", fileParamName: "file_to_upload", additionalParams: { path: "/reports/report.pdf" }',
         schema: z.object({
             fileId: z
                 .string()
@@ -45,10 +48,10 @@ export function buildBucketComposioBridgeTool(config: {
                 ),
             fileParamName: z
                 .string()
-                .default("file")
+                .default("file_to_upload")
                 .describe(
-                    "The parameter name the Composio tool expects for the file content (e.g. 'file', 'file_content', 'content'). " +
-                    "Check the tool schema from COMPOSIO_SEARCH_TOOLS to find the correct name."
+                    "The parameter name the Composio tool expects for the file (e.g. 'file_to_upload', 'file', 'file_content'). " +
+                    "Most Composio file tools use 'file_to_upload'. Check the tool schema from COMPOSIO_SEARCH_TOOLS to confirm."
                 ),
             additionalParams: z
                 .record(z.string(), z.unknown())
@@ -59,6 +62,7 @@ export function buildBucketComposioBridgeTool(config: {
                 ),
         }),
         func: async ({ fileId, filename, composioToolSlug, fileParamName, additionalParams }) => {
+            let tempDir: string | null = null;
             try {
                 // 1. Resolve the bucket file
                 if (!fileId && !filename) {
@@ -76,25 +80,29 @@ export function buildBucketComposioBridgeTool(config: {
                     return `File not found${filename ? `: "${filename}"` : ""}. Use bucket_list_files to see available files.`;
                 }
 
-                // 2. Read file content from storage
+                // 2. Read file content from storage and write to temp file
+                // Composio SDK expects a local file path for file upload tools —
+                // it handles reading the file and uploading it automatically.
                 const storage = getStorage();
                 const { buffer } = await storage.get(file.storageKey);
-                const base64Content = buffer.toString("base64");
+
+                tempDir = await mkdtemp(join(tmpdir(), "bucket-export-"));
+                const tempFilePath = join(tempDir, file.filename);
+                await writeFile(tempFilePath, buffer);
 
                 logger.info(
-                    { fileId: file.id, filename: file.filename, composioToolSlug, sizeBytes: buffer.length },
-                    "bucket_export_to_composio: exporting file"
+                    { fileId: file.id, filename: file.filename, composioToolSlug, sizeBytes: buffer.length, tempFilePath },
+                    "bucket_export_to_composio: exporting file via temp path"
                 );
 
-                // 3. Execute the Composio tool directly (server-side, no LLM context)
+                // 3. Execute the Composio tool with local file path
                 const composio = getComposioClient();
                 const toolArguments: Record<string, unknown> = {
                     ...(additionalParams || {}),
-                    [fileParamName]: base64Content,
+                    [fileParamName]: tempFilePath,
                 };
 
                 // Also pass filename/mime if not already in additionalParams
-                // Common param names that Composio tools use for filenames
                 if (!additionalParams?.name && !additionalParams?.file_name && !additionalParams?.fileName) {
                     toolArguments.name = file.filename;
                 }
@@ -114,6 +122,16 @@ export function buildBucketComposioBridgeTool(config: {
                 logger.error({ error, fileId, filename, composioToolSlug }, "bucket_export_to_composio failed");
                 const msg = error instanceof Error ? error.message : "Unknown error";
                 return `Failed to export file via ${composioToolSlug}: ${msg}\n\nTips:\n- Verify the tool slug is correct (use COMPOSIO_SEARCH_TOOLS to discover it)\n- Check that the integration is connected (use COMPOSIO_MANAGE_CONNECTIONS)\n- Verify the fileParamName matches the tool's schema`;
+            } finally {
+                // Clean up temp file
+                if (tempDir) {
+                    try {
+                        const { rm } = await import("fs/promises");
+                        await rm(tempDir, { recursive: true, force: true });
+                    } catch {
+                        // Ignore cleanup errors
+                    }
+                }
             }
         },
     });

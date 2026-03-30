@@ -526,7 +526,7 @@ export default function FilesPage() {
                                             </span>
                                         </td>
                                         <td className="px-4 py-3 text-sm text-muted-foreground truncate max-w-[120px]">{file.folder}</td>
-                                        <td className="px-4 py-3 text-sm text-muted-foreground">{new Date(file.createdAt).toLocaleDateString()}</td>
+                                        <td className="px-4 py-3 text-sm text-muted-foreground">{new Date(file.createdAt).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
                                         <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                                             <DropdownMenu>
                                                 <DropdownMenuTrigger asChild>
@@ -670,7 +670,7 @@ export default function FilesPage() {
                                     <span className="text-border">|</span>
                                     <span>{previewFile.mimeType}</span>
                                     <span className="text-border">|</span>
-                                    <span>{new Date(previewFile.createdAt).toLocaleDateString()}</span>
+                                    <span>{new Date(previewFile.createdAt).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
                                 </>
                             )}
                         </DialogDescription>

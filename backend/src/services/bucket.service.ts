@@ -64,6 +64,16 @@ export const bucketService = {
             );
         }
 
+        // Check for duplicate filename in the same folder
+        const existing = await bucketRepository.findByFilename(filename, workspaceId, [folder]);
+        if (existing) {
+            throw new AppError(
+                `File "${filename}" already exists in folder "${folder}". Use a different name, or delete/update the existing file.`,
+                409,
+                "DUPLICATE_FILENAME"
+            );
+        }
+
         // Generate storage key and write to disk
         const storageKey = generateStorageKey(workspaceId, filename);
         const storage = getStorage();

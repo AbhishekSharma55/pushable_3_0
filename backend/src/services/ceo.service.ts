@@ -4,7 +4,7 @@ import { agents } from "../db/schema/index.ts";
 import { agentRepository } from "../repositories/agent.repository.ts";
 import { logger } from "../lib/logger.ts";
 
-const CEO_DEFAULT_MODEL = "claude-sonnet-4-20250514";
+const CEO_DEFAULT_MODEL = "claude-opus-4.6";
 
 export const ceoService = {
     async getOrCreateCEO(workspaceId: string) {

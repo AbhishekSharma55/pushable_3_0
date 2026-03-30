@@ -22,6 +22,7 @@ import {
     FolderOpen,
     Layers,
     FlaskConical,
+    Route,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -54,6 +55,7 @@ import type { Workspace } from '@/types';
 const navItems = [
     { label: 'Dashboard', href: '/', icon: LayoutDashboard },
     { label: 'Agents', href: '/agents', icon: Bot },
+    { label: 'Workflows', href: '/workflows', icon: Route },
     { label: 'Projects', href: '/projects', icon: Layers },
     { label: 'Testing', href: '/testing', icon: FlaskConical },
     { label: 'Integrations', href: '/integrations', icon: Blocks },

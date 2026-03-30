@@ -740,8 +740,14 @@ function ChatHeader({
 
 function MessageBubble({
   msg,
+  sessionId,
+  agentId,
+  workspaceId,
 }: {
   msg: ChatMessage;
+  sessionId?: string | null;
+  agentId?: string | null;
+  workspaceId?: string;
 }) {
   const isUser = msg.role === "user";
   const toolCalls = msg.metadata?.toolCalls ?? [];
@@ -899,6 +905,8 @@ function MessageBubble({
           {msg.status === "error" && (
             <p className="text-xs text-destructive mt-1">Error occurred</p>
           )}
+
+          {/* Workflow save is handled by the agent via save_as_workflow tool */}
 
           {/* Per-message cost badge (logging only) */}
           {LOGGING_ENABLED && msg.status === "done" && msg.metadata?.cost && (
@@ -1275,7 +1283,7 @@ export function ChatComponent({
           )}
 
           {visibleMessages.map((msg) => (
-            <MessageBubble key={msg.id} msg={msg} />
+            <MessageBubble key={msg.id} msg={msg} sessionId={chatSessionId} agentId={currentAgentId} workspaceId={workspace?.id} />
           ))}
 
           <div ref={bottomRef} />

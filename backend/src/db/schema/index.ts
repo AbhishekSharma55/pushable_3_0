@@ -38,3 +38,5 @@ export { projectKnowledgeBases } from "./projectKnowledgeBases.ts";
 export { runReports } from "./runReports.ts";
 export { testSuites } from "./testSuites.ts";
 export { testCases } from "./testCases.ts";
+export { workflows } from "./workflows.ts";
+export { workflowRuns, workflowRunStatusEnum } from "./workflowRuns.ts";

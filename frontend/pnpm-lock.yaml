@@ -35,6 +35,9 @@ importers:
       cronstrue:
         specifier: ^3.13.0
         version: 3.13.0
+      date-fns:
+        specifier: ^4.1.0
+        version: 4.1.0
       embla-carousel-react:
         specifier: ^8.6.0
         version: 8.6.0(react@19.2.3)

@@ -28,6 +28,7 @@ import { buildVaultTools } from "../tools/vault.tools.ts";
 import { buildSystemTools } from "../tools/system.tools.ts";
 import { buildMemoryTools } from "../tools/memory.tools.ts";
 import { buildPlanningTools, type Todo } from "../tools/planning.tools.ts";
+import { buildWorkflowTools } from "../tools/workflow.tools.ts";
 import { buildNotebookTools, loadNotebookEntries } from "../tools/notebook.tools.ts";
 import { buildBucketTools } from "../tools/bucket.tools.ts";
 import { buildBucketComposioBridgeTool } from "../tools/bucket-composio-bridge.tools.ts";
@@ -588,6 +589,15 @@ function recoverToolCallsFromText(
     }
 }
 
+export interface TraceStep {
+    tool: string;
+    args: Record<string, unknown>;
+    output: string;
+    durationMs: number;
+    succeeded: boolean;
+    timestamp: string;
+}
+
 const AgentState = Annotation.Root({
     ...MessagesAnnotation.spec,
     summary: Annotation<string>({
@@ -601,6 +611,10 @@ const AgentState = Annotation.Root({
     step_count: Annotation<number>({
         reducer: (_curr: number, update: number) => update,
         default: () => 0,
+    }),
+    execution_trace: Annotation<TraceStep[]>({
+        reducer: (curr: TraceStep[], update: TraceStep[]) => [...curr, ...update],
+        default: () => [],
     }),
 });
 
@@ -725,6 +739,7 @@ interface GraphCacheEntry {
     graph: any; // CompiledStateGraph returned by graph.compile()
     runReflection: (messages: BaseMessage[]) => Promise<void>;
     browserEventRef: { current: BrowserAgentEventEmitter | undefined };
+    toolsByName: Map<string, DynamicStructuredTool>;
     timestamp: number;
 }
 
@@ -1372,6 +1387,14 @@ export async function createAgentGraph(
         (todos) => { currentTodos = todos; }
     );
     langchainTools.push(...planningTools);
+
+    // --- 8b2. Workflow tools ---
+    let currentTrace: TraceStep[] = [];
+    langchainTools.push(...buildWorkflowTools({
+        workspaceId,
+        agentId,
+        getTrace: () => currentTrace,
+    }));
 
     // --- 8c. Decision confirmation tool (human-in-the-loop) ---
     const askUserConfirmationTool = new DynamicStructuredTool({
@@ -2085,6 +2108,42 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
             logger.warn({ error, agentId }, "Reflection node: failed to extract learnings");
         }
 
+        // --- Workflow pattern detection ---
+        // Track tool call sequences to suggest workflow compilation when patterns repeat
+        try {
+            const trace = state.execution_trace || [];
+            if (trace.length >= 3) {
+                const toolSequence = trace.filter(s => s.succeeded).map(s => s.tool).join(" -> ");
+                if (toolSequence) {
+                    const ns = [workspaceId, "workflow_suggestions"];
+                    const existing = await store.search(ns, { limit: 50 });
+                    const matchCount = existing.filter(item => item.value.sequence === toolSequence).length;
+
+                    if (matchCount === 0) {
+                        // First time seeing this sequence — store it
+                        await store.put(ns, randomUUID(), {
+                            sequence: toolSequence,
+                            agentId,
+                            stepCount: trace.filter(s => s.succeeded).length,
+                            detectedAt: new Date().toISOString(),
+                        });
+                    } else if (matchCount >= 2) {
+                        // Seen 3+ times — store a suggestion flag
+                        await store.put(ns, `suggest-${agentId}`, {
+                            sequence: toolSequence,
+                            agentId,
+                            count: matchCount + 1,
+                            suggestion: `This tool sequence has been run ${matchCount + 1} times. Consider saving it as a workflow with save_as_workflow.`,
+                            detectedAt: new Date().toISOString(),
+                        });
+                        logger.info({ agentId, sequence: toolSequence, count: matchCount + 1 }, "Workflow suggestion: repeated pattern detected");
+                    }
+                }
+            }
+        } catch (error) {
+            logger.warn({ error, agentId }, "Reflection node: failed to detect workflow patterns");
+        }
+
         return {};
     };
 
@@ -2169,8 +2228,9 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
     }
 
     const humanReviewToolNode = async (state: typeof AgentState.State) => {
-        // Sync planning state so tools can read/write it
+        // Sync planning state and execution trace so tools can read/write them
         currentTodos = state.todos || [];
+        currentTrace = state.execution_trace || [];
         const lastMessage = state.messages[state.messages.length - 1] as AIMessage;
         const toolCalls = lastMessage.tool_calls ?? [];
 
@@ -2181,6 +2241,8 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
         }, "Tool node executing");
 
         const results: ToolMessage[] = [];
+        const traceSteps: TraceStep[] = [];
+
         for (const tc of toolCalls) {
             // Decision confirmation — interrupt for user approval
             if (tc.name === "ask_user_confirmation") {
@@ -2219,31 +2281,51 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
                 continue;
             }
 
+            const startMs = Date.now();
             try {
                 const result = await tool.invoke(tc.args);
                 const resultContent = typeof result === "string" ? result : JSON.stringify(result);
+                const durationMs = Date.now() - startMs;
                 logger.info({
                     toolName: tc.name,
                     resultLength: resultContent.length,
                     resultPreview: resultContent.slice(0, 300),
+                    durationMs,
                 }, "Tool executed successfully");
                 results.push(new ToolMessage({
                     content: resultContent,
                     tool_call_id: tc.id!,
                     name: tc.name,
                 }));
+                traceSteps.push({
+                    tool: tc.name,
+                    args: tc.args as Record<string, unknown>,
+                    output: resultContent.slice(0, 2000),
+                    durationMs,
+                    succeeded: true,
+                    timestamp: new Date().toISOString(),
+                });
             } catch (error) {
                 const errMsg = `Error: ${error instanceof Error ? error.message : "Unknown error"}`;
+                const durationMs = Date.now() - startMs;
                 logger.error({ toolName: tc.name, error: errMsg }, "Tool execution failed");
                 results.push(new ToolMessage({
                     content: errMsg,
                     tool_call_id: tc.id!,
                     name: tc.name,
                 }));
+                traceSteps.push({
+                    tool: tc.name,
+                    args: tc.args as Record<string, unknown>,
+                    output: errMsg,
+                    durationMs,
+                    succeeded: false,
+                    timestamp: new Date().toISOString(),
+                });
             }
         }
 
-        return { messages: results, todos: currentTodos };
+        return { messages: results, todos: currentTodos, execution_trace: traceSteps };
     };
 
     // reflect_and_learn runs post-stream (fire-and-forget via runReflection below),
@@ -2290,9 +2372,41 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
         graph: compiled,
         runReflection,
         browserEventRef,
+        toolsByName,
         timestamp: Date.now(),
     });
     logger.info({ agentId, cacheKey }, "Agent graph compiled and cached");
 
     return { graph: compiled, runReflection };
+}
+
+/**
+ * Get the tool map for an agent, reusing the graph cache.
+ * Used by the workflow executor to call tools directly without an LLM loop.
+ */
+export async function getToolsForAgent(
+    agentId: string,
+    workspaceId: string,
+): Promise<Map<string, DynamicStructuredTool>> {
+    // Check cache first
+    for (const [, entry] of graphCache) {
+        if (Date.now() - entry.timestamp < GRAPH_CACHE_TTL_MS && entry.toolsByName.size > 0) {
+            // Found a valid cached entry - check if it's for this agent
+            // Cache keys are formatted as agentId:workspaceId:...
+            return entry.toolsByName;
+        }
+    }
+
+    // No cache hit — create the graph which populates the cache
+    const { } = await createAgentGraph(agentId, workspaceId);
+
+    // Now find the cache entry
+    for (const [key, entry] of graphCache) {
+        if (key.startsWith(`${agentId}:${workspaceId}:`)) {
+            return entry.toolsByName;
+        }
+    }
+
+    // Fallback: empty map (should not happen)
+    return new Map();
 }

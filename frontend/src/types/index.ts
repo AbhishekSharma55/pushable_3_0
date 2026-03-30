@@ -451,3 +451,70 @@ export interface BrowserProxy {
     createdAt: string;
     updatedAt: string;
 }
+
+// --- Workflows ---
+
+export interface WorkflowInputParam {
+    type: 'string' | 'number' | 'boolean';
+    description: string;
+    required?: boolean;
+    default?: string | number | boolean;
+}
+
+export interface WorkflowStep {
+    id: string;
+    type: 'tool' | 'nano_llm';
+    tool?: string;
+    prompt?: string;
+    args?: Record<string, unknown>;
+    outputKey: string;
+    condition?: string;
+    fallbackToAgent?: boolean;
+    continueOnError?: boolean;
+    description?: string;
+}
+
+export interface WorkflowRecipe {
+    version: 1;
+    steps: WorkflowStep[];
+    outputTemplate?: string;
+}
+
+export interface Workflow {
+    id: string;
+    workspaceId: string;
+    agentId: string;
+    name: string;
+    description: string | null;
+    inputSchema: Record<string, WorkflowInputParam>;
+    recipe: WorkflowRecipe;
+    sourceSessionId: string | null;
+    enabled: boolean;
+    lastRunAt: string | null;
+    runCount: number;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface WorkflowRun {
+    id: string;
+    workflowId: string;
+    workspaceId: string;
+    status: 'running' | 'completed' | 'failed';
+    inputData: Record<string, unknown>;
+    resultText: string | null;
+    error: string | null;
+    creditsUsed: number;
+    durationMs: number | null;
+    stepResults: unknown[];
+    startedAt: string;
+    completedAt: string | null;
+}
+
+export interface WorkflowStats {
+    totalRuns: number;
+    totalCredits: number;
+    successCount: number;
+    failCount: number;
+    avgDurationMs: number;
+}

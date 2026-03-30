@@ -1,0 +1,385 @@
+# Agent Cost Optimization Report — Pushable 3.0
+
+> **Date:** 2026-03-30
+> **Scope:** Per-iteration token cost reduction for agent runs (excludes model/provider selection)
+> **Current state:** ~82 tools (CEO agent), ~25 tools (normal agents), 25k+ token prompts
+
+---
+
+## Executive Summary
+
+The agent system already has several solid cost optimizations in place. However, there are **5-6 high-impact areas** where significant savings are being left on the table — particularly around **tool definitions bloat**, **unbounded tool results**, **missing `trimMessages`**, and the **Composio instruction mega-block**. The biggest single win is likely **dynamic tool selection**, which could cut 40-60% of tool-definition tokens for the CEO agent.
+
+---
+
+## Part 1: What We've Already Done Well
+
+| Optimization | Impact | Status |
+|---|---|---|
+| **Prompt caching** (Anthropic models) — stable/dynamic split | ~90% input savings on cached prefix | Done |
+| **Message summarization** at 30 msgs, keep last 10 | Prevents unbounded context growth | Done |
+| **Graph caching** with 10-min TTL per session | Avoids recompilation + DB re-fetches | Done |
+| **Procedural memory** — single embedding call for all tool learnings | O(1) vs O(N tools) embedding lookups | Done |
+| **Tool usage summary** — prevents repeating failed calls | Avoids wasted iterations | Done |
+| **Step budget** (25 max tool iterations + warning at 22) | Prevents runaway loops | Done |
+| **Final answer node** — forces synthesis when budget exhausted | Graceful degradation | Done |
+| **Lazy browser init** — Chromium deferred until first use | No startup cost if browser unused | Done |
+| **Parallel tool/KB/MCP loading** via `Promise.allSettled` | Load time = max, not sum | Done |
+| **Reflection runs post-stream** (fire-and-forget) | Non-blocking learning | Done |
+| **Permission-based tool filtering** — agents only get allowed tools | Reduces tool count for regular agents | Done |
+
+These are genuinely good. The prompt caching split and procedural memory are above-average for most agent platforms.
+
+### How prompt caching works today
+
+The system prompt is split into two content blocks in `gateway.ts`:
+
+- **Block 1 (Stable/Cached):** Agent identity, operating principles, capability maps, tool instructions. Tagged with `cache_control: { type: "ephemeral" }`.
+- **Block 2 (Dynamic):** Memories, KB results, notebook entries, tool usage history, plan state, step budget warnings. Fresh per turn.
+
+For Anthropic models via OpenRouter, a custom fetch wrapper (`createCacheControlFetch()`) re-injects `cache_control` after LangChain strips it. Non-Anthropic models get a single string with automatic caching.
+
+### How summarization works today
+
+- **Trigger:** `messages.length > 30` (SUMMARIZE_THRESHOLD)
+- **Behavior:** LLM generates a concise summary, deletes old messages via `RemoveMessage`, keeps last 10 messages
+- **Safe split:** Walks boundary back to avoid breaking tool call/response pairs
+- **Summary persists** across summarization cycles in `state.summary`
+
+### How the step budget works today
+
+- `MAX_TOOL_ITERATIONS = 25` — tracked via `state.step_count`
+- At step >= 22: warning injected into dynamic prompt block
+- At step >= 25: routes to `final_answer` node (LLM invoked without tools, forced to synthesize)
+- Secondary safety net: `recursionLimit: 50` in LangGraph config
+
+---
+
+## Part 2: What's Missing / Scope for Improvement
+
+### 1. No Tool Result Truncation
+
+**Severity:** Critical — High Impact
+
+**Problem:** In `agent.graph.ts:2222-2234`, tool results are passed to the LLM **in full, without any truncation**:
+
+```typescript
+const result = await tool.invoke(tc.args);
+const resultContent = typeof result === "string" ? result : JSON.stringify(result);
+// Full resultContent goes into ToolMessage — NO truncation
+results.push(new ToolMessage({ content: resultContent, ... }));
+```
+
+The `.slice(0, 300)` at line 2228 is **only for logging**, not for the actual message sent to the LLM.
+
+**Impact:** A single Composio tool call returning a full Gmail inbox, a Google Sheet, or a GitHub issue list can easily be **5,000-50,000 tokens**. This accumulates in conversation history and gets re-sent on every subsequent LLM call until summarization kicks in at 30 messages.
+
+**Fix:** Add a configurable max result size. Truncate large tool results with a suffix like `"... [truncated, showing first 3000 chars of 45000]"`. LangChain's docs recommend keeping tool results under ~4,000 tokens.
+
+**Estimated savings:** 20-40% of total token cost for tool-heavy conversations.
+
+---
+
+### 2. No `trimMessages` Before LLM Invocation
+
+**Severity:** Critical — High Impact
+
+**Problem:** There is a custom summarization node that triggers at 30 messages, but the codebase is **not using LangChain's built-in `trimMessages`** utility. More importantly, between summarization events (messages 1-30), the **full uncompressed history** is sent on every single LLM call.
+
+With 25 max tool iterations, each iteration can produce 2+ messages (AI + ToolMessage). That means by iteration 15, there could be 30+ messages — each containing full tool results — all being sent as input tokens on every call.
+
+**Fix:** Use `trimMessages` (from `@langchain/core/messages`) with a token counter before `llmWithTools.invoke()`. Set a `maxTokens` budget (e.g., 8,000 tokens for history) and trim from the beginning, preserving tool call/response pairs. This provides **per-call** protection, complementing the per-session summarization.
+
+```typescript
+import { trimMessages } from "@langchain/core/messages";
+
+const trimmed = await trimMessages(sanitizedMessages, {
+  maxTokens: 8000,
+  tokenCounter: llm.getNumTokens.bind(llm),
+  strategy: "last",
+  allowPartial: false,
+});
+await llmWithTools.invoke([systemMsg, ...trimmed], config);
+```
+
+**Estimated savings:** 15-30% of total input tokens across multi-step runs.
+
+---
+
+### 3. The Composio Instruction Block Is ~4,000 Tokens
+
+**Severity:** High Impact
+
+**Problem:** The Composio integration section in `system-prompt-builder.ts:280-378` is **~100 lines / ~4,000 tokens** of instruction text. It includes:
+
+- 6-step workflow instructions
+- 7 error handling patterns with specific regex-matched errors
+- 5 efficiency rules
+- 4 user-reference matching rules
+- Learning-from-experience instructions
+
+This is sent on **every single LLM call** for any agent with even one Composio integration.
+
+**Fix options:**
+
+1. **Move most of this to a skill/reference doc** that the agent can consult, instead of embedding in the system prompt
+2. **Condense to ~500 tokens** — the LLM already knows how to use tools. Keep only the 6-step flow summary and the critical rules (slug format, don't repeat searches). The verbose error handling table is unnecessary; the LLM can read error messages
+3. **Make it dynamic** — only include the full block on the first turn, then shrink to a short reminder on subsequent turns
+
+**Estimated savings:** 3,000-3,500 tokens per call for agents with Composio.
+
+---
+
+### 4. Dynamic Tool Selection / Tool Pruning
+
+**Severity:** High Impact (especially for CEO agent)
+
+**Problem:** The CEO agent gets **all system tools (28) + CEO tools (16) + base tools** = ~57-82 tools. Every tool definition costs ~150-350 tokens (name + description + JSON schema). That's **~10,000-15,000 tokens just for tool definitions**, sent on every call.
+
+Many of these tools are irrelevant to the current turn. If the user says "what's the status of project X?", the agent doesn't need `system_create_kb`, `system_delete_channel`, `system_create_schedule`, etc.
+
+LangChain explicitly recommends [dynamic tool selection](https://docs.langchain.com/oss/javascript/langchain/context-engineering#selecting-tools) in their context engineering docs:
+
+> "Not every tool is appropriate for every turn. Too many tools cause selection errors; too few limit capabilities. Dynamic tool selection adapts the available toolset based on context."
+
+**Fix options:**
+
+1. **Two-phase approach:** Use a lightweight/cheap model (nano/flash) to classify the user's intent and select only relevant tool groups (e.g., "project management" → CEO tools only, "create agent" → system tools only)
+2. **Tool groups with a meta-tool:** Replace 28 system tools with a `system_management` meta-tool that accepts an action parameter. Internally dispatches to the right sub-tool. Tool definition cost: 1 tool vs 28
+3. **LangChain middleware:** Use the [dynamically selecting tools](https://docs.langchain.com/oss/javascript/langchain/middleware/custom#dynamically-selecting-tools) middleware pattern to prune tools per-turn based on conversation context
+
+**Estimated savings:** 4,000-8,000 tokens per call for CEO agent.
+
+---
+
+### 5. System Prompt Is 46KB / ~12,000 Tokens Base
+
+**Severity:** Medium Impact
+
+**Problem:** `system-prompt-builder.ts` is 46KB (858 lines). Even for a simple agent with minimal capabilities, the base prompt (identity + core behavior + planning + confirmation rules) is ~2,500 tokens. For a CEO with all capabilities enabled, the stable block alone can exceed **10,000-12,000 tokens**.
+
+The prompt includes verbose sections that could be condensed:
+
+| Section | Current Est. Tokens | Could Be |
+|---|---|---|
+| Browser instructions (extension + cloud) | ~800 | ~200 |
+| Planning/task tracking instructions | ~400 | ~100 |
+| Confirmation rules | ~300 | ~80 |
+| Composio block | ~4,000 | ~500 |
+| Channel instructions | ~300 | ~80 |
+| KB instructions | ~300 | ~100 |
+
+**Fix:**
+
+- Apply the "minimal instruction principle" — modern LLMs don't need verbose step-by-step instructions for standard patterns
+- Use **conditional blocks more aggressively** — behavioral instructions within each section are verbose regardless of complexity
+- Target: **reduce stable block from ~12K to ~5K tokens**
+
+**Estimated savings:** 5,000-7,000 tokens off the base prompt. Partially offset by caching for Anthropic models, but still affects cache write cost (25% premium) and **all non-Anthropic models** which don't benefit from the cache split.
+
+---
+
+### 6. Tool Descriptions Embedded in System Prompt AND Tool Definitions (Double Counting)
+
+**Severity:** Medium Impact
+
+**Problem:** In `system-prompt-builder.ts:226-252`, function tools are listed with their full descriptions and parameters **inside the system prompt text**:
+
+```typescript
+`- **${t.name}**: ${t.description || "No description"}
+  Parameters: ${t.parameters}
+  Returns: ${t.returnDescription || "result"}`
+```
+
+These same tools are **also** sent as formal tool definitions via `bindTools()`. The LLM sees every tool twice — once in the system message text, once in the tools array. This is pure duplication.
+
+**Fix:** Remove the tool capability map from the system prompt. The LLM already sees tool names, descriptions, and schemas from the bound tools. If behavioral guidance is needed ("use tools before browser"), do it in a single sentence, not by re-listing every tool.
+
+**Estimated savings:** 500-2,000 tokens depending on number of function tools.
+
+---
+
+### 7. Browser Tool Count (11 tools) — Consider Consolidation
+
+**Severity:** Low-Medium Impact
+
+**Problem:** The browser agent has 11 individual tools with some overlap:
+
+- `click_element` vs `browser_click` (index-based vs selector-based)
+- `type_element` vs `browser_type` (same operation, different paradigms)
+
+**Fix:** Consolidate into fewer tools with optional parameters. E.g., one `browser_interact` tool with an `action` enum (`click|type|scroll|select`) and flexible targeting (index OR selector).
+
+**Estimated savings:** ~600-800 tokens in tool definitions.
+
+---
+
+### 8. No Token-Aware Context Budgeting
+
+**Severity:** Medium Impact
+
+**Problem:** The current system has no awareness of how many tokens are actually being consumed. There's no `tokenCounter` anywhere in the message pipeline. The summarization trigger is purely **message count** (30), not **token count**. A conversation with 20 messages where each tool result is 5K tokens = 100K input tokens, but summarization won't trigger because count < 30.
+
+**Fix:** Implement a token counter (LangChain provides `getTokenCounter()` from model instances or use `tiktoken`). Switch summarization trigger to token-based: e.g., summarize when total message tokens exceed 15K. Use `trimMessages` as the immediate guard, summarization as the background compressor.
+
+**Estimated savings:** Variable, but prevents worst-case scenarios where 20 messages with huge tool results blow up costs.
+
+---
+
+## Part 3: Quick-Win Priority Matrix
+
+| # | Fix | Effort | Token Savings Per Call | Affects |
+|---|-----|--------|----------------------|---------|
+| 1 | Truncate tool results to ~3-4K chars | **Low** (~10 lines of code) | **20-40% of total** | All agents |
+| 2 | Condense Composio block 4K → 500 tokens | **Low** (rewrite text) | **~3,000 tokens** | Agents with integrations |
+| 3 | Remove tool re-listing from system prompt | **Low** (delete one block) | **500-2K tokens** | Agents with function tools |
+| 4 | Add `trimMessages` before LLM invoke | **Medium** (~20 lines) | **15-30% of total** | All agents |
+| 5 | Dynamic tool selection for CEO | **Medium-High** | **4-8K tokens** | CEO agent |
+| 6 | Condense overall system prompt verbosity | **Medium** | **5-7K tokens** | All agents |
+| 7 | Token-based summarization trigger | **Medium** | Prevents worst-case blowups | All agents |
+| 8 | Consolidate browser tools | **Medium** | **~700 tokens** | Browser agents |
+
+**Recommended implementation order:** 1 → 3 → 2 → 4 → 6 → 5 → 7 → 8
+
+---
+
+## Part 4: Estimated Total Impact
+
+### CEO Agent (with Composio + Browser + System Tools)
+
+| Component | Current Estimate | After Optimization |
+|---|---|---|
+| System prompt (stable) | ~12,000 tokens | ~5,000 tokens |
+| Tool definitions (~82 tools) | ~15,000 tokens | ~6,000 tokens |
+| Dynamic block (memories, KB, etc.) | ~2,000 tokens | ~2,000 tokens |
+| Message history (avg at iteration 10) | ~15,000 tokens | ~8,000 tokens |
+| **Total per-call input** | **~44,000 tokens** | **~21,000 tokens** |
+
+**~52% reduction in per-call input tokens**, compounding across 10-25 iterations per run.
+
+### Normal Agent (~25 tools, no Composio)
+
+| Component | Current Estimate | After Optimization |
+|---|---|---|
+| System prompt (stable) | ~5,000 tokens | ~3,000 tokens |
+| Tool definitions (~25 tools) | ~5,000 tokens | ~4,000 tokens |
+| Dynamic block | ~1,500 tokens | ~1,500 tokens |
+| Message history | ~10,000 tokens | ~6,000 tokens |
+| **Total per-call input** | **~21,500 tokens** | **~14,500 tokens** |
+
+**~33% reduction** for normal agents.
+
+### Compounding Effect Across a Full Run
+
+For a CEO agent run that uses 15 tool iterations:
+
+- **Current:** ~44K tokens × 15 calls = **~660K input tokens per run**
+- **Optimized:** ~21K tokens × 15 calls = **~315K input tokens per run**
+- **Savings:** ~345K input tokens per run (~52%)
+
+With prompt caching (Anthropic), the cached portion savings are already applied. The numbers above reflect savings on the **non-cached portions** (tool definitions, message history, dynamic block) which are the majority of the cost.
+
+---
+
+## Part 5: What We're NOT Doing Wrong
+
+To be fair, some things that might seem like issues are not:
+
+- **Prompt caching split** — well-implemented, follows Anthropic best practice
+- **Routing through OpenRouter** — correct for the setup, doesn't add token overhead
+- **Summarization approach** — keeping 10 messages + summary is a reasonable strategy
+- **Procedural memory** — single-query semantic search is efficient
+- **Fire-and-forget reflection** — correct choice, no user-facing latency impact
+- **Permission-based filtering** — already reduces normal agent tool count
+- **Graph caching** — avoids expensive recompilation per message
+- **Parallel I/O during graph creation** — good use of `Promise.allSettled`
+
+---
+
+## Part 6: Current Architecture Reference
+
+### Token Cost Breakdown by Component
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    LLM INPUT (per call)                  │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  ┌─ Tool Definitions ──────────────────────────────┐    │
+│  │  CEO: ~15,000 tokens (82 tools × ~180 avg)     │    │
+│  │  Normal: ~5,000 tokens (25 tools × ~200 avg)   │    │
+│  └─────────────────────────────────────────────────┘    │
+│                                                         │
+│  ┌─ System Prompt (Stable Block - CACHED) ─────────┐   │
+│  │  Identity + Behavior: ~2,500 tokens             │   │
+│  │  Capability Maps: ~2,000-8,000 tokens           │   │
+│  │  Composio Instructions: ~4,000 tokens           │   │
+│  │  Browser/Channel/Agent: ~1,000-2,000 tokens     │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  ┌─ System Prompt (Dynamic Block - FRESH) ─────────┐   │
+│  │  Memories: ~100-500 tokens                      │   │
+│  │  Notebook: ~100-300 tokens                      │   │
+│  │  Plan State: ~100-200 tokens                    │   │
+│  │  Tool Usage History: ~200-400 tokens            │   │
+│  │  KB Results: ~300-1,000 tokens                  │   │
+│  │  Procedural Memory: ~200-500 tokens             │   │
+│  │  Step Budget Warning: ~50 tokens (if near limit)│   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  ┌─ Message History ───────────────────────────────┐   │
+│  │  Human messages + AI responses + Tool results   │   │
+│  │  Grows UNBOUNDED until 30-message summarization │   │
+│  │  Tool results: FULL SIZE (no truncation!)       │   │
+│  │  Avg at iteration 10: ~10,000-20,000 tokens     │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Graph Flow
+
+```
+__start__ → agent → [routing decision]
+                    ├→ tools (if AI requests tools)
+                    │   └→ agent (loop back)
+                    ├→ summarize_conversation (if messages > 30)
+                    │   └→ __end__
+                    ├→ final_answer (if step_count >= 25)
+                    │   └→ __end__
+                    └→ __end__ (triggers post-stream reflection)
+```
+
+### Tool Categories and Token Cost
+
+| Category | Tool Count | Avg Tokens/Tool | Total Tokens | Loaded When |
+|---|---|---|---|---|
+| Bucket | 6 | ~200 | ~1,200 | Always |
+| Planning | 3 | ~150 | ~450 | Always |
+| Python | 1 | ~400 | ~400 | Always |
+| Workspace User | 1 | ~100 | ~100 | Always |
+| Confirmation | 1 | ~100 | ~100 | Always |
+| Memory | 1 | ~120 | ~120 | If userId present |
+| Notebook | 4 | ~150 | ~600 | If userId present |
+| Vault | 1 | ~120 | ~120 | If vault connected |
+| Browser | 11 | ~200 | ~2,200 | If browser enabled |
+| System | 28 | ~250 | ~7,000 | If systemLevelAccess |
+| CEO | 16 | ~250 | ~4,000 | If isCeo |
+| Tester | 7 | ~250 | ~1,750 | If isTester |
+| Composio Meta | 5 | ~300 | ~1,500 | If integrations exist |
+| Function Tools | Variable | ~200 | Variable | Per permissions |
+| MCP Tools | Variable | ~200 | Variable | Per permissions |
+| Agent Delegation | Variable | ~150 | Variable | Per permissions |
+
+---
+
+## Sources
+
+- [LangChain: Context Engineering — Selecting Tools](https://docs.langchain.com/oss/javascript/langchain/context-engineering#selecting-tools)
+- [LangChain: Dynamically Selecting Tools (Middleware)](https://docs.langchain.com/oss/javascript/langchain/middleware/custom#dynamically-selecting-tools)
+- [LangChain: Trim Messages](https://docs.langchain.com/oss/javascript/langgraph/add-memory#trim-messages)
+- [Anthropic Prompt Caching Docs](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+- [AI Agent Cost Optimization: Token Economics (Zylos Research)](https://zylos.ai/research/2026-02-19-ai-agent-cost-optimization-token-economics)
+- [How I Reduced LLM Token Costs by 90% (Medium)](https://medium.com/@ravityuval/how-i-reduced-llm-token-costs-by-90-using-prompt-rag-and-ai-agent-optimization-f64bd1b56d9f)
+- [LLM Token Optimization (Redis)](https://redis.io/blog/llm-token-optimization-speed-up-apps/)
+- [AI Agent Cost Optimization Guide 2026 (Moltbook-AI)](https://moltbook-ai.com/posts/ai-agent-cost-optimization-2026)

@@ -37,9 +37,6 @@ export async function registerJob(schedule: {
 }
 
 export async function removeJob(scheduleId: string) {
-    const key = registeredJobs.get(scheduleId);
-    if (!key) return;
-
     const repeatableJobs = await scheduleQueue.getRepeatableJobs();
     for (const job of repeatableJobs) {
         if (job.name === `schedule-${scheduleId}`) {

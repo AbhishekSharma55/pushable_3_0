@@ -104,7 +104,22 @@ export function buildWorkflowTools(config: WorkflowToolsConfig): DynamicStructur
                     await workflowRepository.updateLastRunAt(workflowId);
                     await workflowRepository.incrementRunCount(workflowId);
 
-                    return `Workflow "${workflow.name}" completed in ${result.durationMs}ms (${result.creditsUsed} credits).\n\nResult:\n${result.resultText}`;
+                    // Build detailed step-by-step report so the agent knows exactly what the workflow did
+                    const stepReport = result.stepResults.map((sr, i) => {
+                        const status = sr.skipped ? "SKIPPED" : sr.succeeded ? "OK" : "FAILED";
+                        const label = sr.tool ? sr.tool : "nano_llm";
+                        const outputPreview = sr.output.length > 800 ? sr.output.slice(0, 800) + "..." : sr.output;
+                        return `  Step ${i + 1} [${label}]: ${status}\n  Output: ${outputPreview}`;
+                    }).join("\n\n");
+
+                    const allSucceeded = result.stepResults.every(sr => sr.succeeded || sr.skipped);
+
+                    return (
+                        `Workflow "${workflow.name}" completed ${allSucceeded ? "successfully" : "with errors"} in ${result.durationMs}ms (${result.creditsUsed} credits).\n\n` +
+                        `Steps executed:\n${stepReport}\n\n` +
+                        `IMPORTANT: The workflow has already executed all the steps above. Do NOT repeat these actions manually. ` +
+                        `Use the step outputs above to answer the user. If the workflow succeeded, the task is done.`
+                    );
                 } catch (error) {
                     const errMsg = error instanceof Error ? error.message : "Unknown error";
                     await workflowRunRepository.updateFailed(run.id, errMsg, Date.now() - runStartMs);

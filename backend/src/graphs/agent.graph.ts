@@ -1616,6 +1616,22 @@ Rules:
 - For pdf: output styled HTML inside the artifact, set type="pdf"
 - Filename should be descriptive and lowercase with hyphens`);
 
+        // Workflow execution instructions
+        stableParts.push(`## Workflows — IMPORTANT
+
+You have \`list_workflows\`, \`run_workflow\`, and \`save_as_workflow\` tools.
+
+### Running workflows:
+- When you find a matching workflow via \`list_workflows\`, run it with \`run_workflow\` and pass the appropriate input parameters.
+- **After a workflow completes successfully, the task IS DONE.** The workflow has already executed all the tool calls (file reads, writes, API calls, etc.) on your behalf.
+- **Do NOT redo the work manually.** Read the step-by-step output returned by \`run_workflow\` — it shows exactly what each step did and its output.
+- Use the workflow's step outputs to compose your final answer to the user. Summarize what was accomplished based on the step results.
+- Only proceed with manual tool calls if the workflow explicitly FAILED or if the workflow result indicates the task was not completed.
+
+### Saving workflows:
+- After completing a multi-step process manually, offer to save it as a workflow using \`save_as_workflow\`.
+- This makes the process reusable and cheaper for next time.`);
+
         // Memory & Notebook capability instructions (static how-to, not the actual memory content)
         if (userId) {
             stableParts.push(`## Memory — IMPORTANT

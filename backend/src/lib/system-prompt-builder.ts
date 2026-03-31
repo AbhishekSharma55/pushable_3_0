@@ -809,9 +809,12 @@ files = bucket.list(folder="/reports", search="q1") # filtered
 text = bucket.read(filename="data.csv")            # str for text, bytes for binary
 raw = bucket.read_bytes(filename="image.png")      # always bytes
 
-# Save files back to bucket
+# Save new files to bucket
 bucket.save("output.csv", csv_string, folder="/exports")
 bucket.save("chart.png", png_bytes, folder="/charts")
+
+# Update existing text files in-place (csv, json, md, txt, etc.)
+bucket.update(content="col1,col2\\n1,2\\n3,4", filename="data.csv")
 
 # Download to sandbox, process locally, upload back
 bucket.download_to("input.png", filename="photo.jpg")

@@ -66,6 +66,7 @@ import type {
 const SUMMARIZE_THRESHOLD = 30; // Trigger summarization when messages exceed this count
 const KEEP_MESSAGES = 10; // Keep the last N messages after summarization
 const MAX_TOOL_ITERATIONS = 25; // Maximum agent→tool cycles before graceful termination
+const MAX_TOOL_RESULT_LENGTH = 50_000; // Truncate tool results exceeding this character count to prevent E2BIG errors
 
 /**
  * Scans conversation history and builds a concise summary of tool call outcomes.
@@ -2284,8 +2285,21 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
             const startMs = Date.now();
             try {
                 const result = await tool.invoke(tc.args);
-                const resultContent = typeof result === "string" ? result : JSON.stringify(result);
+                let resultContent = typeof result === "string" ? result : JSON.stringify(result);
                 const durationMs = Date.now() - startMs;
+
+                // Truncate oversized tool results to prevent E2BIG spawn errors
+                // when the serialized request body exceeds OS argument size limits
+                if (resultContent.length > MAX_TOOL_RESULT_LENGTH) {
+                    logger.warn({
+                        toolName: tc.name,
+                        originalLength: resultContent.length,
+                        truncatedTo: MAX_TOOL_RESULT_LENGTH,
+                    }, "Truncating oversized tool result");
+                    resultContent = resultContent.slice(0, MAX_TOOL_RESULT_LENGTH) +
+                        `\n\n... [truncated — original output was ${resultContent.length} characters]`;
+                }
+
                 logger.info({
                     toolName: tc.name,
                     resultLength: resultContent.length,

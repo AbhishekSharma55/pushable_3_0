@@ -2,8 +2,7 @@
  * Generates the Python helper module source code that provides
  * bucket access functions inside the Python sandbox.
  *
- * The generated module uses urllib (built-in) to call the backend API,
- * so no extra Python packages are needed.
+ * The generated module uses the `requests` library to call the backend API.
  */
 export function generatePythonBucketHelper(config: {
     apiUrl: string;
@@ -31,12 +30,15 @@ Usage:
     bucket.save("output.csv", "col1,col2\\n1,2\\n3,4")
     bucket.save("chart.png", png_bytes, folder="/charts")
 
+    # Update an existing text file's content
+    bucket.update(filename="data.csv", content="new,csv\\n1,2")
+    bucket.update(file_id="uuid-here", content="updated content")
+
     # Delete a file
     bucket.delete(file_id="uuid-here")
 """
 
-import urllib.request
-import urllib.error
+import requests as _req_lib
 import json
 import os
 import base64
@@ -45,65 +47,48 @@ _API_URL = ${JSON.stringify(config.apiUrl)}
 _AUTH_TOKEN = ${JSON.stringify(config.authToken)}
 _WORKSPACE_ID = ${JSON.stringify(config.workspaceId)}
 
+_SESSION = _req_lib.Session()
+_SESSION.headers.update({
+    "Authorization": f"Bearer {_AUTH_TOKEN}",
+    "x-workspace-id": _WORKSPACE_ID,
+})
 
-def _headers():
-    return {
-        "Authorization": f"Bearer {_AUTH_TOKEN}",
-        "x-workspace-id": _WORKSPACE_ID,
-    }
+
+def _unwrap(result):
+    """Unwrap API responses that wrap data in {"data": ...}."""
+    if isinstance(result, dict) and "data" in result and len(result) == 1:
+        return result["data"]
+    return result
 
 
 def _api_get(path, params=None):
-    url = f"{_API_URL}{path}"
-    if params:
-        qs = "&".join(f"{k}={urllib.request.quote(str(v))}" for k, v in params.items() if v is not None)
-        if qs:
-            url += f"?{qs}"
-    req = urllib.request.Request(url, headers=_headers(), method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            ct = resp.headers.get("Content-Type", "")
-            if "application/json" in ct:
-                return json.loads(resp.read().decode())
-            return resp.read()
-    except urllib.error.HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        raise RuntimeError(f"Bucket API error {e.code}: {body}") from e
+    resp = _SESSION.get(f"{_API_URL}{path}", params=params, timeout=15)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Bucket API error {resp.status_code}: {resp.text[:500]}")
+    ct = resp.headers.get("Content-Type", "")
+    if "application/json" in ct:
+        return resp.json()
+    return resp.content
+
+
+def _api_put_json(path, body):
+    resp = _SESSION.put(f"{_API_URL}{path}", json=body, timeout=15)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Bucket API error {resp.status_code}: {resp.text[:500]}")
+    return _unwrap(resp.json())
 
 
 def _api_post_multipart(path, fields, file_field=None, file_data=None, file_name=None, file_mime=None):
-    """Simple multipart/form-data POST using only stdlib."""
-    boundary = "----PushableBucketBoundary9876543210"
-    body_parts = []
-
-    for key, value in fields.items():
-        body_parts.append(f"--{boundary}\\r\\nContent-Disposition: form-data; name=\\"{key}\\"\\r\\n\\r\\n{value}".encode())
-
+    files = None
     if file_field and file_data is not None:
         if isinstance(file_data, str):
             file_data = file_data.encode("utf-8")
         mime = file_mime or "application/octet-stream"
-        header = (
-            f"--{boundary}\\r\\n"
-            f'Content-Disposition: form-data; name="{file_field}"; filename="{file_name}"\\r\\n'
-            f"Content-Type: {mime}\\r\\n\\r\\n"
-        )
-        body_parts.append(header.encode() + file_data)
-
-    body_parts.append(f"--{boundary}--\\r\\n".encode())
-    body = b"\\r\\n".join(body_parts)
-
-    headers = {
-        **_headers(),
-        "Content-Type": f"multipart/form-data; boundary={boundary}",
-    }
-    req = urllib.request.Request(f"{_API_URL}{path}", data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode() if e.fp else ""
-        raise RuntimeError(f"Bucket API error {e.code}: {err_body}") from e
+        files = {file_field: (file_name, file_data, mime)}
+    resp = _SESSION.post(f"{_API_URL}{path}", data=fields, files=files, timeout=30)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Bucket API error {resp.status_code}: {resp.text[:500]}")
+    return resp.json()
 
 
 class _Bucket:
@@ -116,7 +101,8 @@ class _Bucket:
             params["folder"] = folder
         if search:
             params["search"] = search
-        return _api_get("/api/bucket/files", params)
+        result = _api_get("/api/bucket/files", params)
+        return _unwrap(result)
 
     def read(self, file_id=None, filename=None):
         """Read a file's content. Returns str for text files, bytes for binary files."""
@@ -194,21 +180,38 @@ class _Bucket:
             file_name=filename,
             file_mime=mime,
         )
-        return result
+        files = _unwrap(result)
+        return files[0] if isinstance(files, list) and files else files
+
+    def update(self, content, file_id=None, filename=None):
+        """Update the content of an existing text file in the bucket.
+        Works for text-based files (txt, md, csv, json, html, xml, etc.).
+        Content replaces the entire file."""
+        if not file_id and not filename:
+            raise ValueError("Provide either file_id or filename")
+
+        # Resolve filename to file_id if needed
+        if not file_id:
+            files = self.list(search=filename)
+            match = None
+            for f in files:
+                if f["filename"] == filename:
+                    match = f
+                    break
+            if not match and files:
+                match = files[0]
+            if not match:
+                raise FileNotFoundError(f"File not found: {filename}")
+            file_id = match["id"]
+
+        return _api_put_json(f"/api/bucket/files/{file_id}/content", {"content": content})
 
     def delete(self, file_id):
         """Delete a file from the bucket by ID."""
-        req = urllib.request.Request(
-            f"{_API_URL}/api/bucket/files/{file_id}",
-            headers=_headers(),
-            method="DELETE",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                return json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode() if e.fp else ""
-            raise RuntimeError(f"Bucket API error {e.code}: {err_body}") from e
+        resp = _SESSION.delete(f"{_API_URL}/api/bucket/files/{file_id}", timeout=15)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Bucket API error {resp.status_code}: {resp.text[:500]}")
+        return resp.json()
 
     def download_to(self, local_path, file_id=None, filename=None):
         """Download a bucket file to a local path in the sandbox."""

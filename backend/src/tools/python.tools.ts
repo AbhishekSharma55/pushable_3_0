@@ -19,7 +19,8 @@ export function buildPythonTools(config?: PythonToolsConfig): DynamicStructuredT
           "- bucket.list(folder=None, search=None) — list workspace files\n" +
           "- bucket.read(filename='name') / bucket.read(file_id='uuid') — read file content\n" +
           "- bucket.read_bytes(filename='name') — read as raw bytes\n" +
-          "- bucket.save('output.csv', content, folder='/python-output') — save to bucket\n" +
+          "- bucket.save('output.csv', content, folder='/python-output') — save new file to bucket\n" +
+          "- bucket.update(content='new content', filename='name') — update existing text file in-place\n" +
           "- bucket.download_to('local.png', filename='image.png') — download to sandbox\n" +
           "- bucket.upload_from('chart.png', folder='/charts') — upload local file to bucket\n" +
           "Use this to read bucket files, process/transform them, and save results back."

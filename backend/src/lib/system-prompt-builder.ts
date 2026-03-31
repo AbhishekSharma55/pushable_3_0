@@ -416,38 +416,27 @@ IMPORTANT:
 
     if (capabilities.hasBrowser || capabilities.hasExtensionBrowser) {
         if (capabilities.hasExtensionBrowser) {
-            blocks.push(`## Extension Browser Agent (PRIMARY — User's Real Browser)
+            blocks.push(`## Browser Agent
 
-You have access to the user's REAL Chrome browser through the Extension Browser Agent.
-This is your PRIMARY and DEFAULT browser — ALWAYS use \`extension_browser_agent\` for ANY browsing task.
+You control the user's real Chrome browser via \`extension_browser_agent\`. Use it for ANY web task.
 
-**CRITICAL BEHAVIOR:**
-- When the user asks you to open a website, browse, search, click, interact with any web page → IMMEDIATELY use \`extension_browser_agent\`. Do NOT ask which browser to use. Do NOT wait to be told "use extension". This IS your browser.
-- The extension IS already connected. Do NOT waste time checking the connection unless a previous command failed.
-- For follow-up tasks in the same conversation (e.g. "now search for X", "click on that", "go back"), give instructions that reference the current state. The browser remembers its tabs and state between calls.
-- You do NOT need to say "open a new tab" unless the user specifically wants a new tab. If a tab is already open, work in it.
+**Giving instructions — think about browser state:**
+The browser REMEMBERS everything between calls. Tabs stay open. Pages don't change unless you tell them to.
 
-Use the \`extension_browser_agent\` tool by describing what you want in natural language:
-- "Go to google.com and search for 'LangChain documentation'"
-- "Navigate to linkedin.com/in/username and extract their job title and company"
-- "Log into dashboard.example.com, go to settings, and change the timezone to UTC"
-- "Search YouTube for 'artificial intelligence' and list the top 5 results"
+- **New task (first time visiting a site):** Include the URL. "Go to facebook.com and like the first post"
+- **Follow-up task (user says "now delete it", "like that", "send it"):** Say "On the current page, do X" — the browser is already there. NEVER include a URL for follow-ups.
+- **Retry after failure:** Say "Continue where you left off — the page should still be open. Do X". NEVER re-navigate.
+- **Multi-step task:** Give ALL steps in one instruction. "Go to the post, like it, comment 'Nice', then delete the comment". The agent handles sequencing.
 
-The extension browser agent will autonomously:
-- Navigate websites using the user's real Chrome browser (with their logged-in sessions)
-- Read page content and extract data
-- Click buttons, fill forms, and interact with UI elements
-- Handle multi-step workflows (login flows, checkout, etc.)
-- Report results clearly
+**What NOT to do:**
+- Don't re-send URLs the browser already visited — it causes unnecessary page reloads
+- Don't break one task into multiple agent calls — give all steps at once
+- Don't construct profile URLs from names — tell the agent to search instead
+- Don't paraphrase the user's text — pass their exact words
 
-HOW TO USE:
-- Give clear, specific instructions in the \`instruction\` field
-- Include target URLs when you know them
-- Describe the expected outcome or data you need
-- For NEW tasks: say "Open youtube.com and search for X" — the browser agent will open it in a new tab automatically
-- For FOLLOW-UP tasks: say "Click the first video" or "Now search for Y" — the browser agent will find and switch to the existing tab automatically
-- ALWAYS pass the user's EXACT search terms and input text — never paraphrase, expand, or "improve" what the user said
-- The extension browser agent handles all low-level interactions internally — you don't need to specify tabs, CSS selectors, or individual clicks`);
+**Limits:**
+- Max 2 calls per task. If it fails twice, tell the user what went wrong.
+- The agent has 15 actions per call — enough for complex multi-step tasks.`);
 
             if (capabilities.hasBrowser) {
                 blocks.push(`## Internal Browser Agent (FALLBACK ONLY)

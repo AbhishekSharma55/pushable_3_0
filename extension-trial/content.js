@@ -31,6 +31,7 @@
     '[role="radio"]',
     '[contenteditable="true"]',
     '[contenteditable=""]',
+    '[tabindex]:not([tabindex="-1"])',
     'details > summary',
   ].join(', ');
 
@@ -51,16 +52,17 @@
     // 1. Check attributes first (fast, reliable)
     for (const attr of ['aria-label', 'title', 'placeholder', 'data-testid', 'data-click-id', 'alt', 'name']) {
       const v = el.getAttribute(attr);
-      if (v && v.trim()) return v.trim().replace(/[\n\r\t]+/g, ' ').slice(0, 60);
+      if (v && v.trim()) return v.trim().replace(/[\n\r\t]+/g, ' ').slice(0, 80);
     }
 
-    // 2. innerText — works for most elements including slotted content
+    // 2. innerText — ALWAYS truncate, never discard long text
+    // LinkedIn conversation items have long innerText — we need the first ~80 chars
     const text = (el.innerText || '').trim();
-    if (text && text.length <= 80) return text.replace(/\s+/g, ' ').slice(0, 60);
+    if (text) return text.replace(/\s+/g, ' ').slice(0, 80);
 
     // 3. textContent — catches text nodes that innerText might miss
     const tc = (el.textContent || '').trim();
-    if (tc && tc.length <= 80 && tc.length > 0) return tc.replace(/\s+/g, ' ').slice(0, 60);
+    if (tc) return tc.replace(/\s+/g, ' ').slice(0, 80);
 
     // 4. For buttons with only SVG icons, check svg icon-name
     try {
@@ -68,23 +70,22 @@
       if (svg) return svg.getAttribute('icon-name');
     } catch {}
 
-    // 5. Check children's shadow roots for slotted text (Reddit's faceplate-screen-reader-content)
+    // 5. Check children's shadow roots for slotted text
     try {
       for (const child of el.querySelectorAll('*')) {
         if (child.shadowRoot) {
           const slotText = (child.textContent || '').trim();
-          if (slotText && slotText.length <= 60) return slotText.replace(/\s+/g, ' ');
+          if (slotText) return slotText.replace(/\s+/g, ' ').slice(0, 80);
         }
-        // Also check direct text content of custom elements
         if (child.tagName.includes('-')) {
           const ct = (child.textContent || '').trim();
-          if (ct && ct.length <= 60) return ct.replace(/\s+/g, ' ');
+          if (ct) return ct.replace(/\s+/g, ' ').slice(0, 80);
         }
       }
     } catch {}
 
     // 6. Input value
-    if (el.value && typeof el.value === 'string') return el.value.slice(0, 60);
+    if (el.value && typeof el.value === 'string') return el.value.slice(0, 80);
 
     // 7. Check for upvote/downvote HTML attributes (Reddit specific)
     if (el.hasAttribute('upvote')) return 'Upvote';
@@ -105,6 +106,9 @@
     if (tag === 'select') return 'select';
     if (tag === 'summary') return 'button';
     if (el.isContentEditable) return 'textbox';
+    // Elements with tabindex but no semantic role — these are clickable items
+    // (e.g., LinkedIn conversation items, custom card components)
+    if (el.tabIndex >= 0 && ['DIV', 'LI', 'SPAN', 'SECTION', 'ARTICLE'].includes(el.tagName)) return 'clickable';
     return tag;
   }
 
@@ -150,19 +154,29 @@
       return true;
     });
 
-    // Prioritize: menuitems and action buttons first (they're in open dropdowns),
-    // then buttons/inputs, then links. This ensures dropdown menu items
-    // aren't cut off by the element limit.
+    // Prioritize: inputs/editors highest (always needed), then menuitems (dropdowns),
+    // then buttons, then tabindex clickables, then links, then action menus lowest.
     function priority(item) {
       const el = item.el;
       const role = el.getAttribute('role');
       const tag = el.tagName.toLowerCase();
-      if (role === 'menuitem') return 0;  // highest priority — dropdown items
+      // Highest: inputs, textareas, contenteditable — always include these
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable ||
+          role === 'textbox' || role === 'combobox' || role === 'searchbox') return 0;
+      if (role === 'menuitem') return 0;  // dropdown items — critical when menu is open
+      // Deprioritize action menu / three-dot buttons
+      const lbl = (item.label || '').toLowerCase();
+      const hasPopup = el.getAttribute('aria-haspopup');
+      const isActionMenu = lbl.includes('more') || lbl.includes('actions') || lbl.includes('options list') ||
+        lbl === '...' || lbl === '⋯' || lbl === '⋮' ||
+        hasPopup === 'true' || hasPopup === 'menu';
+      if (isActionMenu) return 4;  // lowest — rarely the right target
       if (tag === 'button' || role === 'button') return 1;
-      if (tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable) return 1;
       if (tag === 'summary') return 1;
-      if (tag === 'a') return 2;  // links are lowest priority
-      return 1;
+      // Tabindex clickables (LinkedIn conversation items, etc.) — important!
+      if (el.tabIndex >= 0 && !['BUTTON', 'A', 'INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) return 1;
+      if (tag === 'a') return 2;
+      return 2;
     }
 
     // Sort: priority first, then vertical position within same priority
@@ -173,39 +187,106 @@
       return a.el.getBoundingClientRect().top - b.el.getBoundingClientRect().top;
     });
 
-    // Take top 80 elements (increased from 60 to avoid cutting off important items)
+    // Take top 120 elements (increased to handle complex pages like LinkedIn messaging)
+    rebuildElementMap.lastTotalCount = unique.length;
     const tagged = [];
-    for (const item of unique.slice(0, 80)) {
+    for (const item of unique.slice(0, 60)) {
       const id = nextId++;
       elementMap.set(id, item);
       tagged.push({ id, ...item });
     }
     return tagged;
   }
+  rebuildElementMap.lastTotalCount = 0;
 
   /**
-   * Get nearby text context for an element (helps LLM understand what the button is for).
-   * E.g. an upvote button near "D-Ribose • 1mo ago" tells the LLM which comment it belongs to.
+   * Get smart nearby context — prefers usernames, timestamps, headings over raw numbers.
+   * E.g. an upvote button near "Motor-Supermarket187 • 1m ago" tells the LLM which comment it belongs to.
    */
-  function getNearbyContext(el) {
-    // Walk up to find the nearest container with meaningful text
+  function getSmartContext(el) {
+    // Patterns that indicate useful context (usernames, timestamps, headings)
+    const TIME_RE = /\d+\s*(m|h|d|mo|yr|min|hour|day|sec|week|month|year)\w*\s*ago/i;
+    const USER_RE = /^[A-Za-z0-9_-]{3,25}$/;
+    // Patterns to skip — pure numbers, vote counts, generic noise
+    const SKIP_RE = /^[\d,.]+[kKmM]?$|^(vote|point|comment|share|award|reply|more|save)\w*$/i;
+
     let parent = el.parentElement;
-    for (let i = 0; i < 5 && parent; i++) {
-      // Look for username, timestamp, or post title near this element
-      const texts = [];
-      // Check siblings and close relatives for context clues
+    // Also check across shadow boundary
+    if (!parent) {
+      const root = el.getRootNode();
+      if (root instanceof ShadowRoot) parent = root.host?.parentElement;
+    }
+
+    for (let i = 0; i < 6 && parent; i++) {
+      const parts = [];
+
       for (const child of parent.children) {
-        if (child === el) continue;
-        const t = (child.innerText || '').trim().replace(/\s+/g, ' ');
-        if (t && t.length > 1 && t.length < 80 && !/^\d+$/.test(t)) {
-          texts.push(t.slice(0, 40));
+        if (child === el || child.contains(el)) continue;
+        const t = (child.innerText || child.textContent || '').trim().replace(/\s+/g, ' ');
+        if (!t || t.length < 2 || t.length > 100) continue;
+        if (SKIP_RE.test(t)) continue;
+
+        // Prefer: links (often usernames), time elements, headings
+        const tag = child.tagName?.toLowerCase();
+        const isHighValue = tag === 'a' || tag === 'time' || tag === 'h1' || tag === 'h2' || tag === 'h3' ||
+          child.getAttribute?.('role') === 'heading' ||
+          TIME_RE.test(t) || USER_RE.test(t);
+
+        if (isHighValue) {
+          parts.unshift(t.slice(0, 35)); // high-value at front
+        } else if (parts.length < 2) {
+          parts.push(t.slice(0, 35));
         }
-        if (texts.length >= 2) break;
+        if (parts.length >= 2) break;
       }
-      if (texts.length > 0) return texts.join(' | ');
+
+      if (parts.length > 0) return parts.join(' · ');
       parent = parent.parentElement;
     }
     return '';
+  }
+
+  /* ── Detect active modals/dialogs/popups that may block interaction ── */
+  function detectActiveModal() {
+    const MODAL_SELECTORS = '[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]';
+
+    function searchRoot(root, depth) {
+      if (depth > 6) return null;
+      try {
+        const elements = root.querySelectorAll(MODAL_SELECTORS);
+        for (const el of elements) {
+          if (!isVisible(el)) continue;
+          // Get modal title from heading or aria attributes
+          let title = '';
+          const heading = el.querySelector('h1, h2, h3, h4, [role="heading"]');
+          if (heading) title = (heading.textContent || '').trim().slice(0, 80);
+          if (!title) title = el.getAttribute('aria-label') || '';
+          if (!title) {
+            // Try aria-labelledby
+            const labelId = el.getAttribute('aria-labelledby');
+            if (labelId) {
+              const labelEl = document.getElementById(labelId);
+              if (labelEl) title = (labelEl.textContent || '').trim().slice(0, 80);
+            }
+          }
+          if (!title) title = 'Unknown dialog';
+          return { title, role: el.getAttribute('role') || el.tagName.toLowerCase() };
+        }
+      } catch {}
+
+      // Walk shadow roots
+      try {
+        for (const el of root.querySelectorAll('*')) {
+          if (el.shadowRoot) {
+            const found = searchRoot(el.shadowRoot, depth + 1);
+            if (found) return found;
+          }
+        }
+      } catch {}
+      return null;
+    }
+
+    return searchRoot(document, 0);
   }
 
   /* ── Build compact text snapshot with section grouping ── */
@@ -214,63 +295,55 @@
     const lines = [];
     lines.push(`PAGE: ${location.href}`);
     lines.push(`TITLE: ${document.title}`);
+    lines.push(`VIEWPORT: ${window.innerWidth}x${window.innerHeight} scroll=${Math.round(window.scrollY)}`);
+
+    // Detect active modals/popups that may be blocking the page
+    const activeModal = detectActiveModal();
+    if (activeModal) {
+      lines.push(`\n⚠️ MODAL/POPUP ACTIVE: "${activeModal.title}" (${activeModal.role})`);
+      lines.push(`   → You MUST handle this popup before continuing your task.`);
+      lines.push(`   → Look for "Done", "OK", "Close", "X", "Cancel", "Back", or "Dismiss" buttons below.`);
+      lines.push(`   → If this popup is blocking your task, dismiss it first, then re-scan.`);
+    }
 
     if (includePageText) {
       const text = (document.body.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 1500);
       lines.push(`TEXT: ${text}`);
     }
 
-    // Group elements by vertical proximity (elements within 50px are in the same group)
-    lines.push(`\nELEMENTS (use [data-psh-id="N"] as selector):`);
+    const totalFound = rebuildElementMap.lastTotalCount;
+    const showing = tagged.length;
+    const countNote = totalFound > showing ? ` (showing ${showing} of ${totalFound})` : '';
+    lines.push(`\nELEMENTS${countNote}:`);
 
-    let lastTop = -999;
+    const vh = window.innerHeight;
     for (const { id, el, label, depth } of tagged) {
       const role = getRole(el);
       const tag = el.tagName.toLowerCase();
-      const shadow = depth > 0 ? ` [shadow:${depth}]` : '';
-      const focused = (el === document.activeElement) ? ' ← focused' : '';
-      const rect = el.getBoundingClientRect();
 
-      // Insert section break for elements far apart vertically
-      if (rect.top - lastTop > 100) {
-        lines.push('---'); // visual separator between page sections
-      }
-      lastTop = rect.top;
+      let desc = `  [${id}] ${role} "${label}"`;
+      if (depth > 0) desc += ` [shadow]`;
 
-      let desc = `  [${id}] ${role} "${label}"${shadow}${focused}`;
+      // ARIA states
+      const ariaExpanded = el.getAttribute('aria-expanded');
+      if (ariaExpanded !== null) desc += ` expanded=${ariaExpanded}`;
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') desc += ` [disabled]`;
 
-      // Inputs: show placeholder, value, type
+      // Form fields
       if (tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable) {
         const ph = el.getAttribute('placeholder');
         if (ph) desc += ` placeholder="${ph}"`;
-        const val = el.isContentEditable ? (el.innerText || '').trim() : (el.value || '');
-        if (val) desc += ` value="${val.slice(0, 50)}"`;
-        if (el.type && el.type !== 'text') desc += ` type=${el.type}`;
       }
 
-      // Links: show path
+      // Links
       if (tag === 'a' && el.href) {
-        try { desc += ` href=${new URL(el.href).pathname.slice(0, 60)}`; } catch {}
+        try { desc += ` href=${new URL(el.href).pathname.slice(0, 40)}`; } catch {}
       }
 
-      // Special button annotations
-      if (el.hasAttribute('upvote')) desc += ' [UPVOTE-BTN]';
-      if (el.hasAttribute('downvote')) desc += ' [DOWNVOTE-BTN]';
-      const ariaPressed = el.getAttribute('aria-pressed');
-      if (ariaPressed) desc += ` pressed=${ariaPressed}`;
-
-      // Detect three-dot / action menu buttons (universal pattern)
+      // Action menu warning
       const lbl = label.toLowerCase();
-      if (lbl.includes('more') || lbl.includes('actions') || lbl.includes('options') ||
-          lbl === '...' || lbl === '⋯' || lbl === '⋮' ||
-          el.getAttribute('aria-haspopup') === 'true' || el.getAttribute('aria-haspopup') === 'menu') {
-        desc += ' [ACTION-MENU]';
-      }
-
-      // Nearby context for buttons (helps associate buttons with content)
-      if (tag === 'button' || role === 'button' || role === 'menuitem') {
-        const ctx = getNearbyContext(el);
-        if (ctx) desc += ` near="${ctx}"`;
+      if (lbl.includes('options list') || el.getAttribute('aria-haspopup') === 'true' || el.getAttribute('aria-haspopup') === 'menu') {
+        desc += ' ⚠MENU';
       }
 
       lines.push(desc);
@@ -373,6 +446,15 @@
         sendResponse({ ok: true, url: location.href });
         return false;
 
+      case 'getPageText':
+        sendResponse({
+          ok: true,
+          text: (document.body?.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 3000),
+          url: location.href,
+          title: document.title,
+        });
+        return false;
+
       case 'getPageInfo':
         // Synchronous scan — no async waits that might close dropdowns/menus
         sendResponse({ snapshot: buildSnapshot(true) });
@@ -395,11 +477,28 @@
 
         // Check if element is inside a dropdown/menu/popup
         // These elements are already visible — don't scroll or set attributes (causes dropdown to close)
-        const isInMenu = el.getAttribute('role') === 'menuitem' ||
+        // Note: closest() doesn't cross shadow DOM boundaries, so we also check
+        // the element's role, root node, and parent custom elements
+        const role = el.getAttribute('role');
+        const rootNode = el.getRootNode();
+        const isInShadow = rootNode instanceof ShadowRoot;
+        const parentHost = isInShadow ? rootNode.host : null;
+        const parentHostTag = parentHost?.tagName?.toLowerCase() || '';
+
+        const isInMenu = role === 'menuitem' || role === 'option' ||
           el.closest?.('[role="menu"]') ||
           el.closest?.('[role="dialog"]') ||
           el.closest?.('[role="listbox"]') ||
-          el.closest?.('[aria-haspopup]');
+          el.closest?.('[aria-haspopup]') ||
+          // Shadow DOM: check if parent host is a menu/dropdown/popup component
+          parentHostTag.includes('menu') ||
+          parentHostTag.includes('dropdown') ||
+          parentHostTag.includes('popup') ||
+          parentHostTag.includes('popover') ||
+          parentHostTag.includes('popper') ||
+          parentHostTag.includes('overflow') ||
+          // Check if any ancestor custom element is a menu
+          (isInShadow && parentHost?.closest?.('[role="menu"],[role="listbox"]'));
 
         if (!isInMenu) {
           el.scrollIntoView({ block: 'center', behavior: 'instant' });

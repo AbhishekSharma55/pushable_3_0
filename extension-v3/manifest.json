@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Pushable AI",
   "version": "5.0.0",
-  "description": "AI-powered browser automation — CDP real mouse events, DOM snapshots, works on every site",
+  "description": "AI browser automation — human-like mouse, DOM snapshots, no screenshots needed",
   "permissions": [
     "tabs",
     "activeTab",

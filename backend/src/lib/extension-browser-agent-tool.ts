@@ -25,9 +25,9 @@ const ExtBrowserAgentState = Annotation.Root({
 });
 
 /** Max supersteps for the extension browser agent graph.
- *  30 handles complex multi-step tasks with Gemini Flash (cheap tokens).
- *  Each "step" = one LLM call + tool execution. Most tasks need 4-10 steps. */
-const EXT_BROWSER_AGENT_RECURSION_LIMIT = 30;
+ *  32 = 16 agent+tool cycles. Allows up to ~15 tool calls.
+ *  Multi-step tasks like (like + comment + delete) need ~12-15 calls. */
+const EXT_BROWSER_AGENT_RECURSION_LIMIT = 32;
 
 /**
  * Build a single "extension_browser_agent" tool that wraps an internal,
@@ -94,6 +94,15 @@ export function buildExtensionBrowserAgentTool(
     }
 
     // ---------------------------------------------------------------
+    // Rate limiter — max 3 calls within a 60-second window
+    // Resets after 60s of no calls, so new user messages get fresh budget
+    // ---------------------------------------------------------------
+    let invocationCount = 0;
+    let windowStart = 0;
+    const MAX_INVOCATIONS = 3;
+    const WINDOW_MS = 180_000; // 3 minutes — prevents rapid retries within same conversation turn
+
+    // ---------------------------------------------------------------
     // Return the single tool the calling agent sees
     // ---------------------------------------------------------------
     return new DynamicStructuredTool({
@@ -116,6 +125,21 @@ export function buildExtensionBrowserAgentTool(
                 ),
         }),
         func: async ({ instruction }) => {
+            // Rate limiter: reset counter if window expired
+            const now = Date.now();
+            if (now - windowStart > WINDOW_MS) {
+                invocationCount = 0;
+                windowStart = now;
+            }
+            invocationCount++;
+            if (invocationCount > MAX_INVOCATIONS) {
+                logger.warn(
+                    { agentId, invocationCount },
+                    "Extension browser agent invocation BLOCKED — exceeded max invocations in window"
+                );
+                return `STOPPED: The browser agent has been called ${MAX_INVOCATIONS} times in the last 60 seconds. ` +
+                    `Do NOT call it again right now. Report the current status to the user.`;
+            }
             const invocationId = `ext-browser-agent-${agentId}-${Date.now()}`;
 
             logger.info(

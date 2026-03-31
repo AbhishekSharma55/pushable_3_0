@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Pushable AI",
-  "version": "5.0.0",
-  "description": "AI-powered browser automation — CDP real mouse events, DOM snapshots, works on every site",
+  "version": "6.0.0",
+  "description": "AI browser automation v6 — Python CDP analyzer + trusted clicks",
   "permissions": [
     "tabs",
     "activeTab",

@@ -294,7 +294,7 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
         new DynamicStructuredTool({
             name: "ext_browser_click",
             description:
-                "Click an element in Chrome. Use [data-psh-id=\"N\"] selectors from get_elements. Works with shadow DOM.",
+                "Click an element in Chrome using real mouse events (CDP). Use [data-psh-id=\"N\"] selectors from get_elements.",
             schema: z.object({
                 selector: z
                     .string()
@@ -307,9 +307,24 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
         }),
 
         new DynamicStructuredTool({
+            name: "ext_browser_click_text",
+            description:
+                "Click the first visible element containing the given text. Use this when you know the text of what to click (e.g., a person's name, button label) — no need to scan elements first. This is the FASTEST way to click something.",
+            schema: z.object({
+                text: z
+                    .string()
+                    .describe('Text to find and click, e.g. "Abhishek Sharma" or "Send" or "Message"'),
+            }),
+            func: async ({ text }: { text: string }) =>
+                safe(async () =>
+                    fmt(await exec("clickText", { text }))
+                ),
+        }),
+
+        new DynamicStructuredTool({
             name: "ext_browser_type",
             description:
-                "Type text into an input/textarea/contenteditable in Chrome. Use [data-psh-id=\"N\"] selectors.",
+                "Type text into an input/textarea/contenteditable in Chrome using CDP. Handles LinkedIn message boxes, Slack editors, Prosemirror, Slate, and all contenteditable divs automatically. Use [data-psh-id=\"N\"] selectors.",
             schema: z.object({
                 selector: z
                     .string()
@@ -349,6 +364,49 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
         }),
 
         new DynamicStructuredTool({
+            name: "ext_browser_type_into_editor",
+            description:
+                "Type text into a comment box or rich text editor (Reddit, Facebook, LinkedIn, etc.). " +
+                "This is an all-in-one command: it finds the editor placeholder (e.g. 'Join the conversation'), " +
+                "clicks it to open the editor, waits for it to load, focuses the editor, and types the text. " +
+                "Use this instead of ext_browser_type when the input is a rich text editor or comment box that " +
+                "needs to be clicked first to activate. Works through shadow DOM.",
+            schema: z.object({
+                text: z.string().describe("The text to type into the editor"),
+                placeholder: z
+                    .string()
+                    .default("Join the conversation")
+                    .describe('Hint text to find the editor placeholder, e.g. "Join the conversation", "Write a message", "Add a comment"'),
+            }),
+            func: async ({ text, placeholder }: { text: string; placeholder: string }) =>
+                safe(async () =>
+                    fmt(await exec("typeIntoEditor", { text, placeholder }, 15000))
+                ),
+        }),
+
+        new DynamicStructuredTool({
+            name: "ext_browser_click_overflow_menu",
+            description:
+                "Click a three-dot/overflow/more-options menu button near specific content, then click a menu item. " +
+                "Use this for actions like Delete, Edit, Report, Share on comments, posts, or messages. " +
+                "It finds the nearest overflow button to the specified text, clicks it, waits for the dropdown, " +
+                "and clicks the specified action. Handles confirmation dialogs automatically.",
+            schema: z.object({
+                menuAction: z
+                    .string()
+                    .describe('The menu item to click, e.g. "Delete", "Edit", "Report", "Save"'),
+                nearText: z
+                    .string()
+                    .default("")
+                    .describe('Text content near the overflow button to identify which one, e.g. the comment text or username. Leave empty for the first overflow button on the page.'),
+            }),
+            func: async ({ menuAction, nearText }: { menuAction: string; nearText: string }) =>
+                safe(async () =>
+                    fmt(await exec("clickOverflowMenu", { menuAction, nearText }, 15000))
+                ),
+        }),
+
+        new DynamicStructuredTool({
             name: "ext_browser_get_page_info",
             description:
                 "Get a compact snapshot of the page: URL, title, visible text, and all interactive elements with their [data-psh-id] selectors. Returns a text snapshot — each line is one element like: [5] button \"Submit\". Use [data-psh-id=\"5\"] as the selector for click/type.",
@@ -373,7 +431,7 @@ export function buildExtensionBrowserTools(workspaceId?: string): DynamicStructu
         new DynamicStructuredTool({
             name: "ext_browser_screenshot",
             description:
-                "[CRITICAL: USE THIS TOOL instead of browser_screenshot when using the Chrome extension] Take a screenshot of the current Chrome tab.",
+                "Take a screenshot of the current Chrome tab. NOTE: This is for USER VIEWING ONLY — never use screenshots to make automation decisions. Use ext_browser_get_elements() instead for all decision-making.",
             schema: z.object({}),
             func: async () =>
                 safe(async () => {

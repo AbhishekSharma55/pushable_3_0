@@ -1,15 +1,15 @@
 /**
- * background.js — Browser Agent v5 (CDP + DOM fallback)
+ * background.js — Browser Agent v4 (CDP edition)
  *
  * ARCHITECTURE:
- * - Element discovery: chrome.debugger → Accessibility.getFullAXTree (CDP-first)
+ * - Element discovery: chrome.debugger → Accessibility.getFullAXTree
  *   Browser natively traverses ALL shadow roots — no custom DOM walking needed.
  * - All interactions: chrome.debugger → Input.dispatchMouseEvent / Input.insertText
  *   CDP produces isTrusted:true events, bypasses Shadow DOM entirely.
- * - Visible cursor indicator: shows where the agent is clicking
- * - DOM fallback: when CDP is unavailable (DevTools open, chrome:// pages)
- * - content.js: lightweight — scroll, waitForDOM, waitForElement, getPageText
- * - Frame streaming: opt-in only (not auto-started on connect)
+ * - content.js: lightweight only — scroll, waitForDOM, waitForElement, getPageText
+ *
+ * This eliminates every class of Shadow DOM click failure, menu detection issue,
+ * and contentEditable brittleness present in the v1 JS-injection approach.
  */
 
 /* ── Constants ── */
@@ -24,7 +24,6 @@ const DOM_SETTLE_MAX     = 5000;
 const CDP_VERSION        = '1.3';
 const CLICK_RETRIES      = 3;
 const CLICK_DELAYS       = [0, 300, 800]; // ms before each attempt
-const CDP_IDLE_TIMEOUT   = 30000; // auto-detach debugger after 30s idle
 
 /* ── WebSocket / connection state ── */
 let ws = null;
@@ -38,7 +37,6 @@ const sessions = new Map(); // tabId → { queue, running, elementIndex }
 const cdpAttached  = new Set();   // tabIds currently attached
 const cdpAttaching = new Map();   // tabId → Promise (prevent double-attach races)
 const cdpAxEnabled = new Set();   // tabIds where Accessibility domain is enabled
-const cdpIdleTimers = new Map();  // tabId → timer for auto-detach on idle
 
 /* ── Agent tab tracking ── */
 let lastAgentTabId = null;
@@ -121,53 +119,6 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 });
 
 /* ════════════════════════════════════════════════════════
- *  CDP IDLE AUTO-DETACH (minimizes debugger bar visibility)
- * ════════════════════════════════════════════════════════ */
-
-/** Reset idle timer — detach debugger after CDP_IDLE_TIMEOUT of no commands. */
-function resetCdpIdleTimer(tabId) {
-  if (cdpIdleTimers.has(tabId)) clearTimeout(cdpIdleTimers.get(tabId));
-  cdpIdleTimers.set(tabId, setTimeout(() => {
-    cdpDetach(tabId);
-    cdpIdleTimers.delete(tabId);
-  }, CDP_IDLE_TIMEOUT));
-}
-
-/* ════════════════════════════════════════════════════════
- *  VISIBLE CURSOR INDICATOR
- * ════════════════════════════════════════════════════════ */
-
-/** Show a visual cursor indicator at (x, y) on the page so users can see where the agent clicks. */
-async function showCursorIndicator(tabId, x, y) {
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId }, world: 'MAIN',
-      func: (cx, cy) => {
-        let cursor = document.getElementById('__psh_cursor');
-        if (!cursor) {
-          cursor = document.createElement('div');
-          cursor.id = '__psh_cursor';
-          cursor.style.cssText = `
-            position: fixed; width: 20px; height: 20px; border-radius: 50%;
-            border: 2px solid #6366f1; background: rgba(99, 102, 241, 0.3);
-            pointer-events: none; z-index: 2147483647; transition: all 0.15s ease;
-            box-shadow: 0 0 8px rgba(99, 102, 241, 0.5);
-            transform: translate(-50%, -50%);
-          `;
-          document.body.appendChild(cursor);
-        }
-        cursor.style.left = cx + 'px';
-        cursor.style.top = cy + 'px';
-        cursor.style.opacity = '1';
-        clearTimeout(cursor.__timer);
-        cursor.__timer = setTimeout(() => { cursor.style.opacity = '0'; }, 1500);
-      },
-      args: [x, y]
-    });
-  } catch { /* ignore on chrome:// pages */ }
-}
-
-/* ════════════════════════════════════════════════════════
  *  ELEMENT DISCOVERY — CDP Accessibility Tree
  * ════════════════════════════════════════════════════════ */
 
@@ -189,22 +140,16 @@ async function getElementsViaCDP(tabId) {
   await ensureAx(tabId);
   const { nodes } = await cdpSend(tabId, 'Accessibility.getFullAXTree', {});
 
-  const INPUT_ROLES = new Set(['textBox', 'comboBox', 'searchBox', 'spinButton', 'slider']);
-  const MAX_ELEMENTS = 150;
-
-  // Noise filter: skip elements that waste token budget
-  const SKIP_NAMES = new Set([
-    'skip to main content', 'skip to search', 'keyboard shortcuts',
-    'close jump menu', 'jump to active conversation details',
-  ]);
-
-  const allElements = [];
+  const elementIndex = new Map();
+  const lines = [];
+  let id = 1;
 
   for (const node of nodes) {
     if (!node.role || !INTERACTIVE_AX_ROLES.has(node.role.value)) continue;
     if (!node.backendDOMNodeId) continue;
     if (node.ignored) continue;
 
+    // Skip nodes explicitly marked hidden
     const hiddenProp = (node.properties || []).find(p => p.name === 'hidden');
     if (hiddenProp?.value?.value === true) continue;
 
@@ -213,50 +158,6 @@ async function getElementsViaCDP(tabId) {
     const desc = (node.description?.value || '').trim().slice(0, 60);
     const val  = node.value?.value;
 
-    // Skip noise elements
-    if (SKIP_NAMES.has(name.toLowerCase())) continue;
-    // Skip empty buttons (icons with no label — usually decorative)
-    if (role === 'button' && !name && !desc) continue;
-
-    const props = node.properties || [];
-    const hasPopup = props.find(p => p.name === 'hasPopup');
-    const isMenu = hasPopup?.value?.value && hasPopup.value.value !== 'false';
-
-    allElements.push({ node, role, name, desc, val, isInput: INPUT_ROLES.has(role), isMenu });
-  }
-
-  // If over cap: keep ALL input fields + trim non-inputs from the MIDDLE
-  let selected;
-  if (allElements.length <= MAX_ELEMENTS) {
-    selected = allElements;
-  } else {
-    const inputs = [];
-    const others = [];
-    for (let i = 0; i < allElements.length; i++) {
-      if (allElements[i].isInput) inputs.push({ ...allElements[i], origIdx: i });
-      else others.push({ ...allElements[i], origIdx: i });
-    }
-    const keepFromStart = 30;
-    const keepFromEnd = 40; // more from end — message inputs, send buttons are at bottom
-    const otherBudget = MAX_ELEMENTS - inputs.length;
-    let keptOthers;
-    if (others.length <= otherBudget) {
-      keptOthers = others;
-    } else {
-      const startOthers = others.slice(0, Math.min(keepFromStart, otherBudget));
-      const endOthers = others.slice(Math.max(others.length - keepFromEnd, keepFromStart));
-      keptOthers = [...startOthers, ...endOthers].slice(0, otherBudget);
-    }
-    const merged = [...inputs, ...keptOthers];
-    merged.sort((a, b) => a.origIdx - b.origIdx);
-    selected = merged;
-  }
-
-  const elementIndex = new Map();
-  const lines = [];
-  let id = 1;
-
-  for (const { node, role, name, desc, val, isMenu } of selected) {
     let line = `  [${id}] ${role}`;
     if (name) line += ` "${name}"`;
     if (desc && desc !== name) line += ` desc="${desc}"`;
@@ -271,83 +172,20 @@ async function getElementsViaCDP(tabId) {
     if (states.includes('expanded')) line += ' [EXPANDED]';
     if (states.includes('disabled')) line += ' [DISABLED]';
 
-    // Clear action annotations — make it OBVIOUS what each element does
-    if (isMenu) {
-      line += ' ⚠MENU-TRIGGER(do NOT click to open/navigate)';
-    }
-    const pressed = (node.properties || []).find(p => p.name === 'pressed');
+    // Property annotations
+    const props = node.properties || [];
+    const hasPopup = props.find(p => p.name === 'hasPopup');
+    if (hasPopup?.value?.value && hasPopup.value.value !== 'false') line += ' [ACTION-MENU]';
+    const pressed = props.find(p => p.name === 'pressed');
     if (pressed?.value?.value !== undefined) line += ` pressed=${pressed.value.value}`;
 
     elementIndex.set(id, { backendDOMNodeId: node.backendDOMNodeId, role, name });
     lines.push(line);
+
+    if (id >= 100) break; // cap at 100 elements
     id++;
   }
 
-  // ── Supplementary scan: find focusable elements the AX tree missed ──
-  // LinkedIn (and similar apps) use div[tabindex="0"] for clickable items
-  // (conversation list items, cards, etc.) that have NO ARIA role.
-  // The AX tree reports them as role="generic" and skips them entirely.
-  // This scan catches those elements so the agent can click them.
-  let suppCount = 0;
-  try {
-    const { root } = await cdpSend(tabId, 'DOM.getDocument', { depth: 0 });
-    const { nodeIds } = await cdpSend(tabId, 'DOM.querySelectorAll', {
-      nodeId: root.nodeId,
-      selector: [
-        '[tabindex="0"]:not(button):not(a):not(input):not(textarea):not(select)',
-        ':not([role="button"]):not([role="link"]):not([role="tab"]):not([role="menuitem"])',
-        ':not([role="textbox"]):not([role="combobox"]):not([role="searchbox"])',
-        ':not([role="checkbox"]):not([role="radio"]):not([role="switch"])',
-        ':not([role="option"]):not([role="treeitem"]):not([role="slider"])',
-      ].join('')
-    });
-
-    // Collect backendNodeIds for these supplementary elements (max 30)
-    const suppLimit = Math.min(nodeIds.length, 30);
-    for (let i = 0; i < suppLimit; i++) {
-      try {
-        // Get backendNodeId
-        const { node: nodeDesc } = await cdpSend(tabId, 'DOM.describeNode', { nodeId: nodeIds[i] });
-        if (!nodeDesc?.backendNodeId) continue;
-
-        // Check visibility + get text content
-        const { object } = await cdpSend(tabId, 'DOM.resolveNode', { nodeId: nodeIds[i] });
-        const { result: info } = await cdpSend(tabId, 'Runtime.callFunctionOn', {
-          objectId: object.objectId,
-          functionDeclaration: `function() {
-            const r = this.getBoundingClientRect();
-            if (r.width === 0 || r.height === 0) return null;
-            const text = (this.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 100);
-            if (!text || text.length < 3) return null;
-            return { text, w: r.width, h: r.height };
-          }`,
-          returnByValue: true,
-        });
-        await cdpSend(tabId, 'Runtime.releaseObject', { objectId: object.objectId }).catch(() => {});
-
-        if (!info?.value) continue;
-        const text = info.value.text;
-
-        // Skip if this text is already covered by an AX tree element (avoid duplicates)
-        let isDuplicate = false;
-        for (const [, entry] of elementIndex) {
-          if (entry.name && text.includes(entry.name)) { isDuplicate = true; break; }
-        }
-        if (isDuplicate) continue;
-
-        // Add to element list
-        const line = `  [${id}] clickable "${text}"`;
-        elementIndex.set(id, { backendDOMNodeId: nodeDesc.backendNodeId, role: 'clickable', name: text });
-        lines.push(line);
-        id++;
-        suppCount++;
-      } catch { /* skip individual element errors */ }
-    }
-  } catch (err) {
-    console.error('[PSH] Supplementary scan failed:', err.message);
-  }
-
-  console.log(`[PSH] AX tree: ${allElements.length} total, ${selected.length} selected + ${suppCount} supplementary`);
   return { lines, elementIndex };
 }
 
@@ -417,13 +255,11 @@ async function getNodeCenter(tabId, backendDOMNodeId) {
   return { x: result.value.x, y: result.value.y };
 }
 
-/** Dispatch a real mouse click through CDP with visible cursor indicator. */
+/** Dispatch a real mouse click through CDP. */
 async function cdpMouseClick(tabId, x, y) {
-  await showCursorIndicator(tabId, x, y);
   await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' });
   await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1, modifiers: 0 });
   await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1, modifiers: 0 });
-  resetCdpIdleTimer(tabId);
 }
 
 /* ════════════════════════════════════════════════════════
@@ -470,24 +306,66 @@ async function handleType(tabId, selector, text) {
   const attached = await cdpAttach(tabId);
   if (!attached) throw new Error('Cannot attach CDP');
 
-  // Click to focus
+  // Step 1: Click to focus
   const entry = resolveBackendNode(tabId, selector);
   if (entry) {
     try {
       const { x, y } = await getNodeCenter(tabId, entry.backendDOMNodeId);
       await cdpMouseClick(tabId, x, y);
-      await new Promise(r => setTimeout(r, 100));
     } catch { /* focus best-effort */ }
   }
 
-  // Ctrl+A to select all existing content, then Delete to clear it
+  // Step 2: Wait for lazy editor activation (Reddit, LinkedIn, etc.)
+  await new Promise(r => setTimeout(r, 600));
+
+  // Step 3: Ensure an editable element is focused
+  await cdpSend(tabId, 'Runtime.evaluate', {
+    expression: `(() => {
+      let el = document.activeElement;
+      while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+      if (el && (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) return true;
+      const selectors = '[contenteditable="true"], [contenteditable=""], textarea:not([disabled]), .ProseMirror, .ql-editor, [role="textbox"][contenteditable]';
+      function find(root, d) {
+        if (d > 8) return null;
+        try { for (const c of root.querySelectorAll(selectors)) { if (c.getBoundingClientRect().width > 0) { c.focus(); return c; } }
+          for (const c of root.querySelectorAll('*')) { if (c.shadowRoot) { const f = find(c.shadowRoot, d+1); if (f) return f; } }
+        } catch {} return null;
+      }
+      find(document, 0); return true;
+    })()`,
+    returnByValue: true,
+  }).catch(() => {});
+
+  // Step 4: Ctrl+A + Delete
   await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', modifiers: 2, code: 'KeyA', windowsVirtualKeyCode: 65 });
   await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp',   key: 'a', modifiers: 2, code: 'KeyA', windowsVirtualKeyCode: 65 });
   await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
   await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp',   key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
+  await new Promise(r => setTimeout(r, 50));
 
-  // Insert text atomically — works for inputs, textareas, contentEditable, Prosemirror, Slate, etc.
+  // Step 5: Insert text
   await cdpSend(tabId, 'Input.insertText', { text });
+
+  // Step 6: Verify and fallback to char-by-char if needed
+  await new Promise(r => setTimeout(r, 200));
+  const verify = await cdpSend(tabId, 'Runtime.evaluate', {
+    expression: `(() => {
+      let el = document.activeElement;
+      while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+      if (!el) return false;
+      const c = el.isContentEditable ? (el.innerText || '').trim() : (el.value || '').trim();
+      return c.length > 0;
+    })()`,
+    returnByValue: true,
+  }).catch(() => ({ result: { value: true } }));
+
+  if (!verify?.result?.value) {
+    for (const char of text) {
+      await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: char, text: char, unmodifiedText: char });
+      await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: char });
+      await new Promise(r => setTimeout(r, 40));
+    }
+  }
 
   return { ok: true };
 }
@@ -509,8 +387,7 @@ async function handleTypeChar(tabId, selector, text, delay = 80) {
 
   for (const char of text) {
     await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: char, text: char, unmodifiedText: char });
-    await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'char',    key: char, text: char, unmodifiedText: char });
-    await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp',   key: char, text: char, unmodifiedText: char });
+    await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp',   key: char });
     if (delay > 0) await new Promise(r => setTimeout(r, delay));
   }
 
@@ -542,19 +419,16 @@ async function handleKeypress(tabId, key) {
     await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyPress', key: k.key, code: k.code, windowsVirtualKeyCode: k.windowsVirtualKeyCode });
   }
   await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: k.key, code: k.code, windowsVirtualKeyCode: k.windowsVirtualKeyCode });
-  resetCdpIdleTimer(tabId);
   return { ok: true };
 }
 
-/** Hover over an element via CDP with visible cursor indicator. */
+/** Hover over an element via CDP. */
 async function handleHover(tabId, selector) {
   const entry = resolveBackendNode(tabId, selector);
   if (!entry) throw new Error(`Element not found for hover: ${selector}`);
 
   const { x, y } = await getNodeCenter(tabId, entry.backendDOMNodeId);
-  await showCursorIndicator(tabId, x, y);
   await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' });
-  resetCdpIdleTimer(tabId);
   return { ok: true, x, y };
 }
 
@@ -562,22 +436,12 @@ async function handleHover(tabId, selector) {
 async function handleGetElements(tabId) {
   const tab = await chrome.tabs.get(tabId);
 
-  // Get page text + viewport info from content script
+  // Get page text from content script (lightweight)
   let pageText = '';
-  let viewportInfo = '';
   try {
     const info = await sendToContent(tabId, { action: 'getPageText' });
     pageText = info?.text || '';
   } catch { /* non-critical */ }
-  try {
-    const { result: vp } = await cdpSend(tabId, 'Runtime.evaluate', {
-      expression: `({w: window.innerWidth, h: window.innerHeight, scrollY: Math.round(window.scrollY), scrollH: document.documentElement.scrollHeight})`,
-      returnByValue: true
-    });
-    if (vp?.value) {
-      viewportInfo = `VIEWPORT: ${vp.value.w}x${vp.value.h} scroll=${vp.value.scrollY}/${vp.value.scrollH}`;
-    }
-  } catch {}
 
   const { lines, elementIndex } = await getElementsViaCDP(tabId);
 
@@ -588,12 +452,11 @@ async function handleGetElements(tabId) {
   const snapshot = [
     `PAGE: ${tab.url}`,
     `TITLE: ${tab.title}`,
-    viewportInfo,
     pageText ? `TEXT: ${pageText}` : '',
     '',
-    `ELEMENTS (use [data-psh-id="N"] as selector):`,
+    `ELEMENTS (use [N] as selector):`,
     ...lines,
-  ].filter(l => l !== undefined && l !== '').join('\n');
+  ].filter(l => l !== undefined).join('\n');
 
   return { snapshot };
 }
@@ -957,179 +820,94 @@ async function executeCommand(cmd, tabId) {
 
       /* ── Click ── */
       case 'click': {
-        // HYBRID: content script finds element coords → CDP does the real mouse click
-        await ensureContentScript(tabId);
-        let urlBefore = '';
-        try { const tabBefore = await chrome.tabs.get(tabId); urlBefore = tabBefore.url || ''; } catch {}
-
-        // Step 1: Content script resolves element from its Map → returns viewport coordinates
-        let coords = null;
-        try {
-          coords = await sendToContent(tabId, { action: 'getClickCoords', selector: cmd.selector });
-        } catch {}
-
-        if (!coords || coords.x === null || coords.y === null) {
-          sendResult(cmd, false, null, 'Element not found: ' + cmd.selector);
-          break;
-        }
-
-        let result = null;
-
-        // Step 2: Try CDP real mouse click at those coordinates (isTrusted:true)
         const cdpOk = await canUseCDP(tabId);
         if (cdpOk) {
-          try {
-            const attached = await cdpAttach(tabId);
-            if (attached) {
-              await cdpMouseClick(tabId, coords.x, coords.y);
-              result = { ok: true, x: coords.x, y: coords.y, method: 'cdp-mouse',
-                tag: coords.tag || '', role: coords.elRole || '', text: coords.labelText || '' };
+          const attached = await cdpAttach(tabId);
+          if (attached) {
+            // Ensure we have a fresh element index for this tab
+            if (!sessions.get(tabId)?.elementIndex) {
+              await refreshElementIndex(tabId);
             }
-          } catch (err) {
-            console.error('[PSH] CDP click failed, trying JS fallback:', err.message);
-          }
-        }
-
-        // Step 3: Fallback — JS .click() in MAIN world at coordinates
-        if (!result) {
-          try {
-            const [{ result: jsResult }] = await chrome.scripting.executeScript({
-              target: { tabId }, world: 'MAIN',
-              func: (cx, cy) => {
-                let el = document.elementFromPoint(cx, cy);
-                if (!el) return { ok: false, error: 'No element at coordinates' };
-                while (el.shadowRoot) {
-                  const deeper = el.shadowRoot.elementFromPoint(cx, cy);
-                  if (!deeper || deeper === el) break;
-                  el = deeper;
-                }
-                el.click();
-                return { ok: true, tag: el.tagName.toLowerCase(), method: 'js-click' };
-              },
-              args: [coords.x, coords.y]
-            });
-            result = jsResult;
-          } catch (err) {
-            sendResult(cmd, false, null, err.message);
-            break;
-          }
-        }
-
-        if (!result || result.ok === false) {
-          sendResult(cmd, false, result, result?.error || 'Click failed');
-          break;
-        }
-
-        // Post-click: navigation verification + modal detection
-        await new Promise(r => setTimeout(r, 400));
-        try {
-          const tabAfter = await chrome.tabs.get(tabId);
-          result.urlChanged = tabAfter.url !== urlBefore;
-          result.currentUrl = tabAfter.url;
-        } catch {
-          result.urlChanged = true;
-        }
-
-        try {
-          const [{ result: modalCheck }] = await chrome.scripting.executeScript({
-            target: { tabId }, world: 'MAIN',
-            func: () => {
-              const MODAL_SELS = '[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]';
-              function findModal(root, depth) {
-                if (depth > 5) return null;
-                try {
-                  for (const el of root.querySelectorAll(MODAL_SELS)) {
-                    const r = el.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0) {
-                      const heading = el.querySelector('h1,h2,h3,h4,[role="heading"]');
-                      return { modalDetected: true, modalTitle: (heading?.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 100) };
-                    }
-                  }
-                } catch {}
-                try {
-                  for (const el of root.querySelectorAll('*')) {
-                    if (el.shadowRoot) { const f = findModal(el.shadowRoot, depth + 1); if (f) return f; }
-                  }
-                } catch {}
-                return null;
-              }
-              return findModal(document, 0) || { modalDetected: false };
+            try {
+              const result = await handleClick(tabId, cmd.selector);
+              sendResult(cmd, result?.ok !== false, result, result?.error);
+              break;
+            } catch (err) {
+              // CDP click failed — fall through to DOM fallback
+              console.error('CDP click failed, trying fallback:', err.message);
             }
-          });
-          if (modalCheck?.modalDetected) {
-            result.modalDetected = true;
-            result.modalTitle = modalCheck.modalTitle;
           }
-        } catch {}
-
-        sendResult(cmd, true, result);
+        }
+        // DOM fallback (DevTools open, chrome:// page, or CDP failure)
+        try {
+          await ensureContentScript(tabId);
+          const result = await handleClickFallback(tabId, cmd.selector);
+          sendResult(cmd, result?.ok !== false, result, result?.error);
+        } catch (err) {
+          sendResult(cmd, false, null, err.message);
+        }
         break;
       }
 
-      /* ── Click by text — find element containing text and click it ── */
+      /* ── Click by visible text ── */
       case 'clickText': {
         const searchText = (cmd.text || '').trim();
         if (!searchText) { sendResult(cmd, false, null, 'No text provided'); break; }
 
         let urlBefore = '';
-        try { const tabBefore = await chrome.tabs.get(tabId); urlBefore = tabBefore.url || ''; } catch {}
+        try { const tb = await chrome.tabs.get(tabId); urlBefore = tb.url || ''; } catch {}
 
         try {
-          // Find element by text in MAIN world — returns coordinates
           const [{ result: found }] = await chrome.scripting.executeScript({
             target: { tabId }, world: 'MAIN',
             func: (text) => {
+              const SUBMIT_WORDS = ['send', 'comment', 'post', 'submit', 'reply', 'publish', 'save', 'done', 'ok', 'confirm'];
+              const isSubmitAction = SUBMIT_WORDS.includes(text.toLowerCase().trim());
               const candidates = [];
-              const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-              let node;
-              while (node = walker.nextNode()) {
-                const el = node;
-                const elText = (el.textContent || '').trim().replace(/\s+/g, ' ');
-                if (!elText.toLowerCase().includes(text.toLowerCase())) continue;
-                const rect = el.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) continue;
-                if (rect.width > window.innerWidth * 0.8 && rect.height > window.innerHeight * 0.5) continue;
-
-                const tag = el.tagName;
-                const hasPopup = el.getAttribute('aria-haspopup');
-                if (hasPopup === 'true' || hasPopup === 'menu') continue;
-
-                // Check if matching text is VISIBLE or hidden (visually-hidden spans)
-                const hasHiddenText = el.querySelector('.visually-hidden, .sr-only, [aria-hidden="true"]');
-                const visibleText = hasHiddenText
-                  ? [...el.childNodes].filter(n => {
-                      if (n.nodeType === 3) return true;
-                      if (n.nodeType === 1) {
-                        const s = getComputedStyle(n);
-                        return s.position !== 'absolute' || (s.width !== '1px' && s.clip === 'auto');
-                      }
-                      return false;
-                    }).map(n => (n.textContent || '').trim()).join(' ')
-                  : elText;
-
-                // Skip if matching text is only in hidden children (e.g., screen reader text on buttons)
-                const matchInVisible = visibleText.toLowerCase().includes(text.toLowerCase());
-                const matchOnlyInHidden = !matchInVisible && elText.toLowerCase().includes(text.toLowerCase());
-
-                // Skip dropdown trigger buttons where the name is only in hidden text
-                if (tag === 'BUTTON' && matchOnlyInHidden) continue;
-                if (tag === 'BUTTON' && el.getAttribute('aria-expanded') !== null) continue;
-
-                let score = 0;
-                // Tabindex divs (conversation items, cards) — HIGHEST priority for click_text
-                if (el.tabIndex >= 0 && !['BUTTON', 'A', 'INPUT'].includes(tag)) score += 15;
-                if (['A'].includes(tag)) score += 12;
-                if (['BUTTON'].includes(tag)) score += 8;
-                // Prefer smaller elements (more specific)
-                score += Math.max(0, 5 - Math.floor(elText.length / 50));
-                // Prefer elements where text is visible (not hidden)
-                if (matchInVisible) score += 5;
-                // Prefer elements whose visible text starts with the search text
-                if (visibleText.toLowerCase().includes(text.toLowerCase())) score += 3;
-
-                candidates.push({ el, score, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: elText.slice(0, 80) });
+              function walk(root, depth) {
+                if (depth > 8) return;
+                try {
+                  for (const el of root.querySelectorAll('*')) {
+                    const elText = (el.textContent || '').trim().replace(/\s+/g, ' ');
+                    if (!elText.toLowerCase().includes(text.toLowerCase())) continue;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
+                    if (rect.width > window.innerWidth * 0.8 && rect.height > window.innerHeight * 0.5) continue;
+                    try { const s = getComputedStyle(el); if (s.display === 'none' || s.visibility === 'hidden') continue; } catch { continue; }
+                    const tag = el.tagName;
+                    const hasPopup = el.getAttribute('aria-haspopup');
+                    if (hasPopup === 'true' || hasPopup === 'menu') continue;
+                    if (tag === 'BUTTON' && el.getAttribute('aria-expanded') !== null) continue;
+                    let score = 0;
+                    if (tag === 'A' && el.href) { score += 20; if (el.href.includes('/in/')) score += 10; }
+                    else if (el.tabIndex >= 0 && !['BUTTON', 'A', 'INPUT'].includes(tag)) score += 15;
+                    else if (tag === 'A') score += 12;
+                    else if (tag === 'BUTTON') score += 6;
+                    else if (el.getAttribute('role') === 'button') score += 6;
+                    score += Math.max(0, 5 - Math.floor(elText.length / 50));
+                    if (elText.trim().toLowerCase() === text.toLowerCase()) score += 10;
+                    if (elText.trim().toLowerCase().startsWith(text.toLowerCase())) score += 7;
+                    // Submit button detection — prefer actual submit over action-bar duplicates
+                    if (isSubmitAction && (tag === 'BUTTON' || el.getAttribute('role') === 'button')) {
+                      if (el.type === 'submit') score += 25;
+                      if (el.closest('form, [role="form"], .msg-form, .comments-comment-box, .editor-container')) score += 20;
+                      const cls = (el.className || '').toLowerCase();
+                      if (cls.includes('submit') || cls.includes('send') || cls.includes('post') || cls.includes('primary')) score += 15;
+                      try { const bg = getComputedStyle(el).backgroundColor; if (bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'rgb(255, 255, 255)') score += 12; } catch {}
+                      const parent = el.parentElement;
+                      if (parent) { if (parent.querySelector('[contenteditable], textarea, .ql-editor')) score += 15; const gp = parent.parentElement; if (gp && gp.querySelector('[contenteditable], textarea')) score += 10; }
+                      score += Math.min(15, Math.floor(rect.top / 50));
+                    }
+                    const lbl = elText.toLowerCase();
+                    if (lbl.includes('premium') || lbl.includes('upgrade')) score -= 20;
+                    if (tag === 'BUTTON' && (lbl.includes('connect') || lbl.includes('follow'))) score -= 5;
+                    if (isSubmitAction && tag === 'SPAN' && el.closest('[class*="social-action"]')) score -= 15;
+                    candidates.push({ el, score, text: elText.slice(0, 80) });
+                    if (el.shadowRoot) walk(el.shadowRoot, depth + 1);
+                  }
+                } catch {}
               }
-
+              walk(document, 0);
               if (candidates.length === 0) return null;
               candidates.sort((a, b) => b.score - a.score);
               const best = candidates[0];
@@ -1140,44 +918,24 @@ async function executeCommand(cmd, tabId) {
             args: [searchText]
           });
 
-          if (!found) {
-            sendResult(cmd, false, null, `No visible element found containing "${searchText}"`);
-            break;
-          }
+          if (!found) { sendResult(cmd, false, null, `No visible element found containing "${searchText}"`); break; }
 
-          // CDP mouse click at the found coordinates
-          const cdpOk = await canUseCDP(tabId);
-          if (cdpOk) {
-            try {
-              const attached = await cdpAttach(tabId);
-              if (attached) {
-                await cdpMouseClick(tabId, found.x, found.y);
-              }
-            } catch {
-              // JS fallback
-              await chrome.scripting.executeScript({
-                target: { tabId }, world: 'MAIN',
-                func: (x, y) => { const el = document.elementFromPoint(x, y); if (el) el.click(); },
-                args: [found.x, found.y]
-              });
+          const cdpOk2 = await canUseCDP(tabId);
+          if (cdpOk2) {
+            const attached2 = await cdpAttach(tabId);
+            if (attached2) {
+              try { await cdpMouseClick(tabId, found.x, found.y); }
+              catch { await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: (x, y) => { const el = document.elementFromPoint(x, y); if (el) el.click(); }, args: [found.x, found.y] }); }
             }
           } else {
-            await chrome.scripting.executeScript({
-              target: { tabId }, world: 'MAIN',
-              func: (x, y) => { const el = document.elementFromPoint(x, y); if (el) el.click(); },
-              args: [found.x, found.y]
-            });
+            await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: (x, y) => { const el = document.elementFromPoint(x, y); if (el) el.click(); }, args: [found.x, found.y] });
           }
 
-          // Post-click verification
           await new Promise(r => setTimeout(r, 400));
           let urlChanged = false;
-          try { const tabAfter = await chrome.tabs.get(tabId); urlChanged = tabAfter.url !== urlBefore; } catch { urlChanged = true; }
-
+          try { const ta = await chrome.tabs.get(tabId); urlChanged = ta.url !== urlBefore; } catch { urlChanged = true; }
           sendResult(cmd, true, { ok: true, clicked: found.text, tag: found.tag, urlChanged });
-        } catch (err) {
-          sendResult(cmd, false, null, err.message);
-        }
+        } catch (err) { sendResult(cmd, false, null, err.message); }
         break;
       }
 
@@ -1220,150 +978,313 @@ async function executeCommand(cmd, tabId) {
         break;
       }
 
+      /* ── Type into editor — atomic click-placeholder → find-editor → type ── */
+      /* ── Click overflow/three-dot menu near content, then click a menu item ── */
+      case 'clickOverflowMenu': {
+        const nearText = (cmd.nearText || '').trim();
+        const menuAction = (cmd.menuAction || '').trim();
+        if (!menuAction) { sendResult(cmd, false, null, 'No menuAction specified'); break; }
+        try {
+          // Step 1: Find and click overflow button near text
+          const [{ result: mb }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: (nearText) => {
+              const buttons = [];
+              function fb(root, d) { if (d > 12) return; try {
+                for (const el of root.querySelectorAll('button,[role="button"]')) {
+                  const l = (el.getAttribute('aria-label') || '').toLowerCase();
+                  const t = (el.textContent || '').trim().toLowerCase();
+                  if (l.includes('more') || l.includes('option') || l.includes('overflow') || l.includes('menu') || l.includes('action') || t === '...' || t === '⋯' || t === '⋮' || t === '…' || (t === '' && el.querySelector('svg'))) {
+                    const r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) buttons.push({ el, rect: r, label: l || t || 'menu' });
+                  }
+                }
+                for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) fb(el.shadowRoot, d + 1); }
+              } catch {} }
+              fb(document, 0);
+              if (!buttons.length) return { ok: false, error: 'No overflow buttons found' };
+              let best = buttons[0];
+              if (nearText) {
+                let nearEl = null;
+                function fn(root, d) { if (d > 12 || nearEl) return; try {
+                  for (const el of root.querySelectorAll('*')) { const t = (el.textContent || '').trim(); if (t.toLowerCase().includes(nearText.toLowerCase()) && t.length < 500) { const r = el.getBoundingClientRect(); if (r.width > 20 && r.height > 10) { nearEl = { rect: r }; return; } } }
+                  for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) fn(el.shadowRoot, d + 1); }
+                } catch {} }
+                fn(document, 0);
+                if (nearEl) { let bd = Infinity; for (const b of buttons) { const d = Math.abs(b.rect.top - nearEl.rect.top) * 2 + Math.abs(b.rect.left - nearEl.rect.left); if (d < bd) { bd = d; best = b; } } }
+              }
+              best.el.scrollIntoView({ block: 'center', behavior: 'instant' }); best.el.click();
+              const r = best.el.getBoundingClientRect();
+              return { ok: true, x: r.left + r.width / 2, y: r.top + r.height / 2, label: best.label };
+            }, args: [nearText]
+          });
+          if (!mb?.ok) { sendResult(cmd, false, null, mb?.error || 'Could not find overflow button'); break; }
+          const cdpOk3 = await canUseCDP(tabId);
+          if (cdpOk3) { const a = await cdpAttach(tabId); if (a) try { await cdpMouseClick(tabId, mb.x, mb.y); } catch {} }
+          await new Promise(r => setTimeout(r, 800));
+          // Step 2: Click menu action — scan ALL elements (Reddit renders menus as overlays)
+          const [{ result: ar }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: (action) => {
+              const cands = []; const aLow = action.toLowerCase();
+              function scan(root, d) { if (d > 12) return; try {
+                for (const el of root.querySelectorAll('*')) {
+                  const t = (el.textContent || '').trim();
+                  if (!t.toLowerCase().includes(aLow) || t.length > 200) continue;
+                  const r = el.getBoundingClientRect();
+                  if (!r.width || !r.height || r.top < -100 || r.top > window.innerHeight + 100) continue;
+                  try { if (getComputedStyle(el).display === 'none') continue; } catch { continue; }
+                  let sc = 0; const role = el.getAttribute('role'); const tag = el.tagName;
+                  if (role === 'menuitem') sc += 20; if (tag === 'BUTTON') sc += 10; if (tag === 'A') sc += 8; if (tag === 'LI') sc += 5;
+                  sc += Math.max(0, 10 - Math.floor(t.length / 20));
+                  if (t.toLowerCase() === aLow) sc += 15; if (t.toLowerCase().startsWith(aLow)) sc += 10;
+                  if (r.width < 400 && r.height < 60) sc += 5;
+                  cands.push({ el, text: t.slice(0, 80), score: sc, x: r.left + r.width / 2, y: r.top + r.height / 2 });
+                  if (el.shadowRoot) scan(el.shadowRoot, d + 1);
+                }
+              } catch {} }
+              scan(document, 0);
+              if (!cands.length) return { ok: false, error: 'Menu item "' + action + '" not found' };
+              cands.sort((a, b) => b.score - a.score);
+              const best = cands[0]; best.el.click();
+              return { ok: true, clicked: best.text, x: best.x, y: best.y };
+            }, args: [menuAction]
+          });
+          if (!ar?.ok) { sendResult(cmd, false, null, ar?.error || 'Could not find menu action'); break; }
+          if (cdpOk3 && ar.x) { try { await cdpMouseClick(tabId, ar.x, ar.y); } catch {} }
+          // Step 3: Auto-confirm dialog
+          await new Promise(r => setTimeout(r, 800));
+          const [{ result: cr2 }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: (action) => {
+              function fc(root, d) { if (d > 12) return null; try {
+                const words = [action.toLowerCase(), 'yes', 'confirm', 'ok', 'delete'];
+                for (const el of root.querySelectorAll('button,[role="button"]')) { const t = (el.textContent || '').trim().toLowerCase(); if (words.some(w => t.includes(w))) { const r = el.getBoundingClientRect(); if (r.width > 0 && r.height > 0) { el.click(); return { ok: true, confirmed: t }; } } }
+                for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) { const f = fc(el.shadowRoot, d + 1); if (f) return f; } }
+              } catch {} return null; }
+              return fc(document, 0) || { ok: true, confirmed: false };
+            }, args: [menuAction]
+          });
+          sendResult(cmd, true, { ok: true, menuClicked: mb.label, actionClicked: ar.clicked, confirmed: cr2?.confirmed || false });
+        } catch (err) { sendResult(cmd, false, null, err.message); }
+        break;
+      }
+
+      case 'typeIntoEditor': {
+        const editorText = cmd.text || '';
+        const placeholderHint = cmd.placeholder || 'Join the conversation';
+        if (!editorText) { sendResult(cmd, false, null, 'No text to type'); break; }
+        try {
+          const cdpOk2 = await canUseCDP(tabId);
+          const attached2 = cdpOk2 ? await cdpAttach(tabId) : false;
+          // Step 1: Find and click placeholder via MAIN world (walks all shadow DOMs)
+          const [{ result: cr }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: (hint) => {
+              function find(root, d) {
+                if (d > 12) return null;
+                try {
+                  for (const el of root.querySelectorAll('[contenteditable="true"],[contenteditable=""],textarea,.ProseMirror,.ql-editor,[role="textbox"]')) {
+                    const r = el.getBoundingClientRect(); if (r.width > 50 && r.height > 10) { try { if (getComputedStyle(el).display === 'none') continue; } catch {} return el; }
+                  }
+                  for (const el of root.querySelectorAll('*')) {
+                    const t = (el.textContent || '').trim();
+                    if (t.toLowerCase().includes(hint.toLowerCase()) && t.length < 200) { const r = el.getBoundingClientRect(); if (r.width > 50 && r.height > 10) return el; }
+                  }
+                  for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) { const f = find(el.shadowRoot, d + 1); if (f) return f; } }
+                } catch {} return null;
+              }
+              const t = find(document, 0);
+              if (!t) return { ok: false, error: 'No editor or placeholder found' };
+              t.scrollIntoView({ block: 'center', behavior: 'instant' }); t.click();
+              const r = t.getBoundingClientRect();
+              return { ok: true, x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            }, args: [placeholderHint]
+          });
+          if (!cr?.ok) { sendResult(cmd, false, null, cr?.error || 'Could not find editor'); break; }
+          if (attached2) { try { await cdpMouseClick(tabId, cr.x, cr.y); } catch {} }
+          // Step 2: Wait for editor
+          await new Promise(r => setTimeout(r, 1200));
+          // Step 3: Focus the editor
+          const [{ result: fr }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: () => {
+              function find(root, d) {
+                if (d > 12) return null;
+                try {
+                  for (const el of root.querySelectorAll('[contenteditable="true"],[contenteditable=""],textarea,.ProseMirror,.ql-editor')) {
+                    const r = el.getBoundingClientRect(); if (r.width > 50 && r.height > 10) { try { if (getComputedStyle(el).display === 'none') continue; } catch {} el.focus(); el.click(); return { ok: true, r: { x: r.left + r.width / 2, y: r.top + r.height / 2 } }; }
+                  }
+                  for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) { const f = find(el.shadowRoot, d + 1); if (f) return f; } }
+                } catch {} return null;
+              }
+              return find(document, 0) || { ok: false };
+            }, args: []
+          });
+          if (attached2 && fr?.r) { try { await cdpMouseClick(tabId, fr.r.x, fr.r.y); } catch {} await new Promise(r => setTimeout(r, 300)); }
+          // Step 4: Type char-by-char via CDP
+          if (attached2) {
+            // Method A: insertText (atomic, no double chars)
+            await cdpSend(tabId, 'Input.insertText', { text: editorText });
+            await new Promise(r => setTimeout(r, 300));
+            // Check and fallback to execCommand if needed
+            const [{ result: chkA }] = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN',
+              func: () => { function f(r,d){if(d>12)return null;try{for(const e of r.querySelectorAll('[contenteditable="true"],[contenteditable=""],textarea,.ProseMirror')){const t=e.isContentEditable?(e.innerText||'').trim():(e.value||'').trim();if(t.length>0)return true;}for(const e of r.querySelectorAll('*')){if(e.shadowRoot){const x=f(e.shadowRoot,d+1);if(x)return x;}}}catch{}return null;}return f(document,0)||false; },
+              args: [] });
+            if (!chkA?.result) {
+              await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN',
+                func: (text) => { function f(r,d){if(d>12)return null;try{for(const e of r.querySelectorAll('[contenteditable="true"],[contenteditable=""],textarea,.ProseMirror')){if(e.getBoundingClientRect().width>50){e.focus();return e;}}for(const e of r.querySelectorAll('*')){if(e.shadowRoot){const x=f(e.shadowRoot,d+1);if(x)return x;}}}catch{}return null;}const el=f(document,0);if(el&&el.isContentEditable){el.focus();document.execCommand('insertText',false,text);}else if(el){el.value=text;el.dispatchEvent(new Event('input',{bubbles:true}));} },
+                args: [editorText] });
+            }
+          } else {
+            await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN',
+              func: (text) => { const el = document.activeElement; if (el?.isContentEditable) document.execCommand('insertText', false, text); else if (el) { el.value = text; el.dispatchEvent(new Event('input', { bubbles: true })); } },
+              args: [editorText] });
+          }
+          // Step 5: Verify
+          await new Promise(r => setTimeout(r, 300));
+          const [{ result: vr }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: () => {
+              function check(root, d) {
+                if (d > 12) return null;
+                try {
+                  for (const el of root.querySelectorAll('[contenteditable="true"],[contenteditable=""],textarea,.ProseMirror')) {
+                    const t = el.isContentEditable ? (el.innerText || '').trim() : (el.value || '').trim();
+                    if (t.length > 0) return { ok: true, content: t.slice(0, 100) };
+                  }
+                  for (const el of root.querySelectorAll('*')) { if (el.shadowRoot) { const f = check(el.shadowRoot, d + 1); if (f) return f; } }
+                } catch {} return null;
+              }
+              return check(document, 0) || { ok: false };
+            }, args: []
+          });
+          sendResult(cmd, true, { ok: true, typed: editorText, verified: vr?.ok || false, content: vr?.content || '' });
+        } catch (err) { sendResult(cmd, false, null, err.message); }
+        break;
+      }
+
       /* ── Type ── */
       case 'type': {
-        // HYBRID: content script finds element → CDP click to focus → CDP insertText
-        await ensureContentScript(tabId);
-
-        // Step 1: Get element coordinates from content script
-        let typeCoords = null;
-        try {
-          typeCoords = await sendToContent(tabId, { action: 'getClickCoords', selector: cmd.selector });
-        } catch {}
-
-        // Step 2: Click to focus (CDP if available, JS fallback)
-        const tcx = typeCoords?.x ?? null;
-        const tcy = typeCoords?.y ?? null;
         const cdpOk = await canUseCDP(tabId);
-        let usedCDP = false;
-
-        if (cdpOk && tcx !== null && tcy !== null) {
-          try {
-            const attached = await cdpAttach(tabId);
-            if (attached) {
-              await cdpMouseClick(tabId, tcx, tcy);
-              await new Promise(r => setTimeout(r, 100));
-              usedCDP = true;
+        if (cdpOk) {
+          const attached = await cdpAttach(tabId);
+          if (attached) {
+            // Ensure we have a fresh element index
+            if (!sessions.get(tabId)?.elementIndex) {
+              await refreshElementIndex(tabId);
             }
-          } catch {}
-        }
-
-        if (!usedCDP) {
-          // JS fallback click to focus
-          await chrome.scripting.executeScript({
-            target: { tabId }, world: 'MAIN',
-            func: (cx, cy) => {
-              let el = cx !== null ? document.elementFromPoint(cx, cy) : null;
-              if (!el) {
-                // Try to find editable element
-                el = document.querySelector('[contenteditable="true"], textarea, input:not([type=hidden])');
-              }
-              if (el) { el.scrollIntoView({ block: 'center', behavior: 'instant' }); el.focus?.(); el.click(); }
-            },
-            args: [tcx, tcy]
-          });
-        }
-
-        // Step 3: Wait for editor to appear (placeholder → contenteditable transform)
-        await settleDOM(tabId);
-
-        // Step 4: Try CDP Input.insertText (works on all contenteditable, inputs, textareas)
-        let typeResult = null;
-        if (cdpOk && usedCDP) {
-          try {
-            // Ctrl+A to select all, Delete to clear
-            await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', modifiers: 2, code: 'KeyA', windowsVirtualKeyCode: 65 });
-            await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', modifiers: 2, code: 'KeyA', windowsVirtualKeyCode: 65 });
-            await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
-            await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
-            // Insert text atomically
-            await cdpSend(tabId, 'Input.insertText', { text: cmd.text });
-            typeResult = { ok: true, method: 'cdp-insertText' };
-          } catch (err) {
-            console.error('[PSH] CDP insertText failed:', err.message);
+            try {
+              const result = await handleType(tabId, cmd.selector, cmd.text);
+              sendResult(cmd, result?.ok !== false, result, result?.error);
+              break;
+            } catch (err) {
+              console.error('CDP type failed, trying fallback:', err.message);
+            }
           }
         }
-
-        // Step 5: JS fallback for typing
-        if (!typeResult) {
-          try {
-            const [{ result }] = await chrome.scripting.executeScript({
-              target: { tabId }, world: 'MAIN',
-              func: (text, cx, cy) => {
-                let el = document.activeElement;
-                while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
-                if (!el || (!el.isContentEditable && el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') || el === document.body) {
-                  function findEditor(root) {
-                    for (const c of root.querySelectorAll('*')) {
-                      if ((c.isContentEditable || c.tagName === 'TEXTAREA') && c.getBoundingClientRect().width > 0) return c;
-                      if (c.shadowRoot) { const f = findEditor(c.shadowRoot); if (f) return f; }
-                    }
-                    return null;
+        // DOM fallback — find by label text, no getClickCoords dependency
+        try {
+          const fallbackLabel = resolveBackendNode(tabId, cmd.selector)?.name || '';
+          await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: (label) => {
+              function findByLabel(root, depth) {
+                if (depth > 8) return null;
+                for (const el of root.querySelectorAll('input, textarea, [contenteditable], [role="textbox"]')) {
+                  const text = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('name') || '').trim();
+                  if (!label || text.toLowerCase().includes(label.toLowerCase())) return el;
+                }
+                for (const el of root.querySelectorAll('*')) {
+                  if (el.shadowRoot) { const f = findByLabel(el.shadowRoot, depth + 1); if (f) return f; }
+                }
+                return null;
+              }
+              const el = findByLabel(document, 0) || document.activeElement;
+              if (el && el !== document.body) { el.scrollIntoView({ block: 'center', behavior: 'instant' }); el.focus?.(); el.click(); }
+            },
+            args: [fallbackLabel]
+          });
+          await settleDOM(tabId);
+          const [{ result }] = await chrome.scripting.executeScript({
+            target: { tabId }, world: 'MAIN',
+            func: (text) => {
+              let el = document.activeElement;
+              while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+              if (!el || (!el.isContentEditable && el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') || el === document.body) {
+                function findEditor(root) {
+                  for (const c of root.querySelectorAll('*')) {
+                    if ((c.isContentEditable || c.tagName === 'TEXTAREA') && c.getBoundingClientRect().width > 0) return c;
+                    if (c.shadowRoot) { const f = findEditor(c.shadowRoot); if (f) return f; }
                   }
-                  const editor = findEditor(document);
-                  if (editor) el = editor;
+                  return null;
                 }
-                if (!el || el === document.body) return { ok: false, error: 'No editable element found' };
-                el.focus?.();
-                const target = el.shadowRoot?.querySelector('input, textarea') || el;
-                if (target.isContentEditable) {
-                  target.focus();
-                  document.execCommand('selectAll', false, null);
-                  document.execCommand('delete', false, null);
-                  if (target.textContent?.trim()) target.innerHTML = '';
-                  const ok = document.execCommand('insertText', false, text);
-                  if (!ok) { target.textContent = ''; target.appendChild(document.createTextNode(text)); }
-                  target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: text }));
-                } else {
-                  const tracker = target._valueTracker; if (tracker) tracker.setValue('');
-                  const proto = Object.getPrototypeOf(target);
-                  const desc = Object.getOwnPropertyDescriptor(proto, 'value') || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
-                  if (desc?.set) desc.set.call(target, text); else target.value = text;
-                  target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: text }));
-                }
-                return { ok: true, method: 'js-type' };
-              },
-              args: [cmd.text, tcx, tcy]
-            });
-            typeResult = result;
-          } catch (err) { typeResult = { ok: false, error: err.message }; }
-        }
-
-        await settleDOM(tabId);
-        sendResult(cmd, typeResult?.ok !== false, typeResult, typeResult?.error);
+                const editor = findEditor(document);
+                if (editor) el = editor;
+              }
+              if (!el || el === document.body) return { ok: false, error: 'No editable element found' };
+              el.focus?.();
+              const target = el.shadowRoot?.querySelector('input, textarea') || el;
+              if (target.isContentEditable) {
+                target.focus();
+                document.execCommand('selectAll', false, null);
+                document.execCommand('delete', false, null);
+                if (target.textContent?.trim()) target.innerHTML = '';
+                const ok = document.execCommand('insertText', false, text);
+                if (!ok) { target.textContent = ''; target.appendChild(document.createTextNode(text)); }
+                target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: text }));
+                target.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+              } else {
+                const tracker = target._valueTracker; if (tracker) tracker.setValue('');
+                const proto = Object.getPrototypeOf(target);
+                const desc = Object.getOwnPropertyDescriptor(proto, 'value') || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+                if (desc?.set) desc.set.call(target, text); else target.value = text;
+                target.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: text }));
+                target.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+              }
+              return { ok: true };
+            },
+            args: [cmd.text]
+          });
+          sendResult(cmd, result?.ok !== false, result, result?.error);
+        } catch (err) { sendResult(cmd, false, null, err.message); }
         break;
       }
 
       /* ── TypeChar (human-like character-by-character) ── */
       case 'typeChar': {
-        // HYBRID: content script coords → CDP click to focus → CDP char-by-char keys
-        await ensureContentScript(tabId);
-        let tcCoords = null;
-        try { tcCoords = await sendToContent(tabId, { action: 'getClickCoords', selector: cmd.selector }); } catch {}
-        const tcx2 = tcCoords?.x ?? null, tcy2 = tcCoords?.y ?? null;
-        const text = cmd.text || cmd.char || '';
-        const delay = cmd.delay || 80;
-
         const cdpOk = await canUseCDP(tabId);
-        if (cdpOk && tcx2 !== null) {
-          try {
-            const attached = await cdpAttach(tabId);
-            if (attached) {
-              await cdpMouseClick(tabId, tcx2, tcy2);
-              await new Promise(r => setTimeout(r, 100));
-              await handleTypeChar(tabId, null, text, delay);
-              sendResult(cmd, true, { ok: true, method: 'cdp-typeChar' });
+        if (cdpOk) {
+          const attached = await cdpAttach(tabId);
+          if (attached) {
+            if (!sessions.get(tabId)?.elementIndex) await refreshElementIndex(tabId);
+            try {
+              const result = await handleTypeChar(tabId, cmd.selector, cmd.text || cmd.char || '', cmd.delay || 80);
+              sendResult(cmd, true, result);
               break;
+            } catch (err) {
+              console.error('CDP typeChar failed:', err.message);
             }
-          } catch (err) { console.error('[PSH] CDP typeChar failed:', err.message); }
+          }
         }
-        // JS fallback
+        // DOM fallback
         try {
+          const tcLabel = resolveBackendNode(tabId, cmd.selector)?.name || '';
           await chrome.scripting.executeScript({
             target: { tabId }, world: 'MAIN',
-            func: (cx, cy, text, delay) => {
+            func: (label, text, delay) => {
               return new Promise((resolve) => {
-                let el = cx !== null ? document.elementFromPoint(cx, cy) : document.activeElement;
+                function findInput(root, depth) {
+                  if (depth > 8) return null;
+                  for (const el of root.querySelectorAll('input, textarea, [contenteditable]')) {
+                    const t = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim();
+                    if (!label || t.toLowerCase().includes(label.toLowerCase())) return el;
+                  }
+                  for (const el of root.querySelectorAll('*')) {
+                    if (el.shadowRoot) { const f = findInput(el.shadowRoot, depth + 1); if (f) return f; }
+                  }
+                  return null;
+                }
+                let el = findInput(document, 0) || document.activeElement;
                 if (!el || el === document.body) { resolve({ ok: false }); return; }
                 el.focus?.();
                 const t = el.shadowRoot?.querySelector('input,textarea') || el;
@@ -1381,7 +1302,7 @@ async function executeCommand(cmd, tabId) {
                 next();
               });
             },
-            args: [tcx2, tcy2, text, delay]
+            args: [tcLabel, cmd.text || cmd.char || '', cmd.delay || 80]
           });
           sendResult(cmd, true, {});
         } catch (err) { sendResult(cmd, false, null, err.message); }
@@ -1461,47 +1382,48 @@ async function executeCommand(cmd, tabId) {
 
       /* ── Hover ── */
       case 'hover': {
-        // HYBRID: content script coords → CDP mouseMoved
-        await ensureContentScript(tabId);
-        let hCoords = null;
-        try { hCoords = await sendToContent(tabId, { action: 'getClickCoords', selector: cmd.selector }); } catch {}
-
-        if (!hCoords || hCoords.x === null) {
-          sendResult(cmd, false, null, 'Element not found for hover: ' + cmd.selector);
-          break;
-        }
-
         const cdpOk = await canUseCDP(tabId);
         if (cdpOk) {
-          try {
-            const attached = await cdpAttach(tabId);
-            if (attached) {
-              await showCursorIndicator(tabId, hCoords.x, hCoords.y);
-              await cdpSend(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: hCoords.x, y: hCoords.y, button: 'none' });
-              resetCdpIdleTimer(tabId);
-              sendResult(cmd, true, { ok: true, x: hCoords.x, y: hCoords.y });
+          const attached = await cdpAttach(tabId);
+          if (attached) {
+            if (!sessions.get(tabId)?.elementIndex) await refreshElementIndex(tabId);
+            try {
+              const result = await handleHover(tabId, cmd.selector);
+              sendResult(cmd, true, result);
               break;
+            } catch (err) {
+              console.error('CDP hover failed:', err.message);
             }
-          } catch (err) { console.error('[PSH] CDP hover failed:', err.message); }
+          }
         }
-
-        // JS fallback
+        // DOM fallback — find by label, no getClickCoords dependency
         try {
+          const hLabel = resolveBackendNode(tabId, cmd.selector)?.name || '';
           const [{ result }] = await chrome.scripting.executeScript({
             target: { tabId }, world: 'MAIN',
-            func: (cx, cy) => {
-              const el = document.elementFromPoint(cx, cy);
+            func: (label) => {
+              function findByLabel(root, depth) {
+                if (depth > 8) return null;
+                for (const el of root.querySelectorAll('button, a, [role="button"], [aria-label]')) {
+                  const text = (el.getAttribute('aria-label') || el.textContent || '').trim();
+                  if (!label || text.toLowerCase().includes(label.toLowerCase())) return el;
+                }
+                for (const el of root.querySelectorAll('*')) {
+                  if (el.shadowRoot) { const f = findByLabel(el.shadowRoot, depth + 1); if (f) return f; }
+                }
+                return null;
+              }
+              const el = findByLabel(document, 0);
               if (!el) return { ok: false, error: 'Not found' };
+              el.scrollIntoView({ block: 'center', behavior: 'instant' });
               const r = el.getBoundingClientRect();
               const opts = { bubbles: true, cancelable: true, composed: true, clientX: r.left + r.width/2, clientY: r.top + r.height/2, view: window };
-              el.dispatchEvent(new PointerEvent('pointerover', opts));
-              el.dispatchEvent(new MouseEvent('mouseover', opts));
               el.dispatchEvent(new PointerEvent('pointerover', opts));
               el.dispatchEvent(new MouseEvent('mouseover', opts));
               el.dispatchEvent(new MouseEvent('mousemove', opts));
               return { ok: true };
             },
-            args: [cx, cy]
+            args: [hLabel]
           });
           sendResult(cmd, result?.ok !== false, result, result?.error);
         } catch (err) { sendResult(cmd, false, null, err.message); }
@@ -1518,29 +1440,27 @@ async function executeCommand(cmd, tabId) {
         break;
       }
 
-      /* ── Element Snapshot — ALWAYS use content script DOM scanner ── */
-      /* Content script finds ALL interactive elements (buttons, links, inputs,
-         tabindex divs, contenteditable, shadow DOM) via CSS selectors.
-         This is more reliable than CDP Accessibility Tree which misses
-         elements with role="generic" (e.g., LinkedIn conversation items). */
+      /* ── Element Snapshot (CDP AX tree) ── */
       case 'getPageInfo':
       case 'getElements': {
-        await ensureContentScript(tabId);
-        await settleDOM(tabId);
-        try {
-          let data = await sendToContent(tabId, { action: cmd.action });
-          // If too few elements (SPA not rendered yet), wait and retry up to 2 times
-          const countEls = (s) => (s?.match(/\[\d+\]/g) || []).length;
-          if (countEls(data?.snapshot) < 5) {
-            await new Promise(r => setTimeout(r, 2000));
-            await ensureContentScript(tabId);
-            data = await sendToContent(tabId, { action: cmd.action });
-            if (countEls(data?.snapshot) < 5) {
-              await new Promise(r => setTimeout(r, 3000));
+        const cdpOk = await canUseCDP(tabId);
+        if (cdpOk) {
+          const attached = await cdpAttach(tabId);
+          if (attached) {
+            try {
               await ensureContentScript(tabId);
-              data = await sendToContent(tabId, { action: cmd.action });
+              const data = await handleGetElements(tabId);
+              sendResult(cmd, true, data);
+              break;
+            } catch (err) {
+              console.error('CDP getElements failed, trying content script fallback:', err.message);
             }
           }
+        }
+        // Fallback to content script
+        try {
+          await ensureContentScript(tabId);
+          const data = await sendToContent(tabId, { action: cmd.action });
           sendResult(cmd, true, data);
         } catch (err) { sendResult(cmd, false, null, err.message); }
         break;
@@ -1661,7 +1581,6 @@ async function executeCommand(cmd, tabId) {
 
       case 'setStreamingTab': {
         streamingTabId = cmd.tabId || null;
-        if (streamingTabId) startFrameLoop(); else stopFrameLoop();
         sendResult(cmd, true, { streamingTabId });
         break;
       }

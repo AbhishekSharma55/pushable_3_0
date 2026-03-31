@@ -65,7 +65,19 @@
       "Bash(sudo docker:*)",
       "Read(//run/**)",
       "Bash(python3 -c \"from PIL import Image; print\\(''''ok''''\\)\")",
-      "Bash(pip3 install:*)"
+      "Bash(pip3 install:*)",
+      "Bash(wc -l /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-trial/*.js /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-trial/*.json)",
+      "Bash(node -e \"require\\(''''@anthropic-ai/sdk''''\\)\")",
+      "Bash(npx playwright:*)",
+      "Bash(docker-compose -f /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/docker-compose.yml restart backend)",
+      "Bash(cp /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-trial-v2/icon*.png /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-v3/)",
+      "Bash(cp /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-trial/icon*.png /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0/extension-v3/)",
+      "Bash(pip3 --version)",
+      "Bash(pip --version)",
+      "Bash(pip3 show:*)",
+      "Bash(python3 -c \"import websockets; print\\(''websockets OK''\\)\")",
+      "Bash(python3 -c \"import fastapi; print\\(''fastapi OK''\\)\")",
+      "Bash(python3 -c \"import uvicorn; print\\(''uvicorn OK''\\)\")"
     ]
   }
 }

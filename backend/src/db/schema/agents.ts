@@ -10,7 +10,7 @@ export const agents = pgTable("agents", {
     name: text("name").notNull(),
     emoji: text("emoji"),
     systemPrompt: text("system_prompt"),
-    model: text("model").default("openai/gpt-4o-mini").notNull(),
+    model: text("model").default("openai/gpt-5.4-mini").notNull(),
     temperature: real("temperature").default(0.7).notNull(),
     // System-level access
     systemLevelAccess: boolean("system_level_access").default(false).notNull(),

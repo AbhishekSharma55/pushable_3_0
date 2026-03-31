@@ -28,7 +28,7 @@ agents
   ├── workspaceId           UUID (FK → workspaces, cascade delete)
   ├── name                  TEXT (required)
   ├── systemPrompt          TEXT (optional)
-  ├── model                 TEXT (default: "openai/gpt-4o-mini")
+  ├── model                 TEXT (default: "openai/gpt-5.4-mini")
   ├── temperature            REAL (default: 0.7, range 0-2)
   ├── systemLevelAccess     BOOLEAN (default: false)
   ├── canManageKB           BOOLEAN (default: false)
@@ -116,7 +116,7 @@ x-workspace-id: <workspace-id>
 **Validation (Zod):**
 - `name` -- required, min 1 character
 - `systemPrompt` -- optional
-- `model` -- string, defaults to `openai/gpt-4o-mini`
+- `model` -- string, defaults to `openai/gpt-5.4-mini`
 - `temperature` -- number 0-2, defaults to 0.7
 - `browserType` -- `"cloud"` or `"extension"`, defaults to `"cloud"`
 

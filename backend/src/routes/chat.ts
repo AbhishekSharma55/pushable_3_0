@@ -573,7 +573,7 @@ async function executeRun(
 
             if (hasImages) {
                 const agent = await agentRepository.findById(agentId, workspaceId);
-                const modelId = agent?.model || "openai/gpt-4o-mini";
+                const modelId = agent?.model || "openai/gpt-5.4-mini";
                 supportsVision = await openrouterService.supportsVision(modelId);
             }
 

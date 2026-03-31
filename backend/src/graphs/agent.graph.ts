@@ -1633,7 +1633,10 @@ You have \`list_workflows\`, \`run_workflow\`, and \`save_as_workflow\` tools.
 
 ### Saving workflows:
 - After completing a multi-step process manually, offer to save it as a workflow using \`save_as_workflow\`.
-- This makes the process reusable and cheaper for next time.`);
+- This makes the process reusable and cheaper for next time.
+
+## Sub-Agent Tool Results
+When you call a sub-agent tool (tools starting with \`agent_\`), the sub-agent's response is **already displayed to the user** in its own UI bubble. Do NOT repeat the full content in your response. Instead, briefly reference the key findings (e.g. "Patient ID: P-1009") and proceed to the next step.`);
 
         // Memory & Notebook capability instructions (static how-to, not the actual memory content)
         if (userId) {
@@ -2265,28 +2268,91 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
         const results: ToolMessage[] = [];
         const traceSteps: TraceStep[] = [];
 
-        // --- Workflow isolation: when run_workflow is in a batch, execute ONLY it ---
-        // The LLM sometimes calls run_workflow alongside other tools (e.g. bucket_read_file)
+        // --- Workflow isolation ---
+        // The LLM often calls workflow tools alongside manual tools (e.g. bucket_read_file)
         // in the same turn. This means it doesn't wait for the workflow result before
-        // starting manual work. We skip the other tools so the agent processes the
-        // workflow result first and decides whether more work is needed.
+        // starting manual work. We enforce isolation in two cases:
+        //
+        // Case 1: run_workflow is in the batch → execute ONLY run_workflow, skip rest
+        // Case 2: list_workflows is in the batch → execute list_workflows first;
+        //         if it found matching workflows, skip other non-workflow tools
+        const WORKFLOW_TOOL_NAMES = new Set(["run_workflow", "list_workflows", "save_as_workflow"]);
         const runWorkflowCall = toolCalls.find(tc => tc.name === "run_workflow");
-        const hasOtherCalls = toolCalls.length > 1 && runWorkflowCall;
-        if (hasOtherCalls) {
+        const listWorkflowCall = toolCalls.find(tc => tc.name === "list_workflows");
+        const nonWorkflowCalls = toolCalls.filter(tc => !WORKFLOW_TOOL_NAMES.has(tc.name));
+        const hasNonWorkflowCalls = nonWorkflowCalls.length > 0;
+
+        // Case 1: run_workflow present → isolate it
+        let isolateForRunWorkflow = !!(runWorkflowCall && hasNonWorkflowCalls);
+
+        // Case 2: list_workflows present (without run_workflow) → execute it first,
+        // then decide whether to skip other tools based on result
+        let isolateForListWorkflow = false;
+        let listWorkflowResult: string | null = null;
+        if (!runWorkflowCall && listWorkflowCall && hasNonWorkflowCalls) {
+            // Execute list_workflows eagerly to check if matching workflows exist
+            const listTool = toolsByName.get("list_workflows");
+            if (listTool) {
+                try {
+                    const lr = await listTool.invoke(listWorkflowCall.args);
+                    listWorkflowResult = typeof lr === "string" ? lr : JSON.stringify(lr);
+                    // If the result contains "Available workflows:" it means workflows were found
+                    if (listWorkflowResult.includes("Available workflows:")) {
+                        isolateForListWorkflow = true;
+                        logger.info({
+                            skippedTools: nonWorkflowCalls.map(tc => tc.name),
+                        }, "Workflow isolation: matching workflows found, skipping non-workflow tools");
+                    }
+                } catch {
+                    // If list_workflows fails, proceed normally
+                }
+            }
+        }
+
+        if (isolateForRunWorkflow) {
             logger.info({
-                skippedTools: toolCalls.filter(tc => tc.name !== "run_workflow").map(tc => tc.name),
+                skippedTools: nonWorkflowCalls.map(tc => tc.name),
             }, "Workflow isolation: skipping other tool calls while run_workflow executes");
         }
 
         for (const tc of toolCalls) {
-            // When run_workflow is in the batch, skip all other tool calls
-            if (hasOtherCalls && tc.name !== "run_workflow") {
+            // Case 1: run_workflow in batch → skip non-workflow tools
+            if (isolateForRunWorkflow && !WORKFLOW_TOOL_NAMES.has(tc.name)) {
                 results.push(new ToolMessage({
                     content: "Skipped — a workflow is being executed for this task. Wait for the workflow result before calling other tools.",
                     tool_call_id: tc.id!,
                     name: tc.name,
                 }));
                 continue;
+            }
+
+            // Case 2: list_workflows found matching workflows → use pre-computed result
+            // for list_workflows, skip non-workflow tools
+            if (isolateForListWorkflow) {
+                if (tc.name === "list_workflows" && listWorkflowResult !== null) {
+                    results.push(new ToolMessage({
+                        content: listWorkflowResult,
+                        tool_call_id: tc.id!,
+                        name: tc.name,
+                    }));
+                    traceSteps.push({
+                        tool: tc.name,
+                        args: tc.args as Record<string, unknown>,
+                        output: listWorkflowResult.slice(0, 2000),
+                        durationMs: 0,
+                        succeeded: true,
+                        timestamp: new Date().toISOString(),
+                    });
+                    continue;
+                }
+                if (!WORKFLOW_TOOL_NAMES.has(tc.name)) {
+                    results.push(new ToolMessage({
+                        content: "Skipped — a matching workflow was found for this task. Use run_workflow to execute it instead of calling tools manually.",
+                        tool_call_id: tc.id!,
+                        name: tc.name,
+                    }));
+                    continue;
+                }
             }
             // Decision confirmation — interrupt for user approval
             if (tc.name === "ask_user_confirmation") {
@@ -2341,6 +2407,12 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
                     }, "Truncating oversized tool result");
                     resultContent = resultContent.slice(0, MAX_TOOL_RESULT_LENGTH) +
                         `\n\n... [truncated — original output was ${resultContent.length} characters]`;
+                }
+
+                // For sub-agent tools, add a note so the LLM doesn't repeat
+                // the result verbatim — it's already shown to the user in its own bubble
+                if (tc.name.startsWith("agent_")) {
+                    resultContent += "\n\n[This sub-agent response is already displayed to the user. Do NOT repeat it in your message. Just reference the key findings briefly and proceed to the next step.]";
                 }
 
                 logger.info({

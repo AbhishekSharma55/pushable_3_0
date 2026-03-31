@@ -95,10 +95,10 @@ minimum cost = 1 credit
 
 ### Model Multiplier
 
-Each LLM model has a `multiplier` value stored in the `llm_models` table. More expensive models (like Claude Opus) have higher multipliers than cheaper models (like openai/gpt-4o-mini).
+Each LLM model has a `multiplier` value stored in the `llm_models` table. More expensive models (like Claude Opus) have higher multipliers than cheaper models (like openai/gpt-5.4-mini).
 
 For example:
-- openai/gpt-4o-mini: multiplier 0.5 → chat costs 3 credits
+- openai/gpt-5.4-mini: multiplier 0.5 → chat costs 3 credits
 - Claude Sonnet: multiplier 1.0 → chat costs 5 credits
 - Claude Opus: multiplier 3.0 → chat costs 15 credits
 

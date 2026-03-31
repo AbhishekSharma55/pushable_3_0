@@ -129,7 +129,7 @@ export function buildExtensionBrowserAgentTool(
 
             try {
                 // Use model from admin panel system_settings, fallback to Gemini Flash
-                const resolvedModel = browserModelId || "google/openai/gpt-4o-mini";
+                const resolvedModel = browserModelId || "google/openai/gpt-5.4-mini";
                 logger.info({ modelId: resolvedModel }, "Extension browser agent creating LLM with model");
                 const { llm } = createLLM({ modelId: resolvedModel, temperature });
                 const llmWithTools = llm.bindTools(wrappedTools);

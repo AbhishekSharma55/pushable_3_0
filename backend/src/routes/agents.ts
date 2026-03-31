@@ -11,7 +11,7 @@ const createAgentSchema = z.object({
     name: z.string().min(1, "Name is required"),
     emoji: z.string().optional(),
     systemPrompt: z.string().optional(),
-    model: z.string().default("openai/gpt-4o-mini"),
+    model: z.string().default("openai/gpt-5.4-mini"),
     temperature: z.number().min(0).max(2).default(0.7),
     browserType: z.enum(["cloud", "extension"]).default("cloud"),
 });

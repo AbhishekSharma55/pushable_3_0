@@ -108,7 +108,7 @@ export async function compileTraceToRecipe(input: {
         : `Execution trace:\n${traceDescription}`;
 
     const { llm } = createLLM({
-        modelId: "openai/openai/gpt-4o-mini",
+        modelId: "openai/gpt-4o-mini",
         temperature: 0.2,
         streaming: false,
     });

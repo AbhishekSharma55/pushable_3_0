@@ -116,13 +116,22 @@ function parseAgentId(key: string): string {
 function mapDbMessages(dbMessages: Array<Record<string, unknown>>): ChatMessage[] {
     return dbMessages
         .filter((m) => (m.role as string) !== 'tool')
-        .map((m) => ({
-            id: m.id as string,
-            role: m.role as 'user' | 'assistant',
-            content: m.content as string,
-            status: 'done' as const,
-            metadata: m.metadata as ChatMessage['metadata'],
-        }));
+        .map((m) => {
+            const metadata = m.metadata as ChatMessage['metadata'];
+            // Ensure all tool calls from completed DB messages are marked as done
+            if (metadata?.toolCalls) {
+                metadata.toolCalls = metadata.toolCalls.map((tc) =>
+                    tc.status === 'running' ? { ...tc, status: 'done' } : tc
+                );
+            }
+            return {
+                id: m.id as string,
+                role: m.role as 'user' | 'assistant',
+                content: m.content as string,
+                status: 'done' as const,
+                metadata,
+            };
+        });
 }
 
 // ─── SSE Stream Reader (with fetch streaming) ───────────────────────────────
@@ -408,9 +417,19 @@ export function useChatWs(sessionKey: string) {
                 () => {
                     if (sseSucceeded) {
                         setMessages((prev) =>
-                            prev.map((m) =>
-                                m.id === thinkingId ? { ...m, status: 'done' as const } : m
-                            )
+                            prev.map((m) => {
+                                if (m.id !== thinkingId) return m;
+                                // Force any still-running tool calls to "done" —
+                                // prevents stuck spinners when a tool result event was missed
+                                const toolCalls = m.metadata?.toolCalls?.map((tc) =>
+                                    tc.status === 'running' ? { ...tc, status: 'done' as const } : tc
+                                );
+                                return {
+                                    ...m,
+                                    status: 'done' as const,
+                                    metadata: { ...m.metadata, toolCalls },
+                                };
+                            })
                         );
                         setIsLoading(false);
                         activeRunIdRef.current = null;

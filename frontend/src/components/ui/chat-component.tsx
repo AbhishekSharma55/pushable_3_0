@@ -752,7 +752,37 @@ function MessageBubble({
   const isUser = msg.role === "user";
   const toolCalls = msg.metadata?.toolCalls ?? [];
   const hasToolCalls = toolCalls.length > 0;
-  const hasContent = msg.content.trim().length > 0;
+
+  // Deduplicate: strip content that's already shown in agent response bubbles.
+  // When a sub-agent returns a result, the calling agent's LLM often echoes it
+  // verbatim in its own text response, causing the same data to appear twice.
+  const displayContent = (() => {
+    if (!hasToolCalls || isUser) return msg.content;
+    const agentResults = toolCalls
+      .filter((tc) => tc.type === 'agent' || tc.name?.startsWith('Delegat'))
+      .map((tc) => tc.result?.trim())
+      .filter((r): r is string => !!r && r.length > 50);
+    if (agentResults.length === 0) return msg.content;
+
+    let cleaned = msg.content.trim();
+    for (const result of agentResults) {
+      // Check if content starts with or contains the agent result
+      const prefix = result.slice(0, 150);
+      if (cleaned.startsWith(prefix)) {
+        // Find the overlap length and strip it
+        let overlapEnd = 0;
+        const maxCheck = Math.min(result.length, cleaned.length);
+        for (let i = 0; i < maxCheck; i++) {
+          if (cleaned[i] !== result[i]) break;
+          overlapEnd = i + 1;
+        }
+        cleaned = cleaned.slice(overlapEnd).trim();
+      }
+    }
+    return cleaned;
+  })();
+
+  const hasContent = displayContent.trim().length > 0;
 
   return (
     <div className={cn("flex gap-3", isUser ? "justify-end" : "justify-start")}>
@@ -802,11 +832,13 @@ function MessageBubble({
           {/* Tool calls accordion */}
           {hasToolCalls && (
             <ToolCallDisplay
-              toolCalls={toolCalls.map((tc) => ({
-                ...tc,
-                type: (tc.type as 'tool' | 'agent') || 'tool',
-                status: tc.status === 'thinking' ? 'running' : (tc.status as 'running' | 'done' | 'pending_approval' | 'approved' | 'rejected') || 'done',
-              }))}
+              toolCalls={toolCalls.map((tc) => {
+                const isComplete = msg.status !== 'thinking';
+                let status = tc.status === 'thinking' ? 'running' : (tc.status as 'running' | 'done' | 'pending_approval' | 'approved' | 'rejected') || 'done';
+                // Force stuck tool calls to "done" when message is complete
+                if (isComplete && status === 'running') status = 'done';
+                return { ...tc, type: (tc.type as 'tool' | 'agent') || 'tool', status };
+              })}
               messageId={msg.id}
               isMessageComplete={msg.status !== 'thinking'}
             />
@@ -895,7 +927,7 @@ function MessageBubble({
                   ),
                 }}
               >
-                {msg.content}
+                {displayContent}
               </ReactMarkdown>
               {msg.status === "thinking" && <ThinkingLoader />}
             </div>

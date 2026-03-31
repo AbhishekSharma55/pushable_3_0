@@ -74,6 +74,7 @@ export function buildWorkflowTools(config: WorkflowToolsConfig): DynamicStructur
                     inputData: inputData as Record<string, unknown>,
                 });
 
+                const runStartMs = Date.now();
                 try {
                     const result = await executeWorkflow({
                         workflowId,
@@ -106,7 +107,7 @@ export function buildWorkflowTools(config: WorkflowToolsConfig): DynamicStructur
                     return `Workflow "${workflow.name}" completed in ${result.durationMs}ms (${result.creditsUsed} credits).\n\nResult:\n${result.resultText}`;
                 } catch (error) {
                     const errMsg = error instanceof Error ? error.message : "Unknown error";
-                    await workflowRunRepository.updateFailed(run.id, errMsg, Date.now());
+                    await workflowRunRepository.updateFailed(run.id, errMsg, Date.now() - runStartMs);
                     return `Workflow "${workflow.name}" failed: ${errMsg}`;
                 }
             },

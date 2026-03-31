@@ -948,9 +948,10 @@ export async function createAgentGraph(
                     func: async (params) => {
                         let resolvedUrl = webhookUrl;
                         for (const v of urlVars) {
+                            const paramVal = params[v] != null ? String(params[v]) : "";
                             resolvedUrl = resolvedUrl.replace(
                                 new RegExp(`\\{\\{${v}\\}\\}`, "g"),
-                                encodeURIComponent(params[v] as string)
+                                encodeURIComponent(paramVal)
                             );
                         }
                         const controller = new AbortController();
@@ -2403,11 +2404,10 @@ export async function getToolsForAgent(
     agentId: string,
     workspaceId: string,
 ): Promise<Map<string, DynamicStructuredTool>> {
-    // Check cache first
-    for (const [, entry] of graphCache) {
-        if (Date.now() - entry.timestamp < GRAPH_CACHE_TTL_MS && entry.toolsByName.size > 0) {
-            // Found a valid cached entry - check if it's for this agent
-            // Cache keys are formatted as agentId:workspaceId:...
+    // Check cache first — must match the correct agent
+    const prefix = `${agentId}:${workspaceId}:`;
+    for (const [key, entry] of graphCache) {
+        if (key.startsWith(prefix) && Date.now() - entry.timestamp < GRAPH_CACHE_TTL_MS && entry.toolsByName.size > 0) {
             return entry.toolsByName;
         }
     }

@@ -755,7 +755,7 @@ function MessageBubble({
 
   // Deduplicate: strip content that's already shown in agent response bubbles.
   // When a sub-agent returns a result, the calling agent's LLM often echoes it
-  // verbatim in its own text response, causing the same data to appear twice.
+  // (possibly reformatted) in its own text response, causing the same data to appear twice.
   const displayContent = (() => {
     if (!hasToolCalls || isUser) return msg.content;
     const agentResults = toolCalls
@@ -764,22 +764,28 @@ function MessageBubble({
       .filter((r): r is string => !!r && r.length > 50);
     if (agentResults.length === 0) return msg.content;
 
-    let cleaned = msg.content.trim();
+    // Normalize whitespace for comparison (LLM may reformat line breaks/spacing)
+    const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
+    const normalizedContent = norm(msg.content);
+
     for (const result of agentResults) {
-      // Check if content starts with or contains the agent result
-      const prefix = result.slice(0, 150);
-      if (cleaned.startsWith(prefix)) {
-        // Find the overlap length and strip it
-        let overlapEnd = 0;
-        const maxCheck = Math.min(result.length, cleaned.length);
+      const normalizedResult = norm(result);
+      const prefix = normalizedResult.slice(0, 150);
+      if (prefix.length > 50 && normalizedContent.startsWith(prefix)) {
+        // Measure how much of the content overlaps with the agent result
+        let matchLen = 0;
+        const maxCheck = Math.min(normalizedResult.length, normalizedContent.length);
         for (let i = 0; i < maxCheck; i++) {
-          if (cleaned[i] !== result[i]) break;
-          overlapEnd = i + 1;
+          if (normalizedContent[i] !== normalizedResult[i]) break;
+          matchLen++;
         }
-        cleaned = cleaned.slice(overlapEnd).trim();
+        // If the overlap covers most of the content, suppress entirely
+        if (matchLen >= normalizedContent.length * 0.7) {
+          return '';
+        }
       }
     }
-    return cleaned;
+    return msg.content;
   })();
 
   const hasContent = displayContent.trim().length > 0;

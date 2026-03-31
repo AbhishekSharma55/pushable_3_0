@@ -136,6 +136,23 @@ export async function compileTraceToRecipe(input: {
         // Ensure version is set
         parsed.recipe.version = 1;
 
+        // Validate each step has required fields
+        for (const step of parsed.recipe.steps) {
+            if (!step.id || !step.type) {
+                throw new Error(`Step is missing required fields (id, type): ${JSON.stringify(step)}`);
+            }
+            if (step.type === "tool" && !step.tool) {
+                throw new Error(`Tool step "${step.id}" is missing the "tool" field`);
+            }
+            if (step.type === "nano_llm" && !step.prompt) {
+                throw new Error(`Nano LLM step "${step.id}" is missing the "prompt" field`);
+            }
+            // Ensure args defaults to empty object for tool steps
+            if (step.type === "tool" && !step.args) {
+                step.args = {};
+            }
+        }
+
         return parsed;
     } catch (error) {
         logger.error({ error, content: content.slice(0, 500) }, "Failed to parse compiled recipe");

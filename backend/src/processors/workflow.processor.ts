@@ -42,6 +42,7 @@ function resolvePlaceholders(value: unknown, context: ExecutionContext): unknown
 }
 
 function resolveStringPlaceholders(template: string, context: ExecutionContext): string {
+    if (!template) return "";
     return template.replace(/\{\{([^}]+)\}\}/g, (_match, path: string) => {
         const trimmed = path.trim();
 

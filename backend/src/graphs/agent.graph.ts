@@ -1622,7 +1622,9 @@ Rules:
 You have \`list_workflows\`, \`run_workflow\`, and \`save_as_workflow\` tools.
 
 ### Running workflows:
-- When you find a matching workflow via \`list_workflows\`, run it with \`run_workflow\` and pass the appropriate input parameters.
+- When you find a matching workflow via \`list_workflows\`, check the required inputs listed for that workflow.
+- **Call run_workflow ALONE** — do NOT call other tools (bucket_read_file, etc.) in the same turn. Wait for the workflow result first.
+- **Pass ALL required input parameters** in the \`inputData\` field. Extract the values from the user's message. Never call run_workflow with empty inputData if the workflow requires inputs.
 - **After a workflow completes successfully, the task IS DONE.** The workflow has already executed all the tool calls (file reads, writes, API calls, etc.) on your behalf.
 - **Do NOT redo the work manually.** Read the step-by-step output returned by \`run_workflow\` — it shows exactly what each step did and its output.
 - Use the workflow's step outputs to compose your final answer to the user. Summarize what was accomplished based on the step results.
@@ -2262,7 +2264,29 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
         const results: ToolMessage[] = [];
         const traceSteps: TraceStep[] = [];
 
+        // --- Workflow isolation: when run_workflow is in a batch, execute ONLY it ---
+        // The LLM sometimes calls run_workflow alongside other tools (e.g. bucket_read_file)
+        // in the same turn. This means it doesn't wait for the workflow result before
+        // starting manual work. We skip the other tools so the agent processes the
+        // workflow result first and decides whether more work is needed.
+        const runWorkflowCall = toolCalls.find(tc => tc.name === "run_workflow");
+        const hasOtherCalls = toolCalls.length > 1 && runWorkflowCall;
+        if (hasOtherCalls) {
+            logger.info({
+                skippedTools: toolCalls.filter(tc => tc.name !== "run_workflow").map(tc => tc.name),
+            }, "Workflow isolation: skipping other tool calls while run_workflow executes");
+        }
+
         for (const tc of toolCalls) {
+            // When run_workflow is in the batch, skip all other tool calls
+            if (hasOtherCalls && tc.name !== "run_workflow") {
+                results.push(new ToolMessage({
+                    content: "Skipped — a workflow is being executed for this task. Wait for the workflow result before calling other tools.",
+                    tool_call_id: tc.id!,
+                    name: tc.name,
+                }));
+                continue;
+            }
             // Decision confirmation — interrupt for user approval
             if (tc.name === "ask_user_confirmation") {
                 const response = interrupt({

@@ -33,9 +33,13 @@ export function buildWorkflowTools(config: WorkflowToolsConfig): DynamicStructur
                 const list = workflows.map(w => {
                     const recipe = w.recipe as WorkflowRecipe;
                     const stepCount = recipe?.steps?.length ?? 0;
-                    return `- ${w.name} (ID: ${w.id}) — ${w.description || "No description"} — ${stepCount} steps — ${w.enabled ? "enabled" : "disabled"} — run ${w.runCount} times`;
+                    const inputSchema = w.inputSchema as Record<string, unknown> | null;
+                    const inputParams = inputSchema && Object.keys(inputSchema).length > 0
+                        ? `\n  Required inputs: ${JSON.stringify(inputSchema)}`
+                        : "\n  Required inputs: none";
+                    return `- ${w.name} (ID: ${w.id}) — ${w.description || "No description"} — ${stepCount} steps — ${w.enabled ? "enabled" : "disabled"} — run ${w.runCount} times${inputParams}`;
                 }).join("\n");
-                return `Available workflows:\n${list}`;
+                return `Available workflows:\n${list}\n\nIMPORTANT: When calling run_workflow, pass ALL required input parameters in the inputData field. Do NOT call run_workflow with empty inputData if the workflow requires inputs.`;
             },
         })
     );

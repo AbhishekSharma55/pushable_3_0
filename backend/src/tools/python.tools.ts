@@ -8,11 +8,12 @@ import { logger } from "../lib/logger.ts";
 interface PythonToolsConfig {
     workspaceId?: string;
     userId?: string;
+    agentId?: string;
     hasBucketAccess?: boolean;
 }
 
 export function buildPythonTools(config?: PythonToolsConfig): DynamicStructuredTool[] {
-    const { workspaceId, userId, hasBucketAccess } = config || {};
+    const { workspaceId, userId, agentId, hasBucketAccess } = config || {};
 
     const bucketDescription = hasBucketAccess && workspaceId
         ? "\n\n**Bucket access available:** `from _pushable_bucket import bucket`\n" +
@@ -69,7 +70,7 @@ export function buildPythonTools(config?: PythonToolsConfig): DynamicStructuredT
                     "Python code to execute. Use print() for output. " +
                     "Available: numpy, pandas, scipy, sympy, matplotlib, seaborn, fpdf2, openpyxl, " +
                     "python-docx, Pillow, requests, beautifulsoup4, tabulate, and more." +
-                    (hasBucketAccess ? " Bucket: from _pushable_bucket import bucket" : "")
+                    (hasBucketAccess && workspaceId ? " Bucket: from _pushable_bucket import bucket" : "")
                 ),
             timeout_seconds: z
                 .number()
@@ -87,12 +88,13 @@ export function buildPythonTools(config?: PythonToolsConfig): DynamicStructuredT
                 const helperFiles: { filename: string; content: string }[] = [];
                 const extraEnv: Record<string, string> = {};
 
-                if (hasBucketAccess && workspaceId && userId) {
+                const effectiveUserId = userId || agentId;
+                if (hasBucketAccess && workspaceId && effectiveUserId) {
                     try {
                         const apiPort = process.env.PORT || "4000";
                         const apiUrl = `http://localhost:${apiPort}`;
                         const token = signInternalToken(
-                            { userId, workspaceId },
+                            { userId: effectiveUserId, workspaceId },
                             60_000 // 60s — generous for sandbox timeout
                         );
 

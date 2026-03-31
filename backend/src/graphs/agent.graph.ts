@@ -1369,6 +1369,7 @@ export async function createAgentGraph(
     langchainTools.push(...buildPythonTools({
         workspaceId,
         userId,
+        agentId,
         hasBucketAccess: true,
     }));
 

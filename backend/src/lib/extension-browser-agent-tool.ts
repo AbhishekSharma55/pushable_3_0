@@ -25,9 +25,10 @@ const ExtBrowserAgentState = Annotation.Root({
 });
 
 /** Max supersteps for the extension browser agent graph.
- *  18 = 9 agent+tool cycles. Allows up to ~8 tool calls before forced stop.
+ *  24 = 12 agent+tool cycles. Allows up to ~12 tool calls.
+ *  Complex tasks like edit comment need: navigate → scroll → overflow menu → edit → clear → type → save = ~10 calls.
  *  The real protection is MAX_INVOCATIONS (3 calls per conversation turn). */
-const EXT_BROWSER_AGENT_RECURSION_LIMIT = 18;
+const EXT_BROWSER_AGENT_RECURSION_LIMIT = 24;
 
 /**
  * Build a single "extension_browser_agent" tool that wraps an internal,

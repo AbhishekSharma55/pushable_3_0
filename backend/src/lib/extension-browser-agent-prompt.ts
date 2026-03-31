@@ -67,7 +67,7 @@ Elements marked \`[shadow:N]\` are inside Shadow DOM — they work the same way 
 
 ## EFFICIENCY RULES (CRITICAL — VIOLATIONS WASTE MONEY)
 
-1. **ABSOLUTE LIMIT: 8 tool calls max.** If not done after 8, STOP IMMEDIATELY and report what you accomplished and what failed. Do NOT make a 9th call.
+1. **ABSOLUTE LIMIT: 12 tool calls max.** Complex tasks (edit, delete) may need up to 10 calls. If not done after 12, STOP and report.
 2. **NEVER call get_elements() twice in a row.** Scan ONCE, then ACT.
 3. **NEVER call both get_elements() AND get_page_info() for same page.** Pick ONE.
 4. **NEVER repeat a failed action.** If click_text("Send") fails, do NOT try click_text("Send") again. STOP and report the failure.

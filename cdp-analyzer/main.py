@@ -212,6 +212,11 @@ def process_snapshot(snapshot: dict, ax_tree: dict) -> list[Element]:
             if display == "none" or visibility == "hidden" or opacity == "0":
                 continue
 
+            # Skip ad/promoted content entirely
+            _all_attrs = " ".join(f"{k}={v}" for k, v in attrs.items()).lower()
+            if any(ad in _all_attrs for ad in ("promoted", "sponsor", "adunit", "ad-slot", "ad_", "data-ad", "data-promoted")):
+                continue
+
             # AX info
             ax = ax_lookup.get(bid, {})
             if ax.get("ignored"):
@@ -285,67 +290,81 @@ def process_snapshot(snapshot: dict, ax_tree: dict) -> list[Element]:
 
 
 def extract_all_text_positions(snapshot: dict, ax_tree: dict) -> list[dict]:
-    """Extract ALL visible text elements with their positions (not just interactive).
-    Used for finding content like comments, usernames, etc."""
-    strings = snapshot.get("strings", [])
-    def s(idx):
-        if idx is None or not isinstance(idx, int) or idx < 0 or idx >= len(strings):
-            return ""
-        return strings[idx]
+    """Extract ALL visible text from the AX tree with positions from DOMSnapshot.
 
-    # Build AX name lookup for text
-    ax_names: dict[int, str] = {}
-    for node in ax_tree.get("nodes", []):
-        bid = node.get("backendDOMNodeId")
-        name = (node.get("name", {}).get("value", "") or "").strip()
-        if bid and name:
-            ax_names[bid] = name
-
-    text_items = []
+    The AX tree contains text for ALL elements including inside shadow DOM.
+    DOMSnapshot provides coordinates. We merge them.
+    """
+    # Build coordinate lookup from DOMSnapshot: backendNodeId → bounds
+    bounds_lookup: dict[int, list] = {}
     for doc_idx, snap_doc in enumerate(snapshot.get("documents", [])):
         nodes = snap_doc.get("nodes", {})
-        node_names = nodes.get("nodeName", [])
-        node_types = nodes.get("nodeType", [])
         backend_ids = nodes.get("backendNodeId", [])
-        node_values = nodes.get("nodeValue", [])
         layout = snap_doc.get("layout", {})
         layout_node_indices = layout.get("nodeIndex", [])
         layout_bounds = layout.get("bounds", [])
-        layout_styles = layout.get("styles", [])
 
-        layout_lookup: dict[int, list] = {}
         for i, ni in enumerate(layout_node_indices):
-            layout_lookup[ni] = layout_bounds[i] if i < len(layout_bounds) else [0,0,0,0]
+            if ni < len(backend_ids):
+                bid = backend_ids[ni]
+                if bid and i < len(layout_bounds):
+                    b = layout_bounds[i]
+                    if b[2] > 0 and b[3] > 0:  # width > 0, height > 0
+                        bounds_lookup[bid] = b
 
-        for node_idx in range(len(node_names)):
-            # Include both element nodes and text nodes
-            ntype = node_types[node_idx] if node_idx < len(node_types) else 0
-            bid = backend_ids[node_idx] if node_idx < len(backend_ids) else 0
-            bounds = layout_lookup.get(node_idx)
-            if not bounds:
-                continue
-            x, y, w, h = bounds[0], bounds[1], bounds[2], bounds[3]
-            if w <= 0 or h <= 0:
+    # Extract text from AX tree (captures shadow DOM text that DOMSnapshot text nodes miss)
+    text_items = []
+    for node in ax_tree.get("nodes", []):
+        bid = node.get("backendDOMNodeId")
+        if not bid:
+            continue
+        if node.get("ignored"):
+            continue
+
+        # Get name (visible text)
+        name = (node.get("name", {}).get("value", "") or "").strip()
+        if not name or len(name) < 3 or len(name) > 500:
+            continue
+
+        # Skip ad/promoted content text
+        name_lower = name.lower()
+        if any(ad in name_lower for ad in ("promoted", "sponsored", "advertisement", "about this ad", "tired of ads")):
+            continue
+
+        # Get role
+        role = node.get("role", {}).get("value", "")
+        # Include text from: staticText, paragraph, heading, listitem, and any named element
+        # Skip generic roles that just repeat parent text
+        if role in ("generic", "none", "presentation", "group", "list", "navigation", "banner",
+                     "complementary", "contentinfo", "main", "region", "form"):
+            # Only include if the text is short (specific content, not a large container)
+            if len(name) > 100:
                 continue
 
-            # Get text from AX tree or node value
-            text = ax_names.get(bid, "")
-            if not text and ntype == 3:  # TEXT_NODE
-                val_idx = node_values[node_idx] if node_idx < len(node_values) else -1
-                text = s(val_idx).strip()
-            if not text:
-                continue
-            if len(text) < 3 or len(text) > 500:
-                continue
+        # Get bounds
+        bounds = bounds_lookup.get(bid)
+        if not bounds:
+            continue
+        x, y, w, h = bounds[0], bounds[1], bounds[2], bounds[3]
 
-            text_items.append({
-                "text": text[:200],
-                "x": round(x, 1), "y": round(y, 1),
-                "w": round(w, 1), "h": round(h, 1),
-                "backend_node_id": bid,
-            })
+        text_items.append({
+            "text": name[:200],
+            "x": round(x, 1), "y": round(y, 1),
+            "w": round(w, 1), "h": round(h, 1),
+            "backend_node_id": bid,
+            "role": role,
+        })
 
-    return text_items
+    # Deduplicate by text (keep first occurrence)
+    seen = set()
+    unique = []
+    for item in text_items:
+        key = item["text"][:50]
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+
+    return unique
 
 
 def elements_to_snapshot(elements: list[Element], url: str = "", title: str = "") -> str:
@@ -369,68 +388,82 @@ def elements_to_snapshot(elements: list[Element], url: str = "", title: str = ""
     return "\n".join(lines)
 
 
-def find_overflow_near_text(elements: list[Element], near_text: str, text_positions: list[dict] = None) -> Element | None:
-    """Find the overflow button closest to the specified text.
+def find_overflow_near_text(
+    elements: list[Element], near_text: str,
+    text_positions: list[dict] = None, ax_tree: dict = None
+) -> Element | None:
+    """Find the overflow button belonging to the comment containing near_text.
 
-    Key insight: on Reddit/social media, the comment's three-dot button is
-    BELOW the comment text (in the action bar with Reply/Share).
-    Ad three-dot buttons are ABOVE. So we STRONGLY prefer buttons below the text.
+    Key insight: on social media, the comment layout is always:
+        comment text → action bar (Reply, Share, Award, ⋯)
+
+    So the comment's three-dot button is the FIRST overflow button
+    that appears AFTER the comment text (in Y position).
+
+    The post's three-dot button and ad buttons are always ABOVE the comment text.
     """
     overflow_btns = [el for el in elements if el.is_overflow_menu]
     if not overflow_btns:
         return None
-
     if not near_text:
         return overflow_btns[-1]
 
-    # Search in interactive elements first
-    text_els = [el for el in elements if near_text.lower() in el.name.lower()]
+    # Find the Y position of the comment text
+    text_y = 0
+    text_bottom = 0
 
-    # If not found, search ALL text positions
-    if not text_els and text_positions:
-        matching_texts = [t for t in text_positions if near_text.lower() in t["text"].lower()]
-        if matching_texts:
-            t = matching_texts[0]
-            text_els = [Element(id=0, role="text", name=t["text"], x=t["x"], y=t["y"], w=t["w"], h=t["h"])]
+    # Search in text_positions first (includes non-interactive text like comment content)
+    if text_positions:
+        for t in text_positions:
+            if near_text.lower() in t["text"].lower():
+                text_y = t["y"]
+                text_bottom = t["y"] + t["h"]
+                break
 
-    if not text_els:
+    # Fallback: search interactive elements
+    if text_y == 0:
+        for el in elements:
+            if near_text.lower() in el.name.lower():
+                text_y = el.y
+                text_bottom = el.y + el.h
+                break
+
+    if text_y == 0:
+        # Can't find text at all — return last overflow button
         return overflow_btns[-1]
 
-    text_el = text_els[0]
-
-    # Filter out buttons that are clearly from ads/promoted content
-    non_ad_btns = []
+    # Find the FIRST overflow button that is BELOW the comment text.
+    # "Below" means: button.y > text.y (button starts after text starts)
+    # Within 200px — the action bar is immediately after the comment.
+    # This SKIPS the post's overflow button (which is ABOVE the comment).
+    below_btns = []
     for btn in overflow_btns:
-        # Skip buttons whose aria-label or nearby context suggests ad/promoted
-        label = (btn.attributes.get("aria-label", "") + " " + btn.name).lower()
-        if "ad" in label.split() or "promoted" in label or "sponsor" in label:
-            continue
-        non_ad_btns.append(btn)
+        dy = btn.y - text_y
+        # Button must be BELOW text start (dy > 0) and within reasonable range
+        if dy > 0 and dy < 200:
+            below_btns.append((dy, btn))
 
-    candidates = non_ad_btns if non_ad_btns else overflow_btns
+    if below_btns:
+        # Sort by distance — closest one below is the comment's own button
+        below_btns.sort(key=lambda x: x[0])
+        return below_btns[0][1]
 
-    best = None
-    best_score = float("inf")
-    for btn in candidates:
-        dy = btn.y - text_el.y  # positive = button is BELOW text
-        dx = abs(btn.x - text_el.x)
+    # Wider search: 0 to 400px below
+    wider_btns = [(btn.y - text_y, btn) for btn in overflow_btns if 0 < (btn.y - text_y) < 400]
+    if wider_btns:
+        wider_btns.sort(key=lambda x: x[0])
+        return wider_btns[0][1]
 
-        # Score: lower is better
-        if dy >= 0 and dy < 300:
-            # Button is BELOW text and within 300px — BEST (comment action bar)
-            score = dy + dx * 0.5
-        elif dy >= 0:
-            # Button is far below — less likely to be related
-            score = dy * 2 + dx
+    # Last resort: any button closest to text (but still prefer below)
+    scored = []
+    for btn in overflow_btns:
+        dy = btn.y - text_y
+        if dy >= 0:
+            scored.append((dy, btn))  # below = good
         else:
-            # Button is ABOVE text — PENALIZE heavily (likely ad or post button)
-            score = abs(dy) * 5 + dx * 2 + 1000
-
-        if score < best_score:
-            best_score = score
-            best = btn
-
-    return best
+            scored.append((abs(dy) * 10, btn))  # above = penalized 10x
+    scored.sort(key=lambda x: x[0])
+    return scored[0][1] if scored else overflow_btns[-1]
 
 
 # ── API Endpoints ──
@@ -446,9 +479,11 @@ async def process(req: ProcessRequest):
     elements = process_snapshot(req.snapshot, req.ax_tree)
     text_positions = extract_all_text_positions(req.snapshot, req.ax_tree)
 
-    # Build page text summary from visible text (first 2000 chars)
-    all_text = " ".join(t["text"] for t in text_positions[:100])
-    page_text = all_text[:2000] if all_text else ""
+    # Build page text from AX tree — includes shadow DOM content
+    # Filter for content-bearing roles (paragraphs, headings, text)
+    content_roles = {"staticText", "paragraph", "heading", "listItem", "text", ""}
+    content_texts = [t["text"] for t in text_positions if t.get("role", "") in content_roles or len(t["text"]) > 20]
+    page_text = " ".join(content_texts)[:2000]
 
     snapshot_text = elements_to_snapshot(elements, req.url, req.title)
     if page_text:
@@ -471,7 +506,7 @@ async def find_overflow(req: ProcessRequest, near_text: str = "", menu_action: s
     """Process snapshot and find overflow menu button + menu item."""
     elements = process_snapshot(req.snapshot, req.ax_tree)
     text_positions = extract_all_text_positions(req.snapshot, req.ax_tree)
-    btn = find_overflow_near_text(elements, near_text, text_positions)
+    btn = find_overflow_near_text(elements, near_text, text_positions, req.ax_tree)
     if not btn:
         return {"ok": False, "error": "No overflow button found", "elements_count": len(elements)}
 

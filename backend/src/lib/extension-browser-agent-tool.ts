@@ -25,10 +25,9 @@ const ExtBrowserAgentState = Annotation.Root({
 });
 
 /** Max supersteps for the extension browser agent graph.
- *  24 = 12 agent+tool cycles. Allows up to ~12 tool calls.
- *  Complex tasks like edit comment need: navigate → scroll → overflow menu → edit → clear → type → save = ~10 calls.
- *  The real protection is MAX_INVOCATIONS (3 calls per conversation turn). */
-const EXT_BROWSER_AGENT_RECURSION_LIMIT = 24;
+ *  32 = 16 agent+tool cycles. Allows up to ~15 tool calls.
+ *  Multi-step tasks like (like + comment + delete) need ~12-15 calls. */
+const EXT_BROWSER_AGENT_RECURSION_LIMIT = 32;
 
 /**
  * Build a single "extension_browser_agent" tool that wraps an internal,
@@ -95,11 +94,13 @@ export function buildExtensionBrowserAgentTool(
     }
 
     // ---------------------------------------------------------------
-    // Invocation counter — hard cap at 3 calls per tool instance (per conversation turn)
-    // Prevents the parent agent from retrying the browser sub-agent endlessly
+    // Rate limiter — max 3 calls within a 60-second window
+    // Resets after 60s of no calls, so new user messages get fresh budget
     // ---------------------------------------------------------------
     let invocationCount = 0;
+    let windowStart = 0;
     const MAX_INVOCATIONS = 3;
+    const WINDOW_MS = 180_000; // 3 minutes — prevents rapid retries within same conversation turn
 
     // ---------------------------------------------------------------
     // Return the single tool the calling agent sees
@@ -114,8 +115,7 @@ export function buildExtensionBrowserAgentTool(
             "extract data, and return a clean summary. " +
             "Include the target URL and expected outcome in your instruction. " +
             "The result is a human-readable summary — relay it to the user as-is, " +
-            "never include raw HTML, DOM elements, or CSS selectors. " +
-            "IMPORTANT: Do NOT call this tool more than 2 times for the same task. If it fails twice, tell the user.",
+            "never include raw HTML, DOM elements, or CSS selectors.",
         schema: z.object({
             instruction: z
                 .string()
@@ -125,15 +125,20 @@ export function buildExtensionBrowserAgentTool(
                 ),
         }),
         func: async ({ instruction }) => {
-            // Hard cap: refuse after MAX_INVOCATIONS calls
+            // Rate limiter: reset counter if window expired
+            const now = Date.now();
+            if (now - windowStart > WINDOW_MS) {
+                invocationCount = 0;
+                windowStart = now;
+            }
             invocationCount++;
             if (invocationCount > MAX_INVOCATIONS) {
                 logger.warn(
                     { agentId, invocationCount },
-                    "Extension browser agent invocation BLOCKED — exceeded max invocations"
+                    "Extension browser agent invocation BLOCKED — exceeded max invocations in window"
                 );
-                return `STOPPED: The browser agent has already been called ${MAX_INVOCATIONS} times for this conversation turn. ` +
-                    `Do NOT call it again. Report the current status to the user and ask for guidance.`;
+                return `STOPPED: The browser agent has been called ${MAX_INVOCATIONS} times in the last 60 seconds. ` +
+                    `Do NOT call it again right now. Report the current status to the user.`;
             }
             const invocationId = `ext-browser-agent-${agentId}-${Date.now()}`;
 

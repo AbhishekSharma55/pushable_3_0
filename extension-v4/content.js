@@ -12,8 +12,44 @@
 
       case 'scroll': {
         const { x = 0, y = 0 } = msg;
-        window.scrollBy({ left: x, top: y, behavior: 'smooth' });
-        sendResponse({ ok: true });
+        // Smart scroll: if a modal/dialog/overlay is open, scroll THAT instead of the window
+        // Facebook, Reddit, etc. render posts in modal overlays that have their own scroll
+        const modalSelectors = '[role="dialog"], [role="alertdialog"], [aria-modal="true"], .modal, [class*="overlay"], [class*="dialog"], [class*="modal"]';
+        let scrollTarget = null;
+        // Check for modals, including inside shadow DOM
+        function findScrollable(root, depth) {
+          if (depth > 8 || scrollTarget) return;
+          try {
+            for (const el of root.querySelectorAll(modalSelectors)) {
+              const style = getComputedStyle(el);
+              if (style.overflow === 'auto' || style.overflow === 'scroll' ||
+                  style.overflowY === 'auto' || style.overflowY === 'scroll') {
+                if (el.scrollHeight > el.clientHeight) { scrollTarget = el; return; }
+              }
+            }
+            // Also check any element with scrollable overflow
+            for (const el of root.querySelectorAll('*')) {
+              if (scrollTarget) return;
+              const style = getComputedStyle(el);
+              if ((style.overflow === 'auto' || style.overflow === 'scroll' ||
+                   style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+                  el.scrollHeight > el.clientHeight + 100 && el !== document.documentElement && el !== document.body) {
+                // This is a scrollable container (not the main page)
+                const r = el.getBoundingClientRect();
+                if (r.width > 200 && r.height > 200) { scrollTarget = el; return; }
+              }
+              if (el.shadowRoot) findScrollable(el.shadowRoot, depth + 1);
+            }
+          } catch {}
+        }
+        findScrollable(document, 0);
+
+        if (scrollTarget) {
+          scrollTarget.scrollBy({ left: x, top: y, behavior: 'smooth' });
+        } else {
+          window.scrollBy({ left: x, top: y, behavior: 'smooth' });
+        }
+        sendResponse({ ok: true, scrolledModal: !!scrollTarget });
         return false;
       }
 

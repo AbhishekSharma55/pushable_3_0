@@ -365,7 +365,49 @@ async function executeCommand(cmd, tabId) {
       case 'navigate': {
         let url = cmd.url;
         if (url && !url.startsWith('http') && !url.startsWith('file:')) url = 'https://' + url;
-        if (tabId) { try { const t = await chrome.tabs.get(tabId); if (isProtectedTab(t)) { const nt = await chrome.tabs.create({ url, active: true }); await waitForPageLoad(nt.id); lastAgentTabId = nt.id; const t2 = await chrome.tabs.get(nt.id); sendResult(cmd, true, { url: t2.url, title: t2.title, newTabId: nt.id }); break; } } catch {} }
+
+        // Check if already on this URL or same page — skip reload
+        if (tabId) {
+          try {
+            const currentTab = await chrome.tabs.get(tabId);
+            if (isProtectedTab(currentTab)) {
+              const nt = await chrome.tabs.create({ url, active: true });
+              await waitForPageLoad(nt.id); lastAgentTabId = nt.id;
+              const t2 = await chrome.tabs.get(nt.id);
+              sendResult(cmd, true, { url: t2.url, title: t2.title, newTabId: nt.id }); break;
+            }
+            // Already on this exact URL or same page? Don't reload.
+            try {
+              const currentUrl = new URL(currentTab.url);
+              const targetUrl = new URL(url);
+              if (currentUrl.hostname === targetUrl.hostname && currentUrl.pathname === targetUrl.pathname) {
+                sendResult(cmd, true, { url: currentTab.url, title: currentTab.title, skippedReload: true });
+                break;
+              }
+            } catch {}
+          } catch {}
+        }
+
+        // Also check ALL tabs — maybe another tab already has this URL
+        try {
+          const allTabs = await chrome.tabs.query({});
+          const targetHost = new URL(url).hostname;
+          const targetPath = new URL(url).pathname;
+          const existing = allTabs.find(t => {
+            if (!t.url || isProtectedTab(t)) return false;
+            try {
+              const u = new URL(t.url);
+              return u.hostname === targetHost && u.pathname === targetPath;
+            } catch { return false; }
+          });
+          if (existing) {
+            await chrome.tabs.update(existing.id, { active: true });
+            lastAgentTabId = existing.id; streamingTabId = existing.id;
+            sendResult(cmd, true, { url: existing.url, title: existing.title, reusedTab: true });
+            break;
+          }
+        } catch {}
+
         await chrome.tabs.update(tabId, { url }); await waitForPageLoad(tabId); await ensureContentScript(tabId);
         const tab = await chrome.tabs.get(tabId); sendResult(cmd, true, { url: tab.url, title: tab.title }); break;
       }
@@ -590,12 +632,49 @@ async function executeCommand(cmd, tabId) {
       case 'newTab': {
         let url = cmd.url;
         if (url && !url.startsWith('http') && !url.startsWith('file:')) url = 'https://' + url;
-        // Tab reuse
-        if (url) { try { const h = new URL(url).hostname; const all = await chrome.tabs.query({}); const ex = all.find(t => { try { return !isProtectedTab(t) && new URL(t.url).hostname === h; } catch { return false; } });
-          if (ex) { await chrome.tabs.update(ex.id, { url, active: true }); await waitForPageLoad(ex.id); lastAgentTabId = ex.id; streamingTabId = ex.id; const t = await chrome.tabs.get(ex.id); sendResult(cmd, true, { tabId: ex.id, url: t.url, title: t.title, reused: true }); break; }
-        } catch {} }
-        const nt = await chrome.tabs.create({ url: url || 'about:blank', active: true }); if (url) await waitForPageLoad(nt.id); await ensureContentScript(nt.id); lastAgentTabId = nt.id; streamingTabId = nt.id;
-        const t = await chrome.tabs.get(nt.id); sendResult(cmd, true, { tabId: nt.id, url: t.url, title: t.title }); break;
+
+        if (url) {
+          try {
+            const targetUrl = new URL(url);
+            const all = await chrome.tabs.query({});
+
+            // First: check for EXACT URL match — just switch, no reload
+            const exact = all.find(t => {
+              if (!t.url || isProtectedTab(t)) return false;
+              try { const u = new URL(t.url); return u.hostname === targetUrl.hostname && u.pathname === targetUrl.pathname; } catch { return false; }
+            });
+            if (exact) {
+              await chrome.tabs.update(exact.id, { active: true });
+              lastAgentTabId = exact.id; streamingTabId = exact.id;
+              const t = await chrome.tabs.get(exact.id);
+              sendResult(cmd, true, { tabId: exact.id, url: t.url, title: t.title, reused: true, skippedReload: true });
+              break;
+            }
+
+            // Second: check for same hostname — navigate existing tab (don't create new)
+            const sameHost = all.find(t => {
+              if (!t.url || isProtectedTab(t)) return false;
+              try { return new URL(t.url).hostname === targetUrl.hostname; } catch { return false; }
+            });
+            if (sameHost) {
+              await chrome.tabs.update(sameHost.id, { url, active: true });
+              await waitForPageLoad(sameHost.id);
+              lastAgentTabId = sameHost.id; streamingTabId = sameHost.id;
+              const t = await chrome.tabs.get(sameHost.id);
+              sendResult(cmd, true, { tabId: sameHost.id, url: t.url, title: t.title, reused: true });
+              break;
+            }
+          } catch {}
+        }
+
+        // No existing tab — create new
+        const nt = await chrome.tabs.create({ url: url || 'about:blank', active: true });
+        if (url) await waitForPageLoad(nt.id);
+        await ensureContentScript(nt.id);
+        lastAgentTabId = nt.id; streamingTabId = nt.id;
+        const t = await chrome.tabs.get(nt.id);
+        sendResult(cmd, true, { tabId: nt.id, url: t.url, title: t.title });
+        break;
       }
 
       case 'getTabList': { const tabs = await chrome.tabs.query({}); sendResult(cmd, true, { tabs: tabs.filter(t => !isProtectedTab(t)).map(t => ({ tabId: t.id, url: t.url, title: t.title, active: t.active })) }); break; }

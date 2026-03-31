@@ -279,11 +279,11 @@ export async function getSystemSettings(): Promise<SystemSettings> {
     const map: Record<string, string> = {}
     for (const r of rows) map[r.key] = r.value
     return {
-      browser_agent_model: map.browser_agent_model || 'google/gemini-3-flash-preview',
+      browser_agent_model: map.browser_agent_model || 'google/openai/gpt-4o-mini',
       browser_agent_prompt: map.browser_agent_prompt || '',
     }
   } catch {
-    return { browser_agent_model: 'google/gemini-3-flash-preview', browser_agent_prompt: '' }
+    return { browser_agent_model: 'google/openai/gpt-4o-mini', browser_agent_prompt: '' }
   }
 }
 

@@ -301,7 +301,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'gemini-3-flash-preview'"
+          "default": "'openai/gpt-4o-mini'"
         },
         "temperature": {
           "name": "temperature",

@@ -177,7 +177,7 @@ const MODELS: ModelSeed[] = [
     },
     {
         provider: "google",
-        modelId: "google/gemini-3-flash-preview",
+        modelId: "google/openai/gpt-4o-mini",
         displayName: "Gemini 3 Flash",
         description: "High-speed model for agentic workflows, multi-turn chat, and coding.",
         multiplier: "0.70",

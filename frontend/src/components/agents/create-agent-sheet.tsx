@@ -159,8 +159,8 @@ export function CreateAgentSheet({
                         <Textarea
                             id="agent-prompt"
                             placeholder="You are a helpful assistant..."
-                            rows={5}
-                            className="resize-none"
+                            rows={10}
+                            className="resize-y min-h-[200px] w-full"
                             {...register('systemPrompt')}
                         />
                     </div>

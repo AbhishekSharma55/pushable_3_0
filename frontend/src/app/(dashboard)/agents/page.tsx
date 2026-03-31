@@ -1840,8 +1840,8 @@ export default function AgentsPage() {
                                     </div>
                                     <div>
                                         <h3 className="text-sm font-medium text-muted-foreground mb-2">System Prompt</h3>
-                                        <div className="rounded-lg bg-muted/50 border border-border p-4">
-                                            <p className="text-sm leading-relaxed whitespace-pre-wrap">
+                                        <div className="rounded-lg bg-muted/50 border border-border p-4 max-h-[300px] overflow-y-auto">
+                                            <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
                                                 {selectedAgent.systemPrompt || <span className="text-muted-foreground italic">No system prompt configured.</span>}
                                             </p>
                                         </div>

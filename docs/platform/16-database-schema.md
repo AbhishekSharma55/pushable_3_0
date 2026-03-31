@@ -177,7 +177,7 @@ CREATE TYPE ledger_type AS ENUM (
 | `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
 | `name` | TEXT | NOT NULL |
 | `system_prompt` | TEXT | Nullable |
-| `model` | TEXT | NOT NULL, default 'gpt-4o-mini' |
+| `model` | TEXT | NOT NULL, default 'gemini-3-flash-preview' |
 | `temperature` | REAL | NOT NULL, default 0.7 |
 | `system_level_access` | BOOLEAN | NOT NULL, default false |
 | `can_manage_kb` | BOOLEAN | NOT NULL, default false |

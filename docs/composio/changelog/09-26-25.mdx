@@ -148,7 +148,7 @@ const mcpSession = await composio.experimental.toolRouter.createSession(userId, 
 
 const agent = new MastraAgent({
   name: 'Gmail Assistant',
-  model: openai('gpt-4o-mini'),
+  model: openai('gemini-3-flash-preview'),
   tools: await mcpClient.getTools(),
 });
 

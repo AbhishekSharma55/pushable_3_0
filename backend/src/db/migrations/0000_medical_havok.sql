@@ -31,7 +31,7 @@ CREATE TABLE "agents" (
 	"workspace_id" uuid NOT NULL,
 	"name" text NOT NULL,
 	"system_prompt" text,
-	"model" text DEFAULT 'gpt-4o-mini' NOT NULL,
+	"model" text DEFAULT 'gemini-3-flash-preview' NOT NULL,
 	"temperature" real DEFAULT 0.7 NOT NULL,
 	"created_at" timestamp DEFAULT now() NOT NULL,
 	"updated_at" timestamp DEFAULT now() NOT NULL

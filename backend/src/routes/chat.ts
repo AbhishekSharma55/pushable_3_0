@@ -267,7 +267,9 @@ async function processGraphStream(
                 : toolName;
             const resultText =
                 typeof msgObj.content === "string"
-                    ? (msgObj.content as string).slice(0, 300)
+                    ? isAgent
+                        ? (msgObj.content as string).slice(0, 5000)
+                        : (msgObj.content as string).slice(0, 300)
                     : "";
 
             const existing = allToolCalls.find((t) => t.id === msgObj.tool_call_id);
@@ -571,7 +573,7 @@ async function executeRun(
 
             if (hasImages) {
                 const agent = await agentRepository.findById(agentId, workspaceId);
-                const modelId = agent?.model || "openai/gpt-4o-mini";
+                const modelId = agent?.model || "openai/gemini-3-flash-preview";
                 supportsVision = await openrouterService.supportsVision(modelId);
             }
 

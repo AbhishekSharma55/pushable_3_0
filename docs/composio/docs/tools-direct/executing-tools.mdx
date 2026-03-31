@@ -46,7 +46,7 @@ tools = composio.tools.get(
 
 # Ask the LLM to check calendar
 result = openai.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gemini-3-flash-preview",
     tools=tools,
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},

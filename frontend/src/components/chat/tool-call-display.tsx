@@ -47,7 +47,7 @@ function classifyTool(name: string): 'planning' | 'notebook' | 'system' | 'integ
     if (name.startsWith('system_')) return 'system';
     if (name.startsWith('COMPOSIO_') || name.startsWith('composio_')) return 'integration';
     if (name.startsWith('browser_')) return 'browser';
-    if (name.startsWith('agent_') || name.startsWith('Delegating')) return 'agent';
+    if (name.startsWith('agent_') || name.startsWith('Delegating') || name.startsWith('Delegated')) return 'agent';
     return 'tool';
 }
 
@@ -232,6 +232,87 @@ function PlanCard({ plan }: { plan: Array<{ id: string; title: string; status: s
     );
 }
 
+function AgentResponseBubble({ tc, index }: { tc: ToolCallEvent; index: number }) {
+    const [expanded, setExpanded] = useState(true);
+    const isDone = tc.status === 'done';
+    const isRunning = tc.status === 'running';
+
+    // Extract agent name from "Delegated to <name>" or "Delegating to <name>" or "agent_<name>"
+    const agentName = tc.name
+        .replace(/^(Delegat(ed|ing) to\s*)/i, '')
+        .replace(/^agent_/i, '')
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, (c) => c.toUpperCase())
+        .trim() || 'Agent';
+
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: index * 0.05, duration: 0.3, ease: 'easeOut' }}
+            className="rounded-xl border border-primary/20 bg-primary/[0.03] overflow-hidden"
+        >
+            {/* Agent header */}
+            <button
+                type="button"
+                onClick={() => setExpanded(!expanded)}
+                className="w-full px-4 py-2.5 border-b border-primary/10 bg-primary/[0.05] flex items-center gap-2.5 cursor-pointer hover:bg-primary/[0.08] transition-colors"
+            >
+                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 shrink-0">
+                    {isRunning ? (
+                        <Loader2 className="h-3.5 w-3.5 text-primary animate-spin" />
+                    ) : (
+                        <Bot className="h-3.5 w-3.5 text-primary" />
+                    )}
+                </div>
+                <span className="text-sm font-medium text-primary flex-1 text-left">
+                    {isRunning ? `${agentName} is working...` : agentName}
+                </span>
+                {isDone && (
+                    <CheckCircle2 className="h-3.5 w-3.5 text-primary/60 shrink-0" />
+                )}
+                <ChevronRight
+                    className={cn(
+                        "w-3.5 h-3.5 text-primary/40 shrink-0 transition-transform duration-150",
+                        expanded && "rotate-90"
+                    )}
+                />
+            </button>
+
+            {/* Agent response content */}
+            <AnimatePresence initial={false}>
+                {expanded && isDone && tc.result && (
+                    <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.2 }}
+                        className="overflow-hidden"
+                    >
+                        <div className="px-4 py-3 text-sm leading-relaxed text-foreground/90 whitespace-pre-wrap max-h-[400px] overflow-y-auto">
+                            {tc.result}
+                        </div>
+                    </motion.div>
+                )}
+                {expanded && isRunning && (
+                    <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.2 }}
+                        className="overflow-hidden"
+                    >
+                        <div className="px-4 py-3 flex items-center gap-2 text-sm text-muted-foreground">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            <span>Processing...</span>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </motion.div>
+    );
+}
+
 function ActionCall({ tc, index }: { tc: ToolCallEvent; index: number }) {
     const [expanded, setExpanded] = useState(false);
     const Icon = getToolIcon(tc.name);
@@ -313,13 +394,18 @@ export function ToolCallDisplay({ toolCalls, messageId, isMessageComplete }: Too
     const plan = hasPlanningCalls ? buildPlanState(toolCalls) : null;
     const actionCalls = toolCalls.filter((tc) => !PLANNING_TOOLS.has(tc.name));
 
-    const latestAction = actionCalls[actionCalls.length - 1];
-    const isRunning = actionCalls.some((tc) => tc.status === 'running');
+    // Separate agent delegation calls from regular tool calls
+    const agentCalls = actionCalls.filter((tc) => classifyTool(tc.name) === 'agent');
+    const regularCalls = actionCalls.filter((tc) => classifyTool(tc.name) !== 'agent');
+
+    const latestAction = regularCalls[regularCalls.length - 1] ?? actionCalls[actionCalls.length - 1];
+    const isRunning = regularCalls.some((tc) => tc.status === 'running');
+    const isAgentRunning = agentCalls.some((tc) => tc.status === 'running');
 
     // Auto-complete plan steps ONLY when the entire message/run is fully done.
     // During streaming, there are gaps between tool calls where isRunning is briefly false —
     // we must NOT auto-complete during those gaps, only when the message is finalized.
-    if (plan && isMessageComplete && !isRunning && actionCalls.length > 0) {
+    if (plan && isMessageComplete && !isRunning && !isAgentRunning && actionCalls.length > 0) {
         for (const step of plan) {
             if (step.status === 'pending' || step.status === 'in_progress') {
                 step.status = 'completed';
@@ -333,7 +419,8 @@ export function ToolCallDisplay({ toolCalls, messageId, isMessageComplete }: Too
             {plan && plan.length > 0 && (
                 <PlanCard plan={plan} />
             )}
-            {actionCalls.length > 0 && (
+            {/* Regular tool calls accordion */}
+            {regularCalls.length > 0 && (
                 <div>
                     {/* Accordion bar */}
                     <button
@@ -357,7 +444,7 @@ export function ToolCallDisplay({ toolCalls, messageId, isMessageComplete }: Too
                         <span className="font-medium text-foreground/80 truncate flex-1">
                             {isRunning
                                 ? `Using ${formatToolName(latestAction.name)}...`
-                                : `Used ${actionCalls.length} tool${actionCalls.length !== 1 ? 's' : ''}`}
+                                : `Used ${regularCalls.length} tool${regularCalls.length !== 1 ? 's' : ''}`}
                         </span>
                         <ChevronRight
                             className={cn(
@@ -378,7 +465,7 @@ export function ToolCallDisplay({ toolCalls, messageId, isMessageComplete }: Too
                                 className="overflow-hidden"
                             >
                                 <div className="mt-1.5 space-y-1">
-                                    {actionCalls.map((tc, j) => (
+                                    {regularCalls.map((tc, j) => (
                                         <ActionCall key={`${messageId}-action-${j}`} tc={tc} index={j} />
                                     ))}
                                 </div>
@@ -387,6 +474,10 @@ export function ToolCallDisplay({ toolCalls, messageId, isMessageComplete }: Too
                     </AnimatePresence>
                 </div>
             )}
+            {/* Agent delegation response bubbles */}
+            {agentCalls.length > 0 && agentCalls.map((tc, j) => (
+                <AgentResponseBubble key={`${messageId}-agent-${j}`} tc={tc} index={j} />
+            ))}
         </div>
     );
 }

@@ -1623,6 +1623,7 @@ You have \`list_workflows\`, \`run_workflow\`, and \`save_as_workflow\` tools.
 
 ### Running workflows:
 - When you find a matching workflow via \`list_workflows\`, check the required inputs listed for that workflow.
+- **Use workflowName** (the exact name from the listing) to identify the workflow. Do NOT try to extract or guess the UUID.
 - **Call run_workflow ALONE** — do NOT call other tools (bucket_read_file, etc.) in the same turn. Wait for the workflow result first.
 - **Pass ALL required input parameters** in the \`inputData\` field. Extract the values from the user's message. Never call run_workflow with empty inputData if the workflow requires inputs.
 - **After a workflow completes successfully, the task IS DONE.** The workflow has already executed all the tool calls (file reads, writes, API calls, etc.) on your behalf.

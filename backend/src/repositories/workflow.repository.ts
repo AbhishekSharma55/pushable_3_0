@@ -39,6 +39,21 @@ export const workflowRepository = {
             .orderBy(desc(workflows.createdAt));
     },
 
+    async findByName(name: string, agentId: string, workspaceId: string) {
+        const result = await db
+            .select()
+            .from(workflows)
+            .where(
+                and(
+                    eq(workflows.name, name),
+                    eq(workflows.agentId, agentId),
+                    eq(workflows.workspaceId, workspaceId)
+                )
+            )
+            .limit(1);
+        return result[0] ?? null;
+    },
+
     async findByAgent(agentId: string, workspaceId: string) {
         return db
             .select()

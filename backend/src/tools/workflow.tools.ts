@@ -39,7 +39,7 @@ export function buildWorkflowTools(config: WorkflowToolsConfig): DynamicStructur
                         : "\n  Required inputs: none";
                     return `- ${w.name} (ID: ${w.id}) — ${w.description || "No description"} — ${stepCount} steps — ${w.enabled ? "enabled" : "disabled"} — run ${w.runCount} times${inputParams}`;
                 }).join("\n");
-                return `Available workflows:\n${list}\n\nIMPORTANT: When calling run_workflow, pass ALL required input parameters in the inputData field. Do NOT call run_workflow with empty inputData if the workflow requires inputs.`;
+                return `Available workflows:\n${list}\n\nTo run a workflow, call run_workflow with workflowName (the exact name above) and pass the required inputs in inputData. Example: run_workflow({ workflowName: "${workflows[0].name}", inputData: { ... } })`;
             },
         })
     );
@@ -48,14 +48,27 @@ export function buildWorkflowTools(config: WorkflowToolsConfig): DynamicStructur
     tools.push(
         new DynamicStructuredTool({
             name: "run_workflow",
-            description: "Execute a saved workflow recipe with the given input parameters. This runs the workflow's tool calls directly without full LLM reasoning, making it much faster and cheaper than running the process manually.",
+            description: "Execute a saved workflow recipe with the given input parameters. This runs the workflow's tool calls directly without full LLM reasoning, making it much faster and cheaper than running the process manually. You can identify the workflow by name (preferred) or by ID.",
             schema: z.object({
-                workflowId: z.string().uuid().describe("ID of the workflow to execute"),
+                workflowName: z.string().optional().describe("Name of the workflow to execute (preferred — use the exact name from list_workflows)"),
+                workflowId: z.string().uuid().optional().describe("ID of the workflow to execute (alternative to workflowName)"),
                 inputData: z.record(z.string(), z.unknown()).optional().default({}).describe("Input parameters for the workflow (keys must match the workflow's inputSchema)"),
             }),
-            func: async ({ workflowId, inputData }) => {
-                const workflow = await workflowRepository.findById(workflowId, workspaceId);
-                if (!workflow) return `Workflow "${workflowId}" not found.`;
+            func: async ({ workflowName, workflowId, inputData }) => {
+                if (!workflowName && !workflowId) {
+                    return "Error: You must provide either workflowName or workflowId to run a workflow.";
+                }
+
+                // Look up by name first (preferred), then by ID
+                let workflow;
+                if (workflowName) {
+                    workflow = await workflowRepository.findByName(workflowName, agentId, workspaceId);
+                    if (!workflow) return `Workflow with name "${workflowName}" not found. Use list_workflows to see available workflows.`;
+                } else {
+                    workflow = await workflowRepository.findById(workflowId!, workspaceId);
+                    if (!workflow) return `Workflow with ID "${workflowId}" not found. Use list_workflows to see available workflows.`;
+                }
+
                 if (!workflow.enabled) return `Workflow "${workflow.name}" is disabled.`;
 
                 const recipe = workflow.recipe as WorkflowRecipe;
@@ -72,8 +85,9 @@ export function buildWorkflowTools(config: WorkflowToolsConfig): DynamicStructur
                 }
 
                 // Create run record
+                const resolvedWorkflowId = workflow.id;
                 const run = await workflowRunRepository.create({
-                    workflowId,
+                    workflowId: resolvedWorkflowId,
                     workspaceId,
                     inputData: inputData as Record<string, unknown>,
                 });
@@ -81,7 +95,7 @@ export function buildWorkflowTools(config: WorkflowToolsConfig): DynamicStructur
                 const runStartMs = Date.now();
                 try {
                     const result = await executeWorkflow({
-                        workflowId,
+                        workflowId: resolvedWorkflowId,
                         workspaceId,
                         agentId: workflow.agentId,
                         inputData: inputData as Record<string, unknown>,
@@ -101,12 +115,12 @@ export function buildWorkflowTools(config: WorkflowToolsConfig): DynamicStructur
                         workspaceId,
                         amount: result.creditsUsed,
                         type: "workflow_run",
-                        metadata: { workflowId, agentId: workflow.agentId },
+                        metadata: { workflowId: resolvedWorkflowId, agentId: workflow.agentId },
                     });
 
                     // Update workflow stats
-                    await workflowRepository.updateLastRunAt(workflowId);
-                    await workflowRepository.incrementRunCount(workflowId);
+                    await workflowRepository.updateLastRunAt(resolvedWorkflowId);
+                    await workflowRepository.incrementRunCount(resolvedWorkflowId);
 
                     // Build detailed step-by-step report so the agent knows exactly what the workflow did
                     const stepReport = result.stepResults.map((sr, i) => {

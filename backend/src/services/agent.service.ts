@@ -1,10 +1,31 @@
 import { agentRepository } from "../repositories/agent.repository.ts";
 import { NotFoundError } from "../lib/errors.ts";
 
+function slugifyAgentFolder(name: string): string {
+    const slug = name
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+    return `/agent-${slug}`;
+}
+
+const AGENT_EMOJIS = [
+    "😎", "🤖", "🧠", "🦊", "🐱", "🐶", "🦁", "🐼", "🐸", "🐵",
+    "🦄", "🐲", "👻", "🤠", "🥷", "🧑‍💻", "🧑‍🔬", "🧑‍🚀", "🦸", "🧙",
+    "💀", "👽", "🤡", "🥸", "😈", "🫡", "🫠", "🤓", "😏", "🧐",
+    "🦅", "🐝", "🦈", "🐙", "🦉", "🐺", "🦇", "🐢", "🦎", "🐧",
+];
+
+function randomEmoji(): string {
+    return AGENT_EMOJIS[Math.floor(Math.random() * AGENT_EMOJIS.length)];
+}
+
 export const agentService = {
     async createAgent(
         data: {
             name: string;
+            emoji?: string;
             systemPrompt?: string;
             model?: string;
             temperature?: number;
@@ -12,7 +33,9 @@ export const agentService = {
         },
         workspaceId: string
     ) {
-        return agentRepository.create({ ...data, workspaceId });
+        const bucketFolder = slugifyAgentFolder(data.name);
+        const emoji = data.emoji || randomEmoji();
+        return agentRepository.create({ ...data, emoji, workspaceId, bucketFolder });
     },
 
     async getAgents(workspaceId: string) {
@@ -65,6 +88,8 @@ export const agentService = {
             canManageSchedules: boolean;
             canManageChannels: boolean;
             canManageAgents: boolean;
+            canManageBucket?: boolean;
+            canExecutePython?: boolean;
         }
     ) {
         const agent = await agentRepository.findById(id, workspaceId);

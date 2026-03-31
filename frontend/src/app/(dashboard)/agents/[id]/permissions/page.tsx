@@ -95,6 +95,8 @@ export default function AgentPermissionsPage() {
         canManageSchedules: false,
         canManageChannels: false,
         canManageAgents: false,
+        canManageBucket: false,
+        canExecutePython: false,
     });
     const [savingSystem, setSavingSystem] = useState(false);
     const [showEnableConfirm, setShowEnableConfirm] = useState(false);
@@ -132,6 +134,8 @@ export default function AgentPermissionsPage() {
                     canManageSchedules: currentAgent.canManageSchedules,
                     canManageChannels: currentAgent.canManageChannels,
                     canManageAgents: currentAgent.canManageAgents,
+                    canManageBucket: currentAgent.canManageBucket,
+                    canExecutePython: currentAgent.canExecutePython,
                 });
             }
         } catch {

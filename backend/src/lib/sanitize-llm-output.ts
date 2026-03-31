@@ -109,6 +109,69 @@ function stripJsonToolCallObjects(text: string): string {
 }
 
 /**
+ * Strip JSON objects that look like compiled workflow recipes from text.
+ * When the save_as_workflow tool runs, the inner compilation LLM's response
+ * can leak into the chat stream as raw JSON.
+ */
+function stripWorkflowRecipeJson(text: string): string {
+    // Quick check — must contain recipe-like markers
+    if (!text.includes('"recipe"') && !text.includes('"inputSchema"') && !text.includes('"steps"')) {
+        return text;
+    }
+
+    let result = text;
+    let searchFrom = 0;
+
+    // Look for JSON objects containing recipe/inputSchema/steps keys
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+        // Find a '{' that could start a recipe JSON
+        const start = result.indexOf('{', searchFrom);
+        if (start === -1) break;
+
+        // Quick lookahead — check if this JSON block contains recipe markers
+        const lookahead = result.slice(start, start + 500);
+        if (!lookahead.includes('"name"') || (!lookahead.includes('"recipe"') && !lookahead.includes('"inputSchema"') && !lookahead.includes('"steps"'))) {
+            searchFrom = start + 1;
+            continue;
+        }
+
+        // Brace counting to find the matching }
+        let depth = 0;
+        let end = -1;
+        let inStr = false;
+        let esc = false;
+        for (let i = start; i < result.length; i++) {
+            const ch = result[i];
+            if (esc) { esc = false; continue; }
+            if (ch === '\\') { esc = true; continue; }
+            if (ch === '"') { inStr = !inStr; continue; }
+            if (inStr) continue;
+            if (ch === '{') depth++;
+            else if (ch === '}') {
+                depth--;
+                if (depth === 0) { end = i + 1; break; }
+            }
+        }
+
+        if (end === -1) break;
+
+        // Verify it's actually a recipe-like JSON object
+        try {
+            const parsed = JSON.parse(result.substring(start, end));
+            if (parsed.recipe || parsed.inputSchema || (parsed.name && parsed.steps)) {
+                result = result.substring(0, start) + result.substring(end);
+                continue;
+            }
+        } catch { /* not valid JSON, skip */ }
+
+        searchFrom = end;
+    }
+
+    return result;
+}
+
+/**
  * Remove tool-call markup from LLM text output.
  *
  * Safe to call on every chunk during streaming — the regex set is compiled
@@ -143,7 +206,12 @@ export function stripToolCallXml(text: string): string {
     // conversation history (which reinforces the bad behavior).
     cleaned = stripJsonToolCallObjects(cleaned);
 
-    // 7. Collapse excessive whitespace left behind (but don't trim — preserves
+    // 7. Workflow recipe JSON objects leaked from compilation LLM
+    // When save_as_workflow runs, the inner LLM's response can leak into
+    // the chat stream. Strip JSON objects that look like compiled recipes.
+    cleaned = stripWorkflowRecipeJson(cleaned);
+
+    // 8. Collapse excessive whitespace left behind (but don't trim — preserves
     //    leading/trailing spaces that separate streamed tokens)
     cleaned = cleaned.replace(WHITESPACE_COLLAPSE_RE, "\n\n");
 

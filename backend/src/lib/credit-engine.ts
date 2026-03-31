@@ -8,7 +8,7 @@ import { logger } from "./logger.ts";
 export const BASE_CREDIT_COSTS = {
     CHAT_MESSAGE_BASE: 5,
     TASK_RUN_BASE: 100,
-    WORKFLOW_STEP_BASE: 100,
+    WORKFLOW_STEP_BASE: 2,
     KB_DOCUMENT_UPLOAD: 20,
     KB_QUERY: 2,
     BROWSER_ACTION: 10,
@@ -24,6 +24,7 @@ export type LedgerType =
     | "chat_message"
     | "task_run"
     | "workflow_step"
+    | "workflow_run"
     | "kb_upload"
     | "kb_query"
     | "browser_action"
@@ -37,6 +38,7 @@ export type CreditAction =
     | "chat_message"
     | "task_run"
     | "workflow_step"
+    | "workflow_run"
     | "kb_upload"
     | "kb_query"
     | "browser_action"
@@ -48,6 +50,7 @@ interface CalculateCostParams {
     modelMultiplier?: number;
     isScheduled?: boolean;
     isDelegation?: boolean;
+    stepCount?: number;
 }
 
 interface CheckResult {
@@ -116,6 +119,9 @@ export function calculateCreditCost(params: CalculateCostParams): number {
             break;
         case "workflow_step":
             cost = BASE_CREDIT_COSTS.WORKFLOW_STEP_BASE * modelMultiplier;
+            break;
+        case "workflow_run":
+            cost = BASE_CREDIT_COSTS.WORKFLOW_STEP_BASE * (params.stepCount || 1);
             break;
         case "kb_upload":
             return BASE_CREDIT_COSTS.KB_DOCUMENT_UPLOAD;

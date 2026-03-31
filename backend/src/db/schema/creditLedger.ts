@@ -14,6 +14,7 @@ export const ledgerTypeEnum = pgEnum("ledger_type", [
     "chat_message",
     "task_run",
     "workflow_step",
+    "workflow_run",
     "kb_upload",
     "kb_query",
     "browser_action",

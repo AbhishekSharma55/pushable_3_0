@@ -6,12 +6,14 @@ export const agentRepository = {
     async create(data: {
         workspaceId: string;
         name: string;
+        emoji?: string;
         systemPrompt?: string;
         model?: string;
         temperature?: number;
         browserType?: string;
         browserEnabled?: boolean;
         browserProxyId?: string | null;
+        bucketFolder?: string;
     }) {
         const result = await db.insert(agents).values(data).returning();
         return result[0];
@@ -28,11 +30,24 @@ export const agentRepository = {
             canManageSchedules: boolean;
             canManageChannels: boolean;
             canManageAgents: boolean;
+            canManageBucket?: boolean;
+            canExecutePython?: boolean;
         }
     ) {
-        // If systemLevelAccess is off, force all permissions to false
+        // If systemLevelAccess is off, force all system-level permissions to false
+        // canExecutePython is independent of systemLevelAccess
         const perms = data.systemLevelAccess
-            ? data
+            ? {
+                  systemLevelAccess: data.systemLevelAccess,
+                  canManageKB: data.canManageKB,
+                  canManageSkills: data.canManageSkills,
+                  canManageTools: data.canManageTools,
+                  canManageSchedules: data.canManageSchedules,
+                  canManageChannels: data.canManageChannels,
+                  canManageAgents: data.canManageAgents,
+                  ...(data.canManageBucket !== undefined && { canManageBucket: data.canManageBucket }),
+                  ...(data.canExecutePython !== undefined && { canExecutePython: data.canExecutePython }),
+              }
             : {
                   systemLevelAccess: false,
                   canManageKB: false,
@@ -41,6 +56,8 @@ export const agentRepository = {
                   canManageSchedules: false,
                   canManageChannels: false,
                   canManageAgents: false,
+                  ...(data.canManageBucket !== undefined && { canManageBucket: data.canManageBucket }),
+                  ...(data.canExecutePython !== undefined && { canExecutePython: data.canExecutePython }),
               };
         const result = await db
             .update(agents)
@@ -72,6 +89,7 @@ export const agentRepository = {
         workspaceId: string,
         data: Partial<{
             name: string;
+            emoji: string;
             systemPrompt: string;
             model: string;
             temperature: number;

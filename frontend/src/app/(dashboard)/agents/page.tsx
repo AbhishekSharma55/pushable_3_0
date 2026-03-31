@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef, Fragment } from 'react';
+import { useEffect, useState, useCallback, useRef, Fragment, useMemo } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
     Bot,
@@ -29,6 +29,11 @@ import {
     Chrome,
     ChevronRight,
     Bug,
+    Paperclip,
+    X,
+    FileText,
+    Image as ImageIcon,
+    DollarSign,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -136,12 +141,20 @@ type ChatSegment =
     | { type: 'text'; content: string }
     | { type: 'tools'; toolCalls: ToolCallEvent[] };
 
+interface MessageCost {
+    inputTokens: number;
+    outputTokens: number;
+    totalCost: number;
+}
+
 interface ChatMessage extends Message {
     isStreaming?: boolean;
     toolCalls?: ToolCallEvent[];
     segments?: ChatSegment[];
     approvalRequest?: ApprovalRequest;
     thinking?: string;
+    helperText?: string;
+    cost?: MessageCost;
 }
 
 type ViewMode = 'chat' | 'settings';
@@ -213,6 +226,7 @@ export default function AgentsPage() {
     const [loadingSessions, setLoadingSessions] = useState(false);
     const [loadingMessages, setLoadingMessages] = useState(false);
     const [sending, setSending] = useState(false);
+    const [activeRunId, setActiveRunId] = useState<string | null>(null);
     const [activeArtifact, setActiveArtifact] = useState<Artifact | null>(null);
     const [pendingApproval, setPendingApproval] = useState<{ msgId: string; request: ApprovalRequest } | null>(null);
 
@@ -221,6 +235,12 @@ export default function AgentsPage() {
     const [debugLogs, setDebugLogs] = useState<DebugLogEntry[]>([]);
     const [showDebugPanel, setShowDebugPanel] = useState(false);
     const debugLogId = useCallback(() => `dl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, []);
+
+    // Session cost (sum of all assistant message costs, logging only)
+    const sessionCost = useMemo(() => {
+        if (!LOGGING_ENABLED) return 0;
+        return messages.reduce((sum, m) => sum + (m.cost?.totalCost ?? 0), 0);
+    }, [messages]);
 
     // Browser preview state
     const [browserProfile, setBrowserProfile] = useState<BrowserProfile | null>(null);
@@ -242,6 +262,57 @@ export default function AgentsPage() {
     // Models (for direct API indicator)
     const [llmModels, setLlmModels] = useState<LLMModel[]>([]);
 
+    // File attachment state
+    const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+    const [isDragOver, setIsDragOver] = useState(false);
+    const dragCounterRef = useRef(0);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const ACCEPTED_EXTENSIONS = ".png,.jpg,.jpeg,.gif,.webp,.pdf,.docx,.txt,.md,.csv";
+
+    const addFiles = useCallback((files: FileList | File[]) => {
+        const newFiles = Array.from(files).filter((f) => {
+            const ext = f.name.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+            const allowed = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".docx", ".txt", ".md", ".csv"];
+            return allowed.includes(ext) && f.size <= 20 * 1024 * 1024;
+        });
+        setPendingFiles((prev) => [...prev, ...newFiles].slice(0, 10));
+    }, []);
+
+    const removeFile = useCallback((index: number) => {
+        setPendingFiles((prev) => prev.filter((_, i) => i !== index));
+    }, []);
+
+    // Use a counter to handle dragenter/dragleave across child elements.
+    // dragenter increments, dragleave decrements. Only show overlay when > 0.
+    const handleDragEnter = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        dragCounterRef.current++;
+        if (dragCounterRef.current === 1) {
+            setIsDragOver(true);
+        }
+    }, []);
+
+    const handleDragOver = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+    }, []);
+
+    const handleDragLeave = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        dragCounterRef.current--;
+        if (dragCounterRef.current === 0) {
+            setIsDragOver(false);
+        }
+    }, []);
+
+    const handleDrop = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        dragCounterRef.current = 0;
+        setIsDragOver(false);
+        if (e.dataTransfer.files.length > 0) {
+            addFiles(e.dataTransfer.files);
+        }
+    }, [addFiles]);
+
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const reconnectAbortRef = useRef<AbortController | null>(null);
@@ -257,10 +328,16 @@ export default function AgentsPage() {
             setLoading(true);
             const data = await getAgents(workspace.id);
             setAgents(data);
-            // Auto-select agent from URL param
+            // Auto-select agent from URL param, or default to CEO
             if (agentIdParam) {
                 const found = data.find((a: Agent) => a.id === agentIdParam);
                 if (found) setSelectedAgent(found);
+            } else {
+                const ceo = data.find((a: Agent) => a.isCeo);
+                if (ceo) {
+                    setSelectedAgent(ceo);
+                    updateParams({ agent: ceo.id });
+                }
             }
         } catch {
             toast.error('Failed to load agents');
@@ -343,6 +420,7 @@ export default function AgentsPage() {
                             segments: (meta.segments as ChatSegment[] | undefined) || undefined,
                             approvalRequest: (meta.approvalRequest as ApprovalRequest | undefined) || undefined,
                             thinking: (meta.thinking as string | undefined) || undefined,
+                            cost: (meta.cost as MessageCost | undefined) || undefined,
                         };
                     }
                     return msg;
@@ -399,6 +477,7 @@ export default function AgentsPage() {
                         reconnectAbortRef.current = abortController;
 
                         const runId = runData.data.id as string;
+                        setActiveRunId(runId);
                         const sseUrl = snapshot?.eventCount
                             ? `${API_URL}/api/runs/${runId}/events?from=${snapshot.eventCount}`
                             : `${API_URL}/api/runs/${runId}/events`;
@@ -419,6 +498,7 @@ export default function AgentsPage() {
                             // SSE failed — polling will deliver
                         }).finally(() => {
                             setSending(false);
+                            setActiveRunId(null);
                         });
                     } else if (runStatus === 'interrupted') {
                         // Restore approval state: find the last assistant message with approvalRequest
@@ -791,6 +871,20 @@ export default function AgentsPage() {
                             setDebugLogs((prev) => [...prev, { id: debugLogId(), timestamp: Date.now(), type: evtType as DebugLogEntry['type'], summary, data: parsed }]);
                         }
                     }
+                    if (parsed.helperText) {
+                        setMessages((prev) => prev.map((m) =>
+                            m.id === assistantMsgId
+                                ? { ...m, helperText: parsed.helperText as string }
+                                : m
+                        ));
+                    }
+                    if (parsed.cost) {
+                        setMessages((prev) => prev.map((m) =>
+                            m.id === assistantMsgId
+                                ? { ...m, cost: parsed.cost as MessageCost }
+                                : m
+                        ));
+                    }
                     if (parsed.content) {
                         sseDeliveredRef.current = true;
                         fullContent += parsed.content;
@@ -852,6 +946,10 @@ export default function AgentsPage() {
                         // Returning lets the caller abort polling to prevent duplicates.
                         return;
                     }
+                    if (parsed.stopped) {
+                        // Agent was stopped by user — finalize the message
+                        setMessages((prev) => prev.map((m) => m.id === assistantMsgId ? { ...m, content: fullContent, isStreaming: false, segments: [...segments] } : m));
+                    }
                     if (parsed.error) toast.error(parsed.error);
                 } catch { /* ignore */ }
             }
@@ -883,7 +981,7 @@ export default function AgentsPage() {
                     const hydrated: ChatMessage[] = msgsRes.map((msg: ChatMessage & { metadata?: Record<string, unknown> }) => {
                         const meta = msg.metadata as Record<string, unknown> | undefined;
                         if (meta && msg.role === 'assistant') {
-                            return { ...msg, toolCalls: (meta.toolCalls as ToolCallEvent[] | undefined) || undefined, segments: (meta.segments as ChatSegment[] | undefined) || undefined, thinking: (meta.thinking as string | undefined) || undefined };
+                            return { ...msg, toolCalls: (meta.toolCalls as ToolCallEvent[] | undefined) || undefined, segments: (meta.segments as ChatSegment[] | undefined) || undefined, thinking: (meta.thinking as string | undefined) || undefined, cost: (meta.cost as MessageCost | undefined) || undefined };
                         }
                         return msg;
                     });
@@ -904,6 +1002,7 @@ export default function AgentsPage() {
                                 segments: (meta.segments as ChatSegment[] | undefined) || undefined,
                                 approvalRequest: (meta.approvalRequest as ApprovalRequest | undefined) || undefined,
                                 thinking: (meta.thinking as string | undefined) || undefined,
+                                cost: (meta.cost as MessageCost | undefined) || undefined,
                             };
                         }
                         return msg;
@@ -937,19 +1036,30 @@ export default function AgentsPage() {
     };
 
     const sendMessage = async () => {
-        if (!chatInput.trim() || !workspace || !activeSession || sending) return;
-        const content = chatInput.trim();
+        if ((!chatInput.trim() && pendingFiles.length === 0) || !workspace || !activeSession || sending) return;
+        const content = chatInput.trim() || (pendingFiles.length > 0 ? 'Please analyze the attached file(s).' : '');
+        const filesToSend = pendingFiles.length > 0 ? [...pendingFiles] : undefined;
         setChatInput('');
+        setPendingFiles([]);
         setSending(true);
         sseDeliveredRef.current = false;
 
         if (LOGGING_ENABLED) {
-            setDebugLogs((prev) => [...prev, { id: debugLogId(), timestamp: Date.now(), type: 'system', summary: `User message sent (${content.length} chars)`, data: { message: content } }]);
+            setDebugLogs((prev) => [...prev, { id: debugLogId(), timestamp: Date.now(), type: 'system', summary: `User message sent (${content.length} chars${filesToSend?.length ? `, ${filesToSend.length} file(s)` : ''})`, data: { message: content, files: filesToSend?.map((f) => f.name) } }]);
         }
+
+        // Build attachment metadata for display
+        const attachmentMeta = filesToSend?.map((f) => ({
+            filename: f.name,
+            mimetype: f.type,
+            type: (f.type.startsWith('image/') ? 'image' : 'document') as 'image' | 'document',
+            size: f.size,
+        }));
 
         const userMsg: ChatMessage = {
             id: `temp-user-${Date.now()}`, sessionId: activeSession.id,
             role: 'user', content, tokenCount: 0, createdAt: new Date().toISOString(),
+            ...(attachmentMeta?.length ? { metadata: { attachments: attachmentMeta } } : {}),
         };
         const assistantMsg: ChatMessage = {
             id: `temp-assistant-${Date.now()}`, sessionId: activeSession.id,
@@ -961,14 +1071,36 @@ export default function AgentsPage() {
 
         try {
             const token = getToken();
-            const hdrs = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id };
 
-            // POST returns { runId } — start background execution
-            const postRes = await fetch(`${API_URL}/api/sessions/${activeSession.id}/chat`, {
-                method: 'POST', headers: hdrs, body: JSON.stringify({ message: content }),
-            });
-            if (!postRes.ok) throw new Error('Failed to send');
-            const { runId } = await postRes.json();
+            let runId: string;
+
+            if (filesToSend && filesToSend.length > 0) {
+                // Multipart form data with files
+                const formData = new FormData();
+                formData.append('message', content);
+                for (const file of filesToSend) {
+                    formData.append('files', file);
+                }
+                const postRes = await fetch(`${API_URL}/api/sessions/${activeSession.id}/chat`, {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
+                    body: formData,
+                });
+                if (!postRes.ok) throw new Error('Failed to send');
+                const result = await postRes.json();
+                runId = result.runId;
+            } else {
+                // Standard JSON
+                const hdrs = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id };
+                const postRes = await fetch(`${API_URL}/api/sessions/${activeSession.id}/chat`, {
+                    method: 'POST', headers: hdrs, body: JSON.stringify({ message: content }),
+                });
+                if (!postRes.ok) throw new Error('Failed to send');
+                const result = await postRes.json();
+                runId = result.runId;
+            }
+
+            setActiveRunId(runId);
 
             // Start polling fallback in parallel
             pollForCompletion(activeSession.id, assistantMsg.id, abortController.signal).catch(() => {});
@@ -991,6 +1123,7 @@ export default function AgentsPage() {
             abortController.abort();
         } finally {
             setSending(false);
+            setActiveRunId(null);
         }
     };
 
@@ -1021,6 +1154,7 @@ export default function AgentsPage() {
             const activeRunData = await activeRunRes.json();
             const runId = activeRunData.data?.id;
             if (!runId) throw new Error('No active run found');
+            setActiveRunId(runId);
 
             // POST approval
             const approveRes = await fetch(`${API_URL}/api/runs/${runId}/approve`, {
@@ -1047,6 +1181,20 @@ export default function AgentsPage() {
             toast.error('Failed to process approval');
         } finally {
             setSending(false);
+            setActiveRunId(null);
+        }
+    };
+
+    const stopRun = async () => {
+        if (!workspace || !activeRunId) return;
+        try {
+            const token = getToken();
+            await fetch(`${API_URL}/api/runs/${activeRunId}/stop`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}`, 'x-workspace-id': workspace.id },
+            });
+        } catch {
+            toast.error('Failed to stop the agent');
         }
     };
 
@@ -1054,12 +1202,30 @@ export default function AgentsPage() {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
     };
 
+    const sortedAgents = useMemo(() => {
+        // Pin CEO and Tester agents to top
+        const ceo = agents.filter((a) => a.isCeo);
+        const tester = agents.filter((a) => a.isTester);
+        const rest = agents.filter((a) => !a.isCeo && !a.isTester);
+        return [...ceo, ...tester, ...rest];
+    }, [agents]);
+
     const filteredAgents = agentSearch
-        ? agents.filter((a) => a.name.toLowerCase().includes(agentSearch.toLowerCase()))
-        : agents;
+        ? sortedAgents.filter((a) => a.name.toLowerCase().includes(agentSearch.toLowerCase()))
+        : sortedAgents;
 
     return (
-        <div className="space-y-6">
+        <div className="space-y-6 relative" onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+            {/* Page-level drag overlay */}
+            {isDragOver && activeSession && (
+                <div className="fixed inset-0 z-50 bg-primary/20 backdrop-blur-sm border-4 border-dashed border-primary/60 flex items-center justify-center pointer-events-none">
+                    <div className="flex flex-col items-center gap-3 text-primary bg-background/90 px-10 py-8 rounded-2xl shadow-2xl border border-primary/30">
+                        <Paperclip className="w-12 h-12" />
+                        <p className="text-lg font-semibold">Drop files here</p>
+                        <p className="text-sm text-muted-foreground">Images, PDFs, DOCX, TXT, MD, CSV</p>
+                    </div>
+                </div>
+            )}
             {/* Header */}
             <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
@@ -1108,12 +1274,17 @@ export default function AgentsPage() {
                                     onClick={() => handleSelectAgent(agent)}
                                 >
                                     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 flex-shrink-0">
-                                        <Bot className="h-4 w-4 text-primary" />
+                                        {agent.emoji ? <span className="text-lg leading-none">{agent.emoji}</span> : <Bot className="h-4 w-4 text-primary" />}
                                     </div>
                                     <div className="flex-1 min-w-0">
-                                        <p className="text-sm font-medium truncate">{agent.name}</p>
+                                        <div className="flex items-center gap-1.5">
+                                            <p className="text-sm font-medium truncate">{agent.name}</p>
+                                            {agent.isCeo && <Badge variant="outline" className="text-[9px] px-1.5 py-0 bg-amber-500/10 text-amber-500 border-amber-500/20">CEO</Badge>}
+                                            {agent.isTester && <Badge variant="outline" className="text-[9px] px-1.5 py-0 bg-purple-500/10 text-purple-500 border-purple-500/20">QA</Badge>}
+                                        </div>
                                         <p className="text-[11px] text-muted-foreground truncate">{agent.model.split('/').pop()}</p>
                                     </div>
+                                    {!agent.isCeo && !agent.isTester && (
                                     <AlertDialog>
                                         <AlertDialogTrigger asChild>
                                             <button className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive" onClick={(e) => e.stopPropagation()}>
@@ -1125,6 +1296,7 @@ export default function AgentsPage() {
                                             <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => handleDelete(agent.id)} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">Delete</AlertDialogAction></AlertDialogFooter>
                                         </AlertDialogContent>
                                     </AlertDialog>
+                                    )}
                                 </div>
                             ))
                         )}
@@ -1139,7 +1311,7 @@ export default function AgentsPage() {
                             <div className="h-14 border-b border-border px-4 flex items-center justify-between">
                                 <div className="flex items-center gap-3">
                                     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-                                        <Bot className="h-4 w-4 text-primary" />
+                                        {selectedAgent.emoji ? <span className="text-lg leading-none">{selectedAgent.emoji}</span> : <Bot className="h-4 w-4 text-primary" />}
                                     </div>
                                     <p className="text-sm font-semibold">{selectedAgent.name}</p>
 
@@ -1285,6 +1457,13 @@ export default function AgentsPage() {
                                                     {showBrowserPreview ? 'Hide' : 'Show'} Extension
                                                 </Button>
                                             )}
+                                            {/* Session cost badge (logging only) */}
+                                            {LOGGING_ENABLED && sessionCost > 0 && (
+                                                <div className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border border-emerald-500/30 bg-emerald-500/10 text-emerald-600 h-8">
+                                                    <DollarSign className="h-3 w-3" />
+                                                    <span>Session: {sessionCost < 0.0001 ? '<$0.0001' : `$${sessionCost.toFixed(4)}`}</span>
+                                                </div>
+                                            )}
                                             {/* Debug panel toggle */}
                                             {LOGGING_ENABLED && (
                                                 <Button
@@ -1358,7 +1537,11 @@ export default function AgentsPage() {
                                                                     <div className="flex-1 min-w-0">
                                                                         <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5">
                                                                             {isStreaming && !text ? (
-                                                                                <ThinkingLoader />
+                                                                                msg.helperText ? (
+                                                                                    <TextShimmer className="font-mono text-sm" duration={1.2}>
+                                                                                        {msg.helperText}
+                                                                                    </TextShimmer>
+                                                                                ) : <ThinkingLoader />
                                                                             ) : (
                                                                                 <>
                                                                                     {cleanMessage && (
@@ -1462,8 +1645,26 @@ export default function AgentsPage() {
                                                         <Fragment key={msg.id}>
                                                             {msg.role === 'user' ? (
                                                                 <div className="flex justify-end">
-                                                                    <div className="bg-primary text-primary-foreground rounded-2xl rounded-br-sm px-4 py-2.5 max-w-[80%]">
-                                                                        <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.content}</p>
+                                                                    <div className="max-w-[80%] space-y-2">
+                                                                        {/* User attachments */}
+                                                                        {(() => {
+                                                                            const meta = msg.metadata as Record<string, unknown> | undefined;
+                                                                            const atts = meta?.attachments as Array<{ filename: string; type: string }> | undefined;
+                                                                            if (!atts?.length) return null;
+                                                                            return (
+                                                                                <div className="flex flex-wrap gap-2 justify-end">
+                                                                                    {atts.map((att, i) => (
+                                                                                        <div key={i} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-primary/80 text-primary-foreground text-xs">
+                                                                                            {att.type === "image" ? <ImageIcon className="w-3.5 h-3.5 shrink-0" /> : <FileText className="w-3.5 h-3.5 shrink-0" />}
+                                                                                            <span className="max-w-[150px] truncate">{att.filename}</span>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            );
+                                                                        })()}
+                                                                        <div className="bg-primary text-primary-foreground rounded-2xl rounded-br-sm px-4 py-2.5">
+                                                                            <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.content}</p>
+                                                                        </div>
                                                                     </div>
                                                                 </div>
                                                             ) : msg.segments && msg.segments.length > 0 ? (
@@ -1506,6 +1707,20 @@ export default function AgentsPage() {
                                                                     {(msg.content || msg.isStreaming) && renderAssistantText(msg.content, msg.isStreaming)}
                                                                 </>
                                                             )}
+                                                            {/* Per-message cost badge (logging only) */}
+                                                            {LOGGING_ENABLED && msg.role === 'assistant' && !msg.isStreaming && msg.cost && (
+                                                                <div className="flex items-center gap-1.5 mt-1.5 ml-10">
+                                                                    <Badge variant="outline" className="h-5 px-1.5 text-[10px] gap-1 font-normal text-muted-foreground border-border/60">
+                                                                        <DollarSign className="w-2.5 h-2.5" />
+                                                                        {msg.cost.totalCost < 0.0001
+                                                                            ? '<$0.0001'
+                                                                            : `$${msg.cost.totalCost.toFixed(4)}`}
+                                                                    </Badge>
+                                                                    <span className="text-[10px] text-muted-foreground/60">
+                                                                        {msg.cost.inputTokens.toLocaleString()}in / {msg.cost.outputTokens.toLocaleString()}out
+                                                                    </span>
+                                                                </div>
+                                                            )}
                                                         </Fragment>
                                                         );
                                                     })
@@ -1514,11 +1729,53 @@ export default function AgentsPage() {
                                             </div>
                                         </div>
                                         <div className="border-t border-border p-4">
-                                            <div className="max-w-5xl mx-auto relative">
-                                                <textarea ref={textareaRef} value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={handleKeyDown} placeholder={pendingApproval ? "Waiting for your approval..." : "Ask your agent..."} className="w-full resize-none rounded-xl border border-border bg-card px-4 py-3 pr-12 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring min-h-[48px] max-h-[160px] transition-colors" rows={1} disabled={sending || !!pendingApproval} />
-                                                <Button onClick={sendMessage} disabled={!chatInput.trim() || sending} size="icon" variant="ghost" className="absolute right-2 bottom-2 h-8 w-8 rounded-lg">
-                                                    {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
-                                                </Button>
+                                            <div className="max-w-5xl mx-auto">
+                                                {/* File preview strip */}
+                                                {pendingFiles.length > 0 && (
+                                                    <div className="space-y-2 mb-2">
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {pendingFiles.map((file, idx) => (
+                                                                <div key={`${file.name}-${idx}`} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-muted/60 border border-border text-xs group">
+                                                                    {file.type.startsWith("image/") ? <ImageIcon className="w-3.5 h-3.5 text-blue-500 shrink-0" /> : <FileText className="w-3.5 h-3.5 text-orange-500 shrink-0" />}
+                                                                    <span className="max-w-[120px] truncate text-foreground">{file.name}</span>
+                                                                    <span className="text-muted-foreground">({(file.size / 1024).toFixed(0)}KB)</span>
+                                                                    <button type="button" onClick={() => removeFile(idx)} className="ml-0.5 p-0.5 rounded hover:bg-destructive/10 transition-colors cursor-pointer">
+                                                                        <X className="w-3 h-3 text-muted-foreground hover:text-destructive" />
+                                                                    </button>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                        {pendingFiles.some((f) => f.type.startsWith("image/")) && (() => {
+                                                            const model = (selectedAgent?.model || "").toLowerCase();
+                                                            const visionPatterns = ["gpt-4o", "gpt-4-turbo", "gpt-4-vision", "claude-3", "claude-sonnet", "claude-opus", "claude-haiku", "gemini", "gemma", "llava", "pixtral", "qwen-vl", "qwen2-vl"];
+                                                            const supportsVision = !model || visionPatterns.some((p) => model.includes(p));
+                                                            if (!supportsVision) return (
+                                                                <p className="text-xs text-amber-600 dark:text-amber-400">
+                                                                    This model may not support image input. Images will be skipped. Consider switching to a vision model (GPT-4o, Claude 3, Gemini).
+                                                                </p>
+                                                            );
+                                                            return null;
+                                                        })()}
+                                                    </div>
+                                                )}
+                                                <div className="relative">
+                                                    <textarea ref={textareaRef} value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={handleKeyDown} placeholder={pendingApproval ? "Waiting for your approval..." : pendingFiles.length > 0 ? "Add a message about the file(s)…" : "Ask your agent..."} className="w-full resize-none rounded-xl border border-border bg-card px-4 py-3 pr-24 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring min-h-[48px] max-h-[160px] transition-colors" rows={1} disabled={sending || !!pendingApproval} />
+                                                    <input ref={fileInputRef} type="file" multiple accept={ACCEPTED_EXTENSIONS} className="hidden" onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }} />
+                                                    <div className="absolute right-2 bottom-2 flex items-center gap-1">
+                                                        <Button onClick={() => fileInputRef.current?.click()} size="icon" variant="ghost" className="h-8 w-8 rounded-lg" title="Attach files">
+                                                            <Paperclip className="h-4 w-4 text-muted-foreground" />
+                                                        </Button>
+                                                        {sending ? (
+                                                            <Button onClick={stopRun} size="icon" variant="ghost" className="h-8 w-8 rounded-lg" title="Stop agent">
+                                                                <Square className="h-3.5 w-3.5 fill-current" />
+                                                            </Button>
+                                                        ) : (
+                                                            <Button onClick={sendMessage} disabled={(!chatInput.trim() && pendingFiles.length === 0)} size="icon" variant="ghost" className="h-8 w-8 rounded-lg">
+                                                                <ArrowUp className="h-4 w-4" />
+                                                            </Button>
+                                                        )}
+                                                    </div>
+                                                </div>
                                             </div>
                                         </div>
                                         </div>
@@ -1583,8 +1840,8 @@ export default function AgentsPage() {
                                     </div>
                                     <div>
                                         <h3 className="text-sm font-medium text-muted-foreground mb-2">System Prompt</h3>
-                                        <div className="rounded-lg bg-muted/50 border border-border p-4">
-                                            <p className="text-sm leading-relaxed whitespace-pre-wrap">
+                                        <div className="rounded-lg bg-muted/50 border border-border p-4 max-h-[300px] overflow-y-auto">
+                                            <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
                                                 {selectedAgent.systemPrompt || <span className="text-muted-foreground italic">No system prompt configured.</span>}
                                             </p>
                                         </div>

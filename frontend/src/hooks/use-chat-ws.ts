@@ -9,6 +9,21 @@ import { API_URL, LOGGING_ENABLED } from '@/lib/constants';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+export interface ChatAttachment {
+    filename: string;
+    mimetype: string;
+    type: 'image' | 'document';
+    size: number;
+    /** For local preview only (not persisted) */
+    previewUrl?: string;
+}
+
+export interface MessageCost {
+    inputTokens: number;
+    outputTokens: number;
+    totalCost: number;
+}
+
 export interface ChatMessage {
     id: string;
     role: 'user' | 'assistant';
@@ -19,6 +34,9 @@ export interface ChatMessage {
         segments?: StreamSegment[];
         approvalRequest?: unknown;
         thinking?: string;
+        helperText?: string;
+        attachments?: ChatAttachment[];
+        cost?: MessageCost;
     };
 }
 
@@ -121,7 +139,9 @@ async function connectSSE(
     onDone: () => void,
     onDebug?: (info: AgentDebugInfo) => void,
     onRawEvent?: (type: string, data: unknown) => void,
-    fromIndex?: number
+    fromIndex?: number,
+    onHelperText?: (text: string) => void,
+    onCost?: (cost: MessageCost) => void,
 ): Promise<void> {
     const token = getToken();
     const baseUrl = `${API_URL}/api/runs/${runId}/events`;
@@ -167,6 +187,8 @@ async function connectSSE(
                 try {
                     const data = JSON.parse(payload);
                     if (data.debug && onDebug) onDebug(data.debug as AgentDebugInfo);
+                    if (data.helperText && onHelperText) onHelperText(data.helperText as string);
+                    if (data.cost && onCost) onCost(data.cost as MessageCost);
                     if (data.content) onContent(data.content as string);
                     if (data.toolCall) onToolCall(data.toolCall as StreamToolCall);
                     if (data.approvalRequest) onApprovalRequest(data.approvalRequest);
@@ -439,7 +461,27 @@ export function useChatWs(sessionKey: string) {
                     }]);
                 } : undefined,
                 // fromIndex — skip already-seen events on reconnect
-                reconnect?.fromEventIndex
+                reconnect?.fromEventIndex,
+                // onHelperText
+                (text) => {
+                    setMessages((prev) =>
+                        prev.map((m) =>
+                            m.id === thinkingId
+                                ? { ...m, metadata: { ...m.metadata, helperText: text } }
+                                : m
+                        )
+                    );
+                },
+                // onCost
+                (costData) => {
+                    setMessages((prev) =>
+                        prev.map((m) =>
+                            m.id === thinkingId
+                                ? { ...m, metadata: { ...m.metadata, cost: costData } }
+                                : m
+                        )
+                    );
+                },
             ).catch(() => {
                 // SSE failed entirely — polling fallback will pick it up
                 console.warn('[SSE] connection failed, relying on polling fallback');
@@ -594,8 +636,8 @@ export function useChatWs(sessionKey: string) {
     // ── Send a message ──────────────────────────────────────────────────────
 
     const sendMessage = useCallback(
-        async (text: string) => {
-            if (!workspaceId || !text.trim() || isLoading) return;
+        async (text: string, files?: File[]) => {
+            if (!workspaceId || (!text.trim() && (!files || files.length === 0)) || isLoading) return;
 
             const agentId = parseAgentId(sessionKey);
 
@@ -617,10 +659,25 @@ export function useChatWs(sessionKey: string) {
                 }
             }
 
+            // Build attachment metadata for display
+            const attachmentMeta: ChatAttachment[] | undefined = files?.map((f) => ({
+                filename: f.name,
+                mimetype: f.type,
+                type: (f.type.startsWith('image/') ? 'image' : 'document') as 'image' | 'document',
+                size: f.size,
+                previewUrl: f.type.startsWith('image/') ? URL.createObjectURL(f) : undefined,
+            }));
+
             // Optimistic user message
             setMessages((prev) => [
                 ...prev,
-                { id: generateId(), role: 'user', content: text, status: 'done' },
+                {
+                    id: generateId(),
+                    role: 'user',
+                    content: text || 'Please analyze the attached file(s).',
+                    status: 'done',
+                    ...(attachmentMeta?.length ? { metadata: { attachments: attachmentMeta } } : {}),
+                },
             ]);
 
             // Log the outgoing message
@@ -629,15 +686,15 @@ export function useChatWs(sessionKey: string) {
                     id: generateId(),
                     timestamp: Date.now(),
                     type: 'system',
-                    summary: `User message sent (${text.length} chars)`,
-                    data: { message: text },
+                    summary: `User message sent (${text.length} chars${files?.length ? `, ${files.length} file(s)` : ''})`,
+                    data: { message: text, files: files?.map((f) => f.name) },
                 }]);
             }
 
             setIsLoading(true);
 
             try {
-                const result = await sendChat(workspaceId, sessionId, text);
+                const result = await sendChat(workspaceId, sessionId, text || 'Please analyze the attached file(s).', files);
                 const runId = (result as { runId: string }).runId;
                 watchRun(runId, sessionId);
             } catch {

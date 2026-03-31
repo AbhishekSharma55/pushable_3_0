@@ -400,8 +400,8 @@ function BrowserTab({
               value={browserPrompt}
               onChange={(e) => setBrowserPrompt(e.target.value)}
               placeholder="Leave empty to use default browser agent prompt. Add custom instructions here to append to the built-in prompt..."
-              rows={4}
-              className={cn(inputCls, 'resize-none')}
+              rows={8}
+              className={cn(inputCls, 'resize-y min-h-[160px]')}
             />
           </FormField>
         </div>

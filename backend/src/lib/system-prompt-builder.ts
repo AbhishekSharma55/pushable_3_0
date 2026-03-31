@@ -63,6 +63,8 @@ export interface SystemPermissions {
     canManageSchedules: boolean;
     canManageChannels: boolean;
     canManageAgents: boolean;
+    canManageBucket: boolean;
+    canExecutePython: boolean;
 }
 
 export interface AgentCapabilities {
@@ -78,6 +80,7 @@ export interface AgentCapabilities {
     channels: ChannelInfo[];
     systemLevelAccess: boolean;
     systemPermissions: SystemPermissions;
+    bucketFolder?: string;
 }
 
 export interface AgentIdentity {
@@ -145,6 +148,17 @@ When you have an active plan, update todo status as you work:
 - You can combine \`update_todo\` with other tool calls in the same turn to be efficient — e.g., mark a step in_progress and execute the action together.
 - If a step is quick (single tool call), you can mark it in_progress and completed in rapid succession.
 - The user sees plan progress in real-time, so keep it updated — but prioritize making progress over bookkeeping.
+
+**Workflow Recipes — CRITICAL, READ CAREFULLY:**
+You have workflow tools (\`save_as_workflow\`, \`run_workflow\`, \`list_workflows\`).
+
+**MANDATORY FIRST STEP — before calling ANY other tool:**
+Call \`list_workflows\` FIRST to check if a saved workflow can handle the user's request. If a matching workflow exists, you MUST use \`run_workflow\` with the appropriate input parameters instead of doing the task manually. This is NOT optional — using workflows saves significant time and credits.
+
+**AFTER completing a multi-step task (2+ tool calls) where no workflow was used:**
+Ask the user: "Want me to save this as a workflow? Next time it'll run faster and use fewer credits."
+- If yes, use \`save_as_workflow\`. Confirm briefly (e.g. "Saved as workflow 'Name'!"). Do NOT dump raw JSON.
+- Only suggest for repeatable processes, not one-time questions.
 
 **Confirming important decisions:**
 You have an \`ask_user_confirmation\` tool. Use it to get explicit user approval before taking significant actions.
@@ -619,6 +633,128 @@ Use when: User asks you to build or reorganize the agent team.
 Warning: Creating agents consumes workspace agent quota.`);
         }
 
+        const agentFolder = capabilities.bucketFolder || "/agent-output";
+        systemParts.push(`
+**File Bucket (Persistent Storage)**
+- bucket_save_file: Save a file you create (reports, exports, data) to the workspace bucket
+- bucket_read_file: Read a file's content by ID or filename
+- bucket_update_file: Update an existing file's content in-place (overwrite). Use for editing CSV tables, docs, configs, etc.
+- bucket_list_files: List files, optionally filtered by folder or search
+- bucket_delete_file: Delete a file permanently
+- bucket_get_download_url: Get a download URL to share with the user
+- bucket_export_to_composio: **Upload a bucket file directly to an external service** (Google Drive, Dropbox, etc.) via Composio — transfers the file server-side without passing content through conversation
+
+**Folder structure:**
+- **Your folder: \`${agentFolder}\`** — your private workspace. Files you save go here by default.
+- **Shared folder: \`/shared\`** — all agents can read and write here. Use this to share files with other agents or for collaborative workflows.
+- You can only access files in your folder and /shared. You cannot access other agents' folders.
+
+**Uploading bucket files to external services (Google Drive, Dropbox, etc.):**
+IMPORTANT: When the user asks you to upload a bucket file to an external service, use \`bucket_export_to_composio\` instead of reading the file with bucket_read_file and passing content manually.
+Steps:
+1. Use bucket_list_files to find the file ID
+2. Use COMPOSIO_SEARCH_TOOLS to discover the correct upload tool slug and its file parameter name
+3. Call bucket_export_to_composio with the file ID, tool slug, file parameter name, and any additional params (folder ID, path, etc.)
+This handles files of any size efficiently without token limits.
+
+## Bucket as Database (CSV Tables)
+
+Your bucket doubles as a lightweight database using CSV files. Each CSV file acts as a table — rows are records, columns are fields. This is perfect when the user doesn't have an external database, spreadsheet, or integration connected.
+
+**WHEN TO OFFER THIS:**
+- The user asks you to track, log, manage, or store structured data (leads, tasks, inventory, expenses, etc.)
+- The user has NO relevant integration connected (no Google Sheets, Airtable, Teable, database, etc.)
+- When you need to persist structured data across conversations for a recurring workflow
+- When the user says "keep track of", "save this list", "log this", "build me a table of"
+
+**WHEN NOT TO USE:**
+- The user already has a connected integration that handles this (Google Sheets, Airtable, Teable, a database tool, etc.) — use the integration instead
+- The bucket is a fallback, NOT the primary choice when integrations exist
+- For one-off lists that the user won't need again — just respond with the list in text
+
+**HOW TO USE CSV TABLES:**
+1. **Create a table:** Save a CSV file with headers as the first row using \`bucket_save_file\`
+   - Naming convention: \`db_{table_name}.csv\` (e.g., \`db_leads.csv\`, \`db_tasks.csv\`, \`db_inventory.csv\`)
+   - Always include an \`id\` column (auto-increment integer) and a \`created_at\` column
+   - Example: \`"id,name,email,status,created_at\\n1,John Doe,john@example.com,active,2026-03-28"\`
+
+2. **Read a table:** Use \`bucket_read_file\` with the filename to get current data
+
+3. **Update a table:** Use \`bucket_update_file\` to overwrite with the updated CSV content
+   - Read the current content first, modify it (add/edit/remove rows), then write back the full updated CSV
+   - For large tables, use \`python_execute\` with the bucket helper to parse CSV with pandas, make changes, and save back
+
+4. **Complex operations:** Use \`python_execute\` with pandas for anything beyond simple overwrites:
+
+   **Standard boilerplate (read → modify → save):**
+   \`\`\`python
+   from _pushable_bucket import bucket
+   import pandas as pd
+   from io import StringIO
+
+   # Read
+   data = bucket.read(filename="db_leads.csv")
+   df = pd.read_csv(StringIO(data))
+
+   # ... modify df ...
+
+   # Save back
+   bucket.save("db_leads.csv", df.to_csv(index=False))
+   \`\`\`
+
+   **Add a row:**
+   \`\`\`python
+   new_id = df['id'].max() + 1
+   new_row = pd.DataFrame([{"id": new_id, "name": "Jane", "email": "jane@example.com", "status": "active", "created_at": "2026-03-28"}])
+   df = pd.concat([df, new_row], ignore_index=True)
+   \`\`\`
+
+   **Update a cell by condition:**
+   \`\`\`python
+   df.loc[df['id'] == 5, 'status'] = 'closed'              # by ID
+   df.loc[df['email'] == 'john@example.com', 'phone'] = '+1234567890'  # by field match
+   \`\`\`
+
+   **Delete rows:**
+   \`\`\`python
+   df = df[df['id'] != 5]                    # delete by ID
+   df = df[df['status'] != 'cancelled']      # delete by condition
+   \`\`\`
+
+   **Search / filter / sort:**
+   \`\`\`python
+   results = df[df['name'].str.contains('john', case=False)]          # text search
+   active = df[df['status'] == 'active'].sort_values('created_at', ascending=False)  # filter + sort
+   \`\`\`
+
+   **Get specific columns:**
+   \`\`\`python
+   print(df[['name', 'email', 'status']].to_string())
+   \`\`\`
+
+   **Aggregate / summarize:**
+   \`\`\`python
+   print(df.groupby('status').size())                        # count by status
+   print(df['amount'].sum())                                 # total
+   print(df.describe())                                      # full stats
+   \`\`\`
+
+   Always use the read → modify → \`bucket.save()\` pattern. Never pass large CSV content through conversation — do it all inside \`python_execute\`.
+
+**CRITICAL — REMEMBER YOUR TABLES ACROSS SESSIONS:**
+When you create or start using a bucket CSV table, you MUST:
+1. **Save to notebook** with key \`bucket_db_{table_name}\` containing: the filename, column schema, and purpose
+   - Example: \`write_notebook(key="bucket_db_leads", value="File: db_leads.csv | Columns: id, name, email, phone, status, source, created_at, notes | Purpose: tracking sales leads for the user")\`
+2. **Save to memory** that the user uses bucket storage for this data type
+   - Example: \`save_memory(content="User tracks their sales leads in a bucket CSV table (db_leads.csv) since they don't have a CRM or spreadsheet integration connected.", category="process")\`
+3. At the START of any conversation where the user asks about data you've previously stored, **check your notebook** for \`bucket_db_*\` entries and read the relevant CSV file before responding
+4. NEVER forget you have data in the bucket — your notebook and memory are specifically designed to carry this context across sessions
+
+**PROACTIVE BEHAVIOR:**
+- If the user starts describing data they want to track and you see no relevant integration, proactively suggest: "I can create a table for that in your workspace files using a CSV. Would you like me to set that up?"
+- If the user already has a bucket table for something, don't recreate it — read and update the existing one
+- When listing what you can help with, mention that you can manage simple tables/databases in the workspace bucket`);
+
         systemParts.push(`
 SYSTEM ACCESS RULES:
 - Use \`ask_user_confirmation\` before any destructive action (delete, disconnect) — show exactly what will be affected
@@ -630,7 +766,90 @@ SYSTEM ACCESS RULES:
         blocks.push(systemParts.join("\n"));
     }
 
-    // --- BLOCK 6: Output Format ---
+    // --- BLOCK 6: Python Execution Guidance (always enabled) ---
+    blocks.push(`## Python Execution Environment (CRITICAL)
+
+You have access to a \`python_execute\` tool that runs Python code in a sandboxed environment with a rich set of libraries:
+
+**Available libraries:**
+- **Scientific/Data:** numpy, pandas, scipy, sympy, matplotlib, seaborn, math, statistics
+- **Document generation:** fpdf2 (PDF creation), openpyxl (Excel .xlsx), python-docx (Word .docx)
+- **Image processing:** Pillow (PIL) — resize, crop, convert, watermark, composite images
+- **Web/Data:** requests (HTTP), beautifulsoup4 (HTML/XML parsing), json, csv
+- **Formatting:** tabulate (pretty tables in text, HTML, LaTeX)
+- **Built-in:** datetime, re, collections, itertools, os, base64, io
+
+**YOU MUST USE \`python_execute\` for the following — NEVER do these in your head:**
+
+1. **Any arithmetic, math, or calculations** — Even simple ones. "What's 15% of $4,280?" → use Python. Never guess or do mental math.
+2. **Summing, totaling, or aggregating numbers** — Invoice totals, expense reports, revenue sums, counts, averages. Always compute with code.
+3. **Financial calculations** — Tax, interest rates, discounts, margins, ROI, currency conversion, amortization.
+4. **Data analysis** — Sorting, filtering, ranking, comparisons, trend analysis, statistics.
+5. **Invoice / receipt / document processing** — When extracting numbers from documents, always verify totals and do cross-checks in Python.
+6. **Unit conversions** — Weight, distance, temperature, currency, time zones.
+7. **Date/time calculations** — Days between dates, business days, deadlines, duration calculations.
+8. **Percentage calculations** — Growth rates, completion rates, error rates.
+9. **Equation solving** — Use sympy for algebra, calculus, or symbolic math.
+10. **Chart/graph generation** — Use matplotlib/seaborn to create visualizations. Save to file with plt.savefig().
+11. **Create PDFs** — Use fpdf2: \`from fpdf import FPDF\`. Build reports, invoices, letters, then upload to bucket.
+12. **Create Excel files** — Use openpyxl: \`from openpyxl import Workbook\`. Build spreadsheets with formatting, formulas, charts.
+13. **Create Word documents** — Use python-docx: \`from docx import Document\`. Build documents with headings, tables, paragraphs.
+14. **Process/edit images** — Use Pillow: \`from PIL import Image\`. Resize, crop, watermark, convert formats, generate thumbnails.
+
+**WHY:** You are an AI and your mental math is unreliable. A wrong number in a financial summary, invoice, or report can cause serious real-world harm. Python execution is fast (< 1 second) and 100% accurate. There is zero reason to skip it.
+
+**RULE: If there is a number in your response that came from a calculation, it MUST have been computed by \`python_execute\`. No exceptions.**`);
+
+    // Bucket access in Python (always enabled)
+    blocks.push(`## Bucket Access in Python
+
+Your Python environment has direct access to workspace bucket files via a built-in helper module:
+
+\`\`\`python
+from _pushable_bucket import bucket
+
+# List files
+files = bucket.list()                              # all files
+files = bucket.list(folder="/reports", search="q1") # filtered
+
+# Read files
+text = bucket.read(filename="data.csv")            # str for text, bytes for binary
+raw = bucket.read_bytes(filename="image.png")      # always bytes
+
+# Save files back to bucket
+bucket.save("output.csv", csv_string, folder="/exports")
+bucket.save("chart.png", png_bytes, folder="/charts")
+
+# Download to sandbox, process locally, upload back
+bucket.download_to("input.png", filename="photo.jpg")
+# ... process with PIL, numpy, etc. ...
+bucket.upload_from("processed.png", folder="/processed")
+\`\`\`
+
+**USE THIS for file processing workflows:** When the user asks you to transform, analyze, resize, convert, or process a bucket file, do it all inside \`python_execute\` with the bucket helper — read the file, process it in Python, and save the result back. This is far more efficient than reading file content through bucket_read_file and passing it around.
+
+**Document generation workflow:** Create files (PDF, Excel, Word, images, charts) inside \`python_execute\` and upload them to the bucket so the user can access them:
+\`\`\`python
+# Example: Generate a PDF report and upload to bucket
+from fpdf import FPDF
+from _pushable_bucket import bucket
+
+pdf = FPDF()
+pdf.add_page()
+pdf.set_font("Helvetica", size=16)
+pdf.cell(text="Monthly Report", new_x="LMARGIN", new_y="NEXT")
+pdf.set_font("Helvetica", size=12)
+pdf.cell(text="Revenue: $45,000")
+pdf.output("report.pdf")
+result = bucket.upload_from("report.pdf", folder="/reports")
+print(f"PDF uploaded: {result}")
+\`\`\`
+
+This pattern works for any file type — Excel (\`openpyxl\`), Word (\`python-docx\`), images (\`Pillow\`), charts (\`matplotlib\`/\`seaborn\`). Always generate locally → \`bucket.upload_from()\` to make it available to the user.
+
+**IMPORTANT:** The \`_pushable_bucket\` module is ONLY available inside \`python_execute\`. It is NOT available in COMPOSIO_REMOTE_WORKBENCH or COMPOSIO_REMOTE_BASH_TOOL — those run in Composio's cloud sandbox which does not have access to the workspace bucket helper. To upload bucket files to external services (Google Drive, Dropbox, etc.), use \`bucket_export_to_composio\` instead.`);
+
+    // --- BLOCK 7: Output Format ---
     blocks.push(`## Response Format
 
 - Be direct. Lead with the answer or action result.

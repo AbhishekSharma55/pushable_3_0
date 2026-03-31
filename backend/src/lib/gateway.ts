@@ -25,6 +25,50 @@ export function toClaudeModelId(modelId: string): string {
     return stripped.replace(/\./g, "-");
 }
 
+// ── Prompt caching ────────────────────────────────────────────
+
+/**
+ * Custom fetch wrapper for OpenRouter that injects `cache_control` into
+ * the first content block of the system message. This works around
+ * `@langchain/openai`'s ChatOpenAI stripping unknown fields during
+ * message serialization.
+ *
+ * Convention: The agent graph sends the system message with 2 content blocks:
+ *   [0] = stable (cacheable) text  →  gets `cache_control: { type: "ephemeral" }`
+ *   [1] = dynamic (per-turn) text  →  no cache_control
+ *
+ * OpenRouter passes `cache_control` through to Anthropic, enabling
+ * ~90% input token cost savings on the cached prefix.
+ */
+function createCacheControlFetch(): typeof globalThis.fetch {
+    return async (input, init) => {
+        if (init?.body && typeof init.body === "string") {
+            try {
+                const body = JSON.parse(init.body);
+                if (Array.isArray(body.messages)) {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    const systemMsg = body.messages.find((m: any) => m.role === "system");
+                    if (
+                        systemMsg &&
+                        Array.isArray(systemMsg.content) &&
+                        systemMsg.content.length >= 2 &&
+                        systemMsg.content[0]?.type === "text"
+                    ) {
+                        systemMsg.content[0] = {
+                            ...systemMsg.content[0],
+                            cache_control: { type: "ephemeral" },
+                        };
+                        init = { ...init, body: JSON.stringify(body) };
+                    }
+                }
+            } catch {
+                // Not JSON or malformed — pass through unchanged
+            }
+        }
+        return globalThis.fetch(input, init);
+    };
+}
+
 // ── LLM factory ────────────────────────────────────────────────
 
 interface CreateLLMOptions {
@@ -81,6 +125,7 @@ export function createLLM(options: CreateLLMOptions) {
             return {
                 llm: build(),
                 isClaudeDirect: true,
+                supportsPromptCaching: true,
                 recreate: build,
             };
         }
@@ -110,6 +155,7 @@ export function createLLM(options: CreateLLMOptions) {
         return {
             llm: build(),
             isClaudeDirect: true,
+            supportsPromptCaching: true,
             recreate: build,
         };
     }
@@ -121,13 +167,17 @@ export function createLLM(options: CreateLLMOptions) {
         throw new Error("OPENROUTER_KEY is not set in environment");
     }
 
-    logger.info({ modelId, isOpenRouter }, "Using OpenRouter gateway");
+    // Enable prompt caching for Anthropic models on OpenRouter via custom fetch
+    const usePromptCaching = isOpenRouter && isAnthropicModel(modelId);
+
+    logger.info({ modelId, isOpenRouter, promptCaching: usePromptCaching }, "Using OpenRouter gateway");
 
     const build = () =>
         new ChatOpenAI({
             model: modelId,
             temperature,
             streaming,
+            streamUsage: streaming,
             maxRetries,
             apiKey: isOpenRouter
                 ? process.env.OPENROUTER_KEY
@@ -140,11 +190,12 @@ export function createLLM(options: CreateLLMOptions) {
                           "HTTP-Referer": "https://pushable.ai",
                           "X-Title": "Pushable AI",
                       },
+                      ...(usePromptCaching ? { fetch: createCacheControlFetch() } : {}),
                   }
                 : { apiKey: process.env.OPENAI_API_KEY },
         });
 
-    return { llm: build(), isClaudeDirect: false, recreate: build };
+    return { llm: build(), isClaudeDirect: false, supportsPromptCaching: usePromptCaching, recreate: build };
 }
 
 // ── Raw API call (for utility functions like nl-to-cron) ───────

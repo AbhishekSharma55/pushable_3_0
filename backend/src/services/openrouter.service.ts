@@ -147,4 +147,57 @@ export const openrouterService = {
                 m.name.toLowerCase().includes(lowerQuery)
         );
     },
+
+    /**
+     * Check if a model supports image input (vision).
+     * Uses the cached model list to check architecture.input_modalities.
+     * For Anthropic direct models, vision is assumed (Claude 3+ all support it).
+     */
+    async supportsVision(modelId: string): Promise<boolean> {
+        // All Claude 3+ models support vision
+        if (modelId.startsWith("anthropic/") || modelId.startsWith("claude-")) {
+            return true;
+        }
+
+        try {
+            const models = await this.getModels();
+            const model = models.find((m) => m.id === modelId);
+            if (model) {
+                return model.architecture.input_modalities.includes("image");
+            }
+        } catch {
+            // If we can't check, assume vision is supported to avoid blocking
+            logger.warn({ modelId }, "Could not check vision support, assuming true");
+        }
+
+        return true; // Default to true — the LLM will return an error if unsupported
+    },
+
+    /**
+     * Get model capabilities (vision, etc.) for the frontend.
+     */
+    async getModelCapabilities(modelId: string): Promise<{
+        supportsVision: boolean;
+        inputModalities: string[];
+    }> {
+        // Anthropic direct models
+        if (modelId.startsWith("anthropic/") || modelId.startsWith("claude-")) {
+            return { supportsVision: true, inputModalities: ["text", "image"] };
+        }
+
+        try {
+            const models = await this.getModels();
+            const model = models.find((m) => m.id === modelId);
+            if (model) {
+                return {
+                    supportsVision: model.architecture.input_modalities.includes("image"),
+                    inputModalities: model.architecture.input_modalities,
+                };
+            }
+        } catch {
+            logger.warn({ modelId }, "Could not fetch model capabilities");
+        }
+
+        return { supportsVision: true, inputModalities: ["text"] };
+    },
 };

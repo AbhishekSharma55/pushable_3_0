@@ -743,11 +743,13 @@ function MessageBubble({
   sessionId,
   agentId,
   workspaceId,
+  agentEmoji,
 }: {
   msg: ChatMessage;
   sessionId?: string | null;
   agentId?: string | null;
   workspaceId?: string;
+  agentEmoji?: string;
 }) {
   const isUser = msg.role === "user";
   const toolCalls = msg.metadata?.toolCalls ?? [];
@@ -795,7 +797,11 @@ function MessageBubble({
       {/* Assistant avatar */}
       {!isUser && (
         <div className="w-7 h-7 rounded-full bg-primary/10 border border-border flex items-center justify-center shrink-0 mt-1">
-          <Bot className="w-4 h-4 text-primary" />
+          {agentEmoji ? (
+            <span className="text-sm leading-none">{agentEmoji}</span>
+          ) : (
+            <Bot className="w-4 h-4 text-primary" />
+          )}
         </div>
       )}
 
@@ -1321,7 +1327,7 @@ export function ChatComponent({
           )}
 
           {visibleMessages.map((msg) => (
-            <MessageBubble key={msg.id} msg={msg} sessionId={chatSessionId} agentId={currentAgentId} workspaceId={workspace?.id} />
+            <MessageBubble key={msg.id} msg={msg} sessionId={chatSessionId} agentId={currentAgentId} workspaceId={workspace?.id} agentEmoji={currentAgent?.identity?.emoji} />
           ))}
 
           <div ref={bottomRef} />

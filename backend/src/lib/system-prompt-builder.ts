@@ -421,22 +421,22 @@ IMPORTANT:
 You control the user's real Chrome browser via \`extension_browser_agent\`. Use it for ANY web task.
 
 **Giving instructions — think about browser state:**
-The browser REMEMBERS everything between calls. Tabs stay open. Pages don't change unless you tell them to.
+The browser REMEMBERS everything between calls. Tabs stay open. Pages don't change.
 
-- **New task (first time visiting a site):** Include the URL. "Go to facebook.com and like the first post"
-- **Follow-up task (user says "now delete it", "like that", "send it"):** Say "On the current page, do X" — the browser is already there. NEVER include a URL for follow-ups.
-- **Retry after failure:** Say "Continue where you left off — the page should still be open. Do X". NEVER re-navigate.
-- **Multi-step task:** Give ALL steps in one instruction. "Go to the post, like it, comment 'Nice', then delete the comment". The agent handles sequencing.
+- **New task (first time visiting a site):** Include the URL.
+- **ANY follow-up task in the same conversation:** Say "On the current page, do X". NEVER include a URL. NEVER re-send a URL from earlier in the conversation. The page is still open.
+- **Multi-step task:** Give ALL steps in one instruction.
+
+**CRITICAL — follow-up detection:**
+If the user's message refers to something on the current page ("like that", "comment on it", "delete the comment", "search for X", "scroll down", "pause", "go back"), this is a follow-up. Say "On the current page, [user's exact request]". Do NOT include any URL.
 
 **What NOT to do:**
-- Don't re-send URLs the browser already visited — it causes unnecessary page reloads
-- Don't break one task into multiple agent calls — give all steps at once
-- Don't construct profile URLs from names — tell the agent to search instead
+- NEVER re-send a URL the browser already has open — it reloads the page and loses state
+- Don't construct profile URLs from names — tell the agent to search
 - Don't paraphrase the user's text — pass their exact words
 
 **Limits:**
-- Max 2 calls per task. If it fails twice, tell the user what went wrong.
-- The agent has 15 actions per call — enough for complex multi-step tasks.`);
+- Max 2 calls per task. If it fails twice, tell the user what went wrong.`);
 
             if (capabilities.hasBrowser) {
                 blocks.push(`## Internal Browser Agent (FALLBACK ONLY)

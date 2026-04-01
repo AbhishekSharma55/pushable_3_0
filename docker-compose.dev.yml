@@ -67,6 +67,7 @@ services:
       BRIDGE_API_KEY: ""
       EXTENSION_BRIDGE_URL: ws://extension-bridge:3001
       CDP_ANALYZER_URL: ${CDP_ANALYZER_URL:-http://cdp-analyzer:5050}
+      DEFAULT_BROWSER_AGENT_MODEL: ${DEFAULT_BROWSER_AGENT_MODEL:-google/gemini-2.5-flash}
       EXTENSION_BRIDGE_PUBLIC_URL: ${EXTENSION_BRIDGE_PUBLIC_URL:-ws://localhost:3004}
       BW_DEVICE_ID: "b661b739-3e2c-4517-9ec0-63cb10842b84"
       BW_DATA_ROOT: /data/bw-sessions

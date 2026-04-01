@@ -1,8 +1,8 @@
 name: Claude Auto Bug Fix
 
 on:
-  issues:
-    types: [assigned]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
@@ -11,27 +11,32 @@ permissions:
 
 jobs:
   claude-fix:
-    if: github.event.assignee.login == 'claude[bot]'
+    # Only triggers when comment contains @claude and is on an issue (not a PR)
+    if: |
+      contains(github.event.comment.body, '@claude') &&
+      github.event.issue.pull_request == null
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Run Claude Bug Fix
         uses: anthropics/claude-code-action@beta
+        env:
+          ANTHROPIC_THINKING_EFFORT: medium
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: '--model opusplan'
-          env:
-            ANTHROPIC_THINKING_EFFORT: medium
           prompt: |
-            A bug has been assigned to you. Fix it completely.
+            A bug has been reported. Someone tagged you with @claude to fix it.
 
             Issue #${{ github.event.issue.number }}
             Title: ${{ github.event.issue.title }}
             Description:
             ${{ github.event.issue.body }}
+
+            Comment that triggered you:
+            ${{ github.event.comment.body }}
 
             Instructions:
             1. Read the issue description and any images carefully

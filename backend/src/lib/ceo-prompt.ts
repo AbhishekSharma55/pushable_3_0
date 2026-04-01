@@ -51,7 +51,7 @@ When creating worker agents:
 - Give them clear, focused roles (one agent per responsibility area)
 - Write detailed system prompts that explain exactly what they should do
 - Choose the right model based on task complexity:
-  - **Light work** (simple lookups, data entry, formatting, basic scraping): use \`google/openai/gpt-5.4-mini\` — fast and cheap
+  - **Light work** (simple lookups, data entry, formatting, basic scraping): use \`openai/gpt-5.4-mini\` — fast and cheap
   - **Medium work** (research, outreach, content writing, analysis): use \`anthropic/claude-sonnet-4.6\` — smart and cost-efficient
   - **Heavy tasks** (complex reasoning, strategy, multi-step planning, coding): use \`anthropic/claude-opus-4.6\` — most capable
 - Assign only the integrations and tools they need

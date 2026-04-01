@@ -1,21 +1,21 @@
-'use server'
+'use server';
 
-import pool from '@/lib/db'
+import pool from '@/lib/db';
 
 // ─── LLM Models ─────────────────────────────────────────────────────
 
 export interface LLMModel {
-  id: string
-  model_id: string
-  display_name: string
-  provider: string
-  description: string | null
-  multiplier: number
-  context_window: number | null
-  is_active: boolean
-  minimum_plan: string
-  is_featured: boolean
-  sort_order: number
+  id: string;
+  model_id: string;
+  display_name: string;
+  provider: string;
+  description: string | null;
+  multiplier: number;
+  context_window: number | null;
+  is_active: boolean;
+  minimum_plan: string;
+  is_featured: boolean;
+  sort_order: number;
 }
 
 export async function getLLMModels(): Promise<LLMModel[]> {
@@ -25,112 +25,167 @@ export async function getLLMModels(): Promise<LLMModel[]> {
            is_featured, sort_order
     FROM llm_models
     ORDER BY sort_order ASC, display_name ASC
-  `)
-  return rows
+  `);
+  return rows;
 }
 
 export async function createLLMModel(data: {
-  model_id: string; display_name: string; provider: string; description?: string
-  multiplier: number; context_window?: number; is_active: boolean
-  minimum_plan: string; is_featured: boolean; sort_order: number
+  model_id: string;
+  display_name: string;
+  provider: string;
+  description?: string;
+  multiplier: number;
+  context_window?: number;
+  is_active: boolean;
+  minimum_plan: string;
+  is_featured: boolean;
+  sort_order: number;
 }) {
-  await pool.query(`
+  await pool.query(
+    `
     INSERT INTO llm_models (model_id, display_name, provider, description,
       multiplier, context_window, is_active, minimum_plan, is_featured, sort_order)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-  `, [data.model_id, data.display_name, data.provider, data.description || null,
-      data.multiplier, data.context_window || null, data.is_active,
-      data.minimum_plan, data.is_featured, data.sort_order])
+  `,
+    [
+      data.model_id,
+      data.display_name,
+      data.provider,
+      data.description || null,
+      data.multiplier,
+      data.context_window || null,
+      data.is_active,
+      data.minimum_plan,
+      data.is_featured,
+      data.sort_order,
+    ],
+  );
 }
 
-export async function updateLLMModel(id: string, data: {
-  model_id: string; display_name: string; provider: string; description?: string
-  multiplier: number; context_window?: number; is_active: boolean
-  minimum_plan: string; is_featured: boolean; sort_order: number
-}) {
-  await pool.query(`
+export async function updateLLMModel(
+  id: string,
+  data: {
+    model_id: string;
+    display_name: string;
+    provider: string;
+    description?: string;
+    multiplier: number;
+    context_window?: number;
+    is_active: boolean;
+    minimum_plan: string;
+    is_featured: boolean;
+    sort_order: number;
+  },
+) {
+  await pool.query(
+    `
     UPDATE llm_models SET model_id=$1, display_name=$2, provider=$3, description=$4,
       multiplier=$5, context_window=$6, is_active=$7, minimum_plan=$8,
       is_featured=$9, sort_order=$10, updated_at=now()
     WHERE id=$11
-  `, [data.model_id, data.display_name, data.provider, data.description || null,
-      data.multiplier, data.context_window || null, data.is_active,
-      data.minimum_plan, data.is_featured, data.sort_order, id])
+  `,
+    [
+      data.model_id,
+      data.display_name,
+      data.provider,
+      data.description || null,
+      data.multiplier,
+      data.context_window || null,
+      data.is_active,
+      data.minimum_plan,
+      data.is_featured,
+      data.sort_order,
+      id,
+    ],
+  );
 }
 
 export async function deleteLLMModel(id: string) {
-  await pool.query('DELETE FROM llm_models WHERE id = $1', [id])
+  await pool.query('DELETE FROM llm_models WHERE id = $1', [id]);
 }
 
 export async function toggleLLMModel(id: string, is_active: boolean) {
-  await pool.query('UPDATE llm_models SET is_active = $1, updated_at = now() WHERE id = $2', [is_active, id])
+  await pool.query('UPDATE llm_models SET is_active = $1, updated_at = now() WHERE id = $2', [
+    is_active,
+    id,
+  ]);
 }
 
 // ─── Service Health Checks ──────────────────────────────────────────
 
 export interface ServiceStatus {
-  name: string
-  url: string
-  status: 'online' | 'offline' | 'unknown'
-  latency: number | null
+  name: string;
+  url: string;
+  status: 'online' | 'offline' | 'unknown';
+  latency: number | null;
 }
 
 export async function checkServiceHealth(): Promise<ServiceStatus[]> {
   const services = [
     { name: 'Backend API', url: process.env.NEXT_PUBLIC_API_URL || 'https://api.pushable.ai' },
-    { name: 'Browser Service', url: (process.env.BROWSER_SERVICE_URL || 'http://browser-service:8080') },
-  ]
+    {
+      name: 'Browser Service',
+      url: process.env.BROWSER_SERVICE_URL || 'http://browser-service:8080',
+    },
+  ];
 
-  const results: ServiceStatus[] = []
+  const results: ServiceStatus[] = [];
 
   for (const svc of services) {
-    const start = Date.now()
+    const start = Date.now();
     try {
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 5000)
-      const res = await fetch(`${svc.url}/`, { signal: controller.signal }).catch(() => null)
-      clearTimeout(timeout)
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`${svc.url}/`, { signal: controller.signal }).catch(() => null);
+      clearTimeout(timeout);
       results.push({
         name: svc.name,
         url: svc.url,
         status: res ? 'online' : 'offline',
         latency: Date.now() - start,
-      })
+      });
     } catch {
-      results.push({ name: svc.name, url: svc.url, status: 'offline', latency: null })
+      results.push({ name: svc.name, url: svc.url, status: 'offline', latency: null });
     }
   }
 
   // Database check
-  const dbStart = Date.now()
+  const dbStart = Date.now();
   try {
-    await pool.query('SELECT 1')
-    results.push({ name: 'PostgreSQL', url: 'postgres:5432', status: 'online', latency: Date.now() - dbStart })
+    await pool.query('SELECT 1');
+    results.push({
+      name: 'PostgreSQL',
+      url: 'postgres:5432',
+      status: 'online',
+      latency: Date.now() - dbStart,
+    });
   } catch {
-    results.push({ name: 'PostgreSQL', url: 'postgres:5432', status: 'offline', latency: null })
+    results.push({ name: 'PostgreSQL', url: 'postgres:5432', status: 'offline', latency: null });
   }
 
-  return results
+  return results;
 }
 
 // ─── Environment Config (safe subset) ───────────────────────────────
 
 export interface EnvConfig {
-  gateway: string
-  browserServiceUrl: string
-  frontendUrl: string
-  hasOpenRouterKey: boolean
-  hasComposioKey: boolean
-  hasClaudeToken: boolean
-  databaseConnected: boolean
+  gateway: string;
+  browserServiceUrl: string;
+  frontendUrl: string;
+  hasOpenRouterKey: boolean;
+  hasComposioKey: boolean;
+  hasClaudeToken: boolean;
+  databaseConnected: boolean;
 }
 
 export async function getEnvConfig(): Promise<EnvConfig> {
-  let dbConnected = false
+  let dbConnected = false;
   try {
-    await pool.query('SELECT 1')
-    dbConnected = true
-  } catch { /* ignore */ }
+    await pool.query('SELECT 1');
+    dbConnected = true;
+  } catch {
+    /* ignore */
+  }
 
   return {
     gateway: process.env.GATEWAY || 'OpenRouter',
@@ -140,26 +195,26 @@ export async function getEnvConfig(): Promise<EnvConfig> {
     hasComposioKey: !!process.env.COMPOSIO_API_KEY,
     hasClaudeToken: !!process.env.CLAUDE_ACCESS_TOKEN,
     databaseConnected: dbConnected,
-  }
+  };
 }
 
 // ─── Browser Data ───────────────────────────────────────────────────
 
 export interface BrowserProxy {
-  id: string
-  workspace_id: string
-  workspace_name: string
-  label: string
-  host: string
-  port: number
-  username: string
-  protocol: string
-  country: string | null
-  city: string | null
-  is_active: boolean
-  last_test_status: string
-  last_tested_at: string | null
-  created_at: string
+  id: string;
+  workspace_id: string;
+  workspace_name: string;
+  label: string;
+  host: string;
+  port: number;
+  username: string;
+  protocol: string;
+  country: string | null;
+  city: string | null;
+  is_active: boolean;
+  last_test_status: string;
+  last_tested_at: string | null;
+  created_at: string;
 }
 
 export async function getBrowserProxies(): Promise<BrowserProxy[]> {
@@ -172,42 +227,62 @@ export async function getBrowserProxies(): Promise<BrowserProxy[]> {
       FROM browser_proxies bp
       LEFT JOIN workspaces w ON w.id = bp.workspace_id
       ORDER BY bp.created_at DESC
-    `)
-    return rows
+    `);
+    return rows;
   } catch {
-    return []
+    return [];
   }
 }
 
 export async function createBrowserProxy(data: {
-  workspace_id?: string; label: string; host: string; port: number
-  username: string; password: string; protocol: string
-  country?: string; city?: string
+  workspace_id?: string;
+  label: string;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  protocol: string;
+  country?: string;
+  city?: string;
 }) {
-  await pool.query(`
+  await pool.query(
+    `
     INSERT INTO browser_proxies (workspace_id, label, host, port, username, password, protocol, country, city)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-  `, [data.workspace_id || null, data.label, data.host, data.port,
-      data.username, data.password, data.protocol,
-      data.country || null, data.city || null])
+  `,
+    [
+      data.workspace_id || null,
+      data.label,
+      data.host,
+      data.port,
+      data.username,
+      data.password,
+      data.protocol,
+      data.country || null,
+      data.city || null,
+    ],
+  );
 }
 
 export async function deleteBrowserProxy(id: string) {
-  await pool.query('DELETE FROM browser_proxies WHERE id = $1', [id])
+  await pool.query('DELETE FROM browser_proxies WHERE id = $1', [id]);
 }
 
 export async function toggleBrowserProxy(id: string, is_active: boolean) {
-  await pool.query('UPDATE browser_proxies SET is_active = $1, updated_at = now() WHERE id = $2', [is_active, id])
+  await pool.query('UPDATE browser_proxies SET is_active = $1, updated_at = now() WHERE id = $2', [
+    is_active,
+    id,
+  ]);
 }
 
 export interface BrowserProfile {
-  id: string
-  workspace_name: string
-  name: string
-  agent_name: string | null
-  os: string
-  status: string
-  created_at: string
+  id: string;
+  workspace_name: string;
+  name: string;
+  agent_name: string | null;
+  os: string;
+  status: string;
+  created_at: string;
 }
 
 export async function getBrowserProfiles(): Promise<BrowserProfile[]> {
@@ -219,21 +294,21 @@ export async function getBrowserProfiles(): Promise<BrowserProfile[]> {
       LEFT JOIN workspaces w ON w.id = bp.workspace_id
       LEFT JOIN agents a ON a.id = bp.assigned_agent_id
       ORDER BY bp.created_at DESC
-    `)
-    return rows
+    `);
+    return rows;
   } catch {
-    return []
+    return [];
   }
 }
 
 export interface BrowserSession {
-  id: string
-  workspace_name: string
-  profile_name: string
-  agent_name: string | null
-  status: string
-  created_at: string
-  closed_at: string | null
+  id: string;
+  workspace_name: string;
+  profile_name: string;
+  agent_name: string | null;
+  status: string;
+  created_at: string;
+  closed_at: string | null;
 }
 
 export async function getBrowserSessions(): Promise<BrowserSession[]> {
@@ -248,18 +323,18 @@ export async function getBrowserSessions(): Promise<BrowserSession[]> {
       LEFT JOIN agents a ON a.id = bs.agent_id
       ORDER BY bs.created_at DESC
       LIMIT 50
-    `)
-    return rows
+    `);
+    return rows;
   } catch {
-    return []
+    return [];
   }
 }
 
 // ─── System Settings (browser agent model/prompt) ───────────────────
 
 export interface SystemSettings {
-  browser_agent_model: string
-  browser_agent_prompt: string
+  browser_agent_model: string;
+  browser_agent_prompt: string;
 }
 
 async function ensureSystemSettingsTable() {
@@ -269,48 +344,51 @@ async function ensureSystemSettingsTable() {
       value TEXT NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
-  `)
+  `);
 }
 
 export async function getSystemSettings(): Promise<SystemSettings> {
   try {
-    await ensureSystemSettingsTable()
-    const { rows } = await pool.query(`SELECT key, value FROM system_settings`)
-    const map: Record<string, string> = {}
-    for (const r of rows) map[r.key] = r.value
+    await ensureSystemSettingsTable();
+    const { rows } = await pool.query(`SELECT key, value FROM system_settings`);
+    const map: Record<string, string> = {};
+    for (const r of rows) map[r.key] = r.value;
     return {
-      browser_agent_model: map.browser_agent_model || 'google/openai/gpt-5.4-mini',
+      browser_agent_model: map.browser_agent_model || 'openai/gpt-5.4-mini',
       browser_agent_prompt: map.browser_agent_prompt || '',
-    }
+    };
   } catch {
-    return { browser_agent_model: 'google/openai/gpt-5.4-mini', browser_agent_prompt: '' }
+    return { browser_agent_model: 'openai/gpt-5.4-mini', browser_agent_prompt: '' };
   }
 }
 
 export async function updateSystemSetting(key: string, value: string) {
-  await ensureSystemSettingsTable()
-  await pool.query(`
+  await ensureSystemSettingsTable();
+  await pool.query(
+    `
     INSERT INTO system_settings (key, value, updated_at)
     VALUES ($1, $2, now())
     ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()
-  `, [key, value])
+  `,
+    [key, value],
+  );
 }
 
 // ─── Workspace Options (for proxy form) ─────────────────────────────
 
 export async function getWorkspaceList(): Promise<{ id: string; name: string }[]> {
-  const { rows } = await pool.query(`SELECT id, name FROM workspaces ORDER BY name ASC`)
-  return rows
+  const { rows } = await pool.query(`SELECT id, name FROM workspaces ORDER BY name ASC`);
+  return rows;
 }
 
 // ─── Agent Defaults Summary ─────────────────────────────────────────
 
 export interface AgentDefaults {
-  total_agents: number
-  system_access_count: number
-  approval_required_count: number
-  can_manage_kb_count: number
-  models_in_use: { model: string; count: number }[]
+  total_agents: number;
+  system_access_count: number;
+  approval_required_count: number;
+  can_manage_kb_count: number;
+  models_in_use: { model: string; count: number }[];
 }
 
 export async function getAgentDefaults(): Promise<AgentDefaults> {
@@ -330,19 +408,19 @@ export async function getAgentDefaults(): Promise<AgentDefaults> {
       ORDER BY count DESC
       LIMIT 10
     `),
-  ])
+  ]);
 
   return {
     ...totals.rows[0],
     models_in_use: models.rows,
-  }
+  };
 }
 
 // ─── Integration Summary ────────────────────────────────────────────
 
 export interface IntegrationSummary {
-  toolkit_slug: string
-  count: number
+  toolkit_slug: string;
+  count: number;
 }
 
 export async function getIntegrationSummary(): Promise<IntegrationSummary[]> {
@@ -352,9 +430,9 @@ export async function getIntegrationSummary(): Promise<IntegrationSummary[]> {
       FROM integrations
       GROUP BY composio_toolkit_slug
       ORDER BY count DESC
-    `)
-    return rows
+    `);
+    return rows;
   } catch {
-    return []
+    return [];
   }
 }

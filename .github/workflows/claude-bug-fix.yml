@@ -8,10 +8,10 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  id-token: write # ← THIS was missing, caused the OIDC error
 
 jobs:
   claude-fix:
-    # Only triggers when comment contains @claude and is on an issue (not a PR)
     if: |
       contains(github.event.comment.body, '@claude') &&
       github.event.issue.pull_request == null
@@ -26,22 +26,5 @@ jobs:
           ANTHROPIC_THINKING_EFFORT: medium
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: '--model opusplan'
-          prompt: |
-            A bug has been reported. Someone tagged you with @claude to fix it.
-
-            Issue #${{ github.event.issue.number }}
-            Title: ${{ github.event.issue.title }}
-            Description:
-            ${{ github.event.issue.body }}
-
-            Comment that triggered you:
-            ${{ github.event.comment.body }}
-
-            Instructions:
-            1. Read the issue description and any images carefully
-            2. Find the relevant files in the codebase
-            3. Fix the bug
-            4. Create a branch: fix/issue-${{ github.event.issue.number }}
-            5. Commit the fix with message: "fix: ${{ github.event.issue.title }}"
-            6. Open a PR that closes issue #${{ github.event.issue.number }}
+          trigger_phrase: '@claude' # ← replaces 'prompt'
+          model: 'claude-opus-4-6' # ← replaces 'claude_args: --model'

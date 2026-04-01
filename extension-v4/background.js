@@ -624,11 +624,33 @@ async function executeCommand(cmd, tabId) {
       }
 
       // ── Key press ──
+      // ── Evaluate JavaScript on the page ──
+      case 'evaluate': {
+        try {
+          await cdpAttach(tabId);
+          const { result } = await cdpSend(tabId, 'Runtime.evaluate', {
+            expression: cmd.code || cmd.expression || cmd.script || '',
+            returnByValue: true,
+          });
+          sendResult(cmd, true, { ok: true, result: result?.value }); break;
+        } catch (err) { sendResult(cmd, false, null, err.message); break; }
+      }
+
       case 'keyPress': {
         try {
           await cdpAttach(tabId);
+          // First click the page body to ensure focus is on the page (not search bar, etc.)
+          // This is critical for YouTube — 'k' only pauses if focus is on the player
+          try {
+            await cdpSend(tabId, 'Runtime.evaluate', {
+              expression: `document.activeElement?.blur(); document.body.click();`,
+              returnByValue: true,
+            });
+            await new Promise(r => setTimeout(r, 100));
+          } catch {}
+
           const KEY_MAP = { Enter:{key:'Enter',code:'Enter',vk:13}, Tab:{key:'Tab',code:'Tab',vk:9}, Escape:{key:'Escape',code:'Escape',vk:27}, Backspace:{key:'Backspace',code:'Backspace',vk:8}, Space:{key:' ',code:'Space',vk:32}, ArrowDown:{key:'ArrowDown',code:'ArrowDown',vk:40}, ArrowUp:{key:'ArrowUp',code:'ArrowUp',vk:38} };
-          const k = KEY_MAP[cmd.key] || { key: cmd.key, code: cmd.key, vk: 0 };
+          const k = KEY_MAP[cmd.key] || { key: cmd.key, code: `Key${cmd.key.toUpperCase()}`, vk: cmd.key.charCodeAt(0) };
           await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', key: k.key, code: k.code, windowsVirtualKeyCode: k.vk });
           await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: k.key, code: k.code });
           sendResult(cmd, true, { ok: true }); break;

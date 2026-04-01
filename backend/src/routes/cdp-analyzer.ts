@@ -27,7 +27,7 @@ export async function cdpAnalyzerRoutes(app: FastifyInstance) {
     });
 
     // Process raw CDP snapshot data → return interactive elements
-    app.post("/cdp-analyzer/process", async (req, reply) => {
+    app.post("/cdp-analyzer/process", { bodyLimit: 50 * 1024 * 1024 }, async (req, reply) => {
         try {
             const resp = await fetch(`${CDP_ANALYZER_URL}/process`, {
                 method: "POST",
@@ -47,7 +47,7 @@ export async function cdpAnalyzerRoutes(app: FastifyInstance) {
     });
 
     // Find overflow menu button near text
-    app.post("/cdp-analyzer/find-overflow", async (req, reply) => {
+    app.post("/cdp-analyzer/find-overflow", { bodyLimit: 50 * 1024 * 1024 }, async (req, reply) => {
         try {
             const url = new URL(`${CDP_ANALYZER_URL}/find-overflow`);
             const query = req.query as Record<string, string>;

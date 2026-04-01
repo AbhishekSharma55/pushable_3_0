@@ -66,14 +66,14 @@ services:
       BROWSER_SERVICE_URL: http://browser-service:8080
       EXTENSION_BRIDGE_PUBLIC_URL: ${EXTENSION_BRIDGE_PUBLIC_URL:-wss://ws.pushable.ai}
       EXTENSION_BRIDGE_URL: ws://extension-bridge:3001
-      EXTENSION_DIR: /app/pushable-relay
+      EXTENSION_DIR: /app/extension-v4
       BRIDGE_API_KEY: ${BRIDGE_API_KEY:-}
       BW_DEVICE_ID: ${BW_DEVICE_ID:-}
       BW_DATA_ROOT: /data/bw-sessions
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_CLI_PROXY_URL: ${CLAUDE_CLI_PROXY_URL:-}
       NODE_ENV: production
-      CDP_ANALYZER_URL: http://cdp-analyzer:5050
+      CDP_ANALYZER_URL: ${CDP_ANALYZER_URL:-http://cdp-analyzer:5050}
       # MinIO / S3 bucket storage
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
@@ -81,7 +81,7 @@ services:
       S3_BUCKET: ${S3_BUCKET:-pushable-bucket}
       S3_REGION: ${S3_REGION:-us-east-1}
     volumes:
-      - ./pushable-relay:/app/pushable-relay:ro
+      - ./extension-v4:/app/extension-v4:ro
       - bw-data:/data/bw-sessions
     depends_on:
       postgres:

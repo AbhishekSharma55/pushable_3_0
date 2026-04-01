@@ -6,10 +6,10 @@ import { existsSync } from "fs";
 export async function extensionDownloadRoutes(fastify: FastifyInstance) {
     // Public endpoint — no auth required so users can download the extension
     fastify.get("/extension/download", async (_request, reply) => {
-        // Resolve the pushable-relay directory relative to the backend root
+        // Resolve the extension-v4 directory relative to the backend root
         const extensionDir =
             process.env.EXTENSION_DIR ||
-            resolve(import.meta.dirname, "../../../pushable-relay");
+            resolve(import.meta.dirname, "../../../extension-v4");
 
         if (!existsSync(extensionDir)) {
             return reply.status(404).send({
@@ -20,7 +20,7 @@ export async function extensionDownloadRoutes(fastify: FastifyInstance) {
         reply.header("Content-Type", "application/zip");
         reply.header(
             "Content-Disposition",
-            'attachment; filename="pushable-browser-agent.zip"'
+            'attachment; filename="Pushable-relay.zip"'
         );
 
         const archive = archiver("zip", { zlib: { level: 9 } });
@@ -38,6 +38,9 @@ export async function extensionDownloadRoutes(fastify: FastifyInstance) {
             "popup.html",
             "popup.js",
             "content.js",
+            "icon16.png",
+            "icon48.png",
+            "icon128.png",
         ];
 
         for (const file of extensionFiles) {

@@ -4,7 +4,7 @@ import { logger } from "./logger.ts";
 const connectionString = process.env.DATABASE_URL!;
 const sql = postgres(connectionString);
 
-const DEFAULT_BROWSER_AGENT_MODEL = "google/openai/gpt-5.4-mini";
+const DEFAULT_BROWSER_AGENT_MODEL = "google/gemini-2.5-flash-preview";
 
 export interface BrowserAgentSettings {
     model: string;

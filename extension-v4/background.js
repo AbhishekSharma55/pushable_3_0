@@ -19,7 +19,29 @@ const SCREENSHOT_QUALITY = 85;
 const KEEPALIVE_MINUTES = 0.3;
 const PAGE_LOAD_TIMEOUT = 15000;
 const CDP_VERSION = '1.3';
-const ANALYZER_URL = 'http://localhost:5050';
+// CDP Analyzer URL — routes through the backend API proxy
+// In dev: backend is localhost:4000, in prod: api.pushable.ai
+// The extension derives this from the stored serverUrl (ws://localhost:3004 → http://localhost:4000)
+let ANALYZER_BASE_URL = 'http://localhost:4000/api/cdp-analyzer';
+
+async function getAnalyzerUrl() {
+  try {
+    const data = await chrome.storage.local.get(['serverUrl']);
+    const wsUrl = data.serverUrl || '';
+    // Derive backend API URL from the extension bridge WebSocket URL
+    // ws://localhost:3004 → http://localhost:4000
+    // wss://ws.pushable.ai → https://api.pushable.ai
+    if (wsUrl.includes('pushable.ai')) {
+      ANALYZER_BASE_URL = 'https://api.pushable.ai/api/cdp-analyzer';
+    } else if (wsUrl.includes('localhost')) {
+      ANALYZER_BASE_URL = 'http://localhost:4000/api/cdp-analyzer';
+    }
+  } catch {}
+  return ANALYZER_BASE_URL;
+}
+
+// Initialize on load
+getAnalyzerUrl();
 
 /* ── State ── */
 let ws = null;
@@ -102,7 +124,7 @@ async function collectAndAnalyze(tabId) {
   const tab = await chrome.tabs.get(tabId);
 
   // Send to Python analyzer for processing
-  const resp = await fetch(`${ANALYZER_URL}/process`, {
+  const resp = await fetch(`${ANALYZER_BASE_URL}/process`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -144,7 +166,7 @@ async function findOverflow(tabId, nearText, menuAction) {
 
   const tab = await chrome.tabs.get(tabId);
 
-  const resp = await fetch(`${ANALYZER_URL}/find-overflow?near_text=${encodeURIComponent(nearText)}&menu_action=${encodeURIComponent(menuAction)}`, {
+  const resp = await fetch(`${ANALYZER_BASE_URL}/find-overflow?near_text=${encodeURIComponent(nearText)}&menu_action=${encodeURIComponent(menuAction)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ snapshot, ax_tree: axTree, url: tab.url || '', title: tab.title || '' }),
@@ -263,6 +285,7 @@ async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   const url = await getWsUrl();
   if (!url) { status = 'error'; lastError = 'No server URL'; return; }
+  await getAnalyzerUrl(); // Refresh analyzer URL based on current server config
   status = 'connecting'; lastError = ''; userDisconnected = false;
   try { ws = new WebSocket(url); } catch (err) { status = 'error'; lastError = err.message; return; }
   ws.onopen = async () => {

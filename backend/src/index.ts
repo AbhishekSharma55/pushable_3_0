@@ -40,6 +40,7 @@ import { projectRoutes } from "./routes/projects.ts";
 import { runReportRoutes } from "./routes/runReports.ts";
 import { testingRoutes } from "./routes/testing.ts";
 import { workflowRoutes } from "./routes/workflows.ts";
+import { cdpAnalyzerRoutes } from "./routes/cdp-analyzer.ts";
 import { browserService } from "./services/browser.service.ts";
 
 const app = Fastify({ logger: false });
@@ -112,6 +113,7 @@ await app.register(projectRoutes, { prefix: "/api" });
 await app.register(runReportRoutes, { prefix: "/api" });
 await app.register(testingRoutes, { prefix: "/api" });
 await app.register(workflowRoutes, { prefix: "/api" });
+await app.register(cdpAnalyzerRoutes, { prefix: "/api" });
 
 // Webhook routes — NO auth, external platforms call these
 await app.register(webhookRoutes);

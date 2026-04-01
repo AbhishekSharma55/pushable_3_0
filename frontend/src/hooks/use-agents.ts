@@ -48,6 +48,8 @@ export function useAgents() {
                     temperature: a.temperature as number,
                     identity: {
                         name: a.name as string,
+                        emoji: a.emoji as string | undefined,
+                        avatarUrl: a.avatarUrl as string | undefined,
                     },
                     createdAt: a.createdAt as string,
                     updatedAt: a.updatedAt as string | undefined,

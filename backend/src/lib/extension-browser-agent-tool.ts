@@ -137,8 +137,9 @@ export function buildExtensionBrowserAgentTool(
                     { agentId, invocationCount },
                     "Extension browser agent invocation BLOCKED — exceeded max invocations in window"
                 );
-                return `STOPPED: The browser agent has been called ${MAX_INVOCATIONS} times in the last 60 seconds. ` +
-                    `Do NOT call it again right now. Report the current status to the user.`;
+                return `STOPPED: Browser agent limit reached (${MAX_INVOCATIONS} calls). ` +
+                    `The task has been attempted. Do NOT call extension_browser_agent again. ` +
+                    `Report what was accomplished to the user and STOP. Do not retry.`;
             }
             const invocationId = `ext-browser-agent-${agentId}-${Date.now()}`;
 

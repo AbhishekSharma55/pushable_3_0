@@ -1,0 +1,42 @@
+name: Claude Auto Bug Fix
+
+on:
+  issues:
+    types: [assigned]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  claude-fix:
+    if: github.event.assignee.login == 'claude[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Claude Bug Fix
+        uses: anthropics/claude-code-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: '--model opusplan'
+          env:
+            ANTHROPIC_THINKING_EFFORT: medium
+          prompt: |
+            A bug has been assigned to you. Fix it completely.
+
+            Issue #${{ github.event.issue.number }}
+            Title: ${{ github.event.issue.title }}
+            Description:
+            ${{ github.event.issue.body }}
+
+            Instructions:
+            1. Read the issue description and any images carefully
+            2. Find the relevant files in the codebase
+            3. Fix the bug
+            4. Create a branch: fix/issue-${{ github.event.issue.number }}
+            5. Commit the fix with message: "fix: ${{ github.event.issue.title }}"
+            6. Open a PR that closes issue #${{ github.event.issue.number }}

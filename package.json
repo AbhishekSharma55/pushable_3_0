@@ -1,0 +1,27 @@
+{
+  "name": "pushable",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pushable AI Agent Platform",
+  "scripts": {
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.6.1",
+    "@commitlint/config-conventional": "^19.6.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.4.3",
+    "prettier": "^3.5.3"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx,mjs,cjs}": [
+      "prettier --write"
+    ],
+    "*.{json,md,yml,yaml,css,scss,html}": [
+      "prettier --write"
+    ]
+  }
+}

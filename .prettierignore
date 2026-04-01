@@ -1,0 +1,36 @@
+# Dependencies
+**/node_modules
+**/.pnp
+**/.pnp.js
+
+# Build outputs
+**/dist
+**/.next
+**/out
+**/build
+**/.turbo
+
+# Package manager
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# Docker
+**/Dockerfile*
+
+# Generated
+**/*.min.js
+**/*.min.css
+**/__pycache__
+
+# Extensions (bundled/compiled)
+extension-v3
+extension-v4
+extension-trial
+extension-trial-v2
+camoufox-main
+
+# Misc
+.DS_Store
+*.pem
+.env*

@@ -11,7 +11,9 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix"
   },
   "keywords": [],
   "author": "",
@@ -42,6 +44,7 @@
     "dotenv": "^17.3.1",
     "drizzle-orm": "^0.45.1",
     "fastify": "^5.8.2",
+    "google-auth-library": "^10.6.2",
     "grammy": "^1.41.1",
     "ioredis": "^5.10.0",
     "mammoth": "^1.12.0",
@@ -64,7 +67,10 @@
     "@types/node": "^25.5.0",
     "@types/nodemailer": "^7.0.11",
     "@types/ws": "^8.18.1",
+    "@typescript-eslint/eslint-plugin": "^8.58.0",
+    "@typescript-eslint/parser": "^8.58.0",
     "drizzle-kit": "^0.31.9",
+    "eslint": "^10.1.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

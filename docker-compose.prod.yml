@@ -9,7 +9,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres}']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -20,7 +20,7 @@ services:
     volumes:
       - redisdata:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -29,8 +29,8 @@ services:
     image: minio/minio:latest
     restart: unless-stopped
     ports:
-      - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - '${MINIO_API_PORT:-9000}:9000'
+      - '${MINIO_CONSOLE_PORT:-9001}:9001'
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
@@ -38,7 +38,7 @@ services:
       - minio-data:/data
     command: server /data --console-address ":9001"
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ['CMD', 'mc', 'ready', 'local']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -49,16 +49,16 @@ services:
       dockerfile: Dockerfile.prod
     restart: unless-stopped
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - 'host.docker.internal:host-gateway'
     dns:
       - 8.8.8.8
       - 8.8.4.4
     ports:
-      - "${BACKEND_PORT:-4000}:4000"
+      - '${BACKEND_PORT:-4000}:4000'
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-abhishek0003}@postgres:5432/${POSTGRES_DB:-pushable_ai}
       JWT_SECRET: ${JWT_SECRET:-pushable-ai-super-secret-jwt-key-32chars}
-      PORT: "4000"
+      PORT: '4000'
       OPENROUTER_KEY: ${OPENROUTER_KEY}
       REDIS_URL: redis://redis:6379
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
@@ -75,6 +75,9 @@ services:
       NODE_ENV: production
       CDP_ANALYZER_URL: ${CDP_ANALYZER_URL:-http://cdp-analyzer:5050}
       DEFAULT_BROWSER_AGENT_MODEL: ${DEFAULT_BROWSER_AGENT_MODEL:-google/gemini-2.5-flash}
+      # Google OAuth
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       # MinIO / S3 bucket storage
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
@@ -98,15 +101,15 @@ services:
       dockerfile: browser-service/Dockerfile.prod
     restart: unless-stopped
     ports:
-      - "${BROWSER_SERVICE_PORT:-8080}:8080"
+      - '${BROWSER_SERVICE_PORT:-8080}:8080'
     environment:
-      PORT: "8080"
+      PORT: '8080'
       PROFILES_DIR: /app/profiles
       ALLOWED_ORIGINS: ${FRONTEND_URL:-https://platform.pushable.ai},https://pushable.ai
-      SCREENSHOT_INTERVAL_MS: "200"
-      SCREENSHOT_QUALITY: "60"
-      SCREENSHOT_WIDTH: "1920"
-      SCREENSHOT_HEIGHT: "1080"
+      SCREENSHOT_INTERVAL_MS: '200'
+      SCREENSHOT_QUALITY: '60'
+      SCREENSHOT_WIDTH: '1920'
+      SCREENSHOT_HEIGHT: '1080'
       CAPSOLVER_API_KEY: ${CAPSOLVER_API_KEY:-CAP-EE4E7B31B78FB28FB7488B481872E8EF41ED238F170D21EF8420588FFEC5D2F5}
       CAPSOLVER_EXTENSION_ENABLED: ${CAPSOLVER_EXTENSION_ENABLED:-true}
       BROWSER_PUBLIC_URL: ${BROWSER_PUBLIC_URL:-wss://browser.pushable.ai}
@@ -122,12 +125,14 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.pushable.ai}
         NEXT_PUBLIC_BROWSER_WS_URL: ${NEXT_PUBLIC_BROWSER_WS_URL:-wss://browser.pushable.ai}
         NEXT_PUBLIC_LOGGING: ${NEXT_PUBLIC_LOGGING:-false}
+        NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - '${FRONTEND_PORT:-3000}:3000'
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_LOGGING: ${NEXT_PUBLIC_LOGGING:-false}
+      NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     depends_on:
       - backend
 
@@ -140,7 +145,7 @@ services:
         NEXT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:-https://platform.pushable.ai}
     restart: unless-stopped
     ports:
-      - "${PUBLIC_FRONTEND_PORT:-3001}:3001"
+      - '${PUBLIC_FRONTEND_PORT:-3001}:3001'
     environment:
       NODE_ENV: production
       API_URL: http://backend:4000
@@ -153,9 +158,9 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "${EXTENSION_BRIDGE_PORT:-3004}:3001"
+      - '${EXTENSION_BRIDGE_PORT:-3004}:3001'
     environment:
-      BRIDGE_PORT: "3001"
+      BRIDGE_PORT: '3001'
       BACKEND_URL: http://backend:4000
       BRIDGE_API_KEY: ${BRIDGE_API_KEY:-}
       EXTENSION_BRIDGE_PUBLIC_URL: ${EXTENSION_BRIDGE_PUBLIC_URL:-wss://ws.pushable.ai}
@@ -174,7 +179,7 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.pushable.ai}
     restart: unless-stopped
     ports:
-      - "${ADMIN_PANEL_PORT:-3002}:3002"
+      - '${ADMIN_PANEL_PORT:-3002}:3002'
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-abhishek0003}@postgres:5432/${POSTGRES_DB:-pushable_ai}

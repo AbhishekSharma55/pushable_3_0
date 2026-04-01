@@ -3,7 +3,7 @@ services:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - '5432:5432'
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-abhishek0003}
@@ -11,7 +11,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -22,7 +22,7 @@ services:
     volumes:
       - redisdata:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -31,8 +31,8 @@ services:
     image: minio/minio:latest
     restart: unless-stopped
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - '9000:9000'
+      - '9001:9001'
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
@@ -40,7 +40,7 @@ services:
       - minio-data:/data
     command: server /data --console-address ":9001"
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ['CMD', 'mc', 'ready', 'local']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -49,30 +49,33 @@ services:
     build: ./backend
     restart: unless-stopped
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - 'host.docker.internal:host-gateway'
     dns:
       - 8.8.8.8
       - 8.8.4.4
     ports:
-      - "4000:4000"
+      - '4000:4000'
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:abhishek0003@postgres:5432/pushable_ai}
       JWT_SECRET: ${JWT_SECRET:-pushable-ai-super-secret-jwt-key-32chars}
-      PORT: "4000"
+      PORT: '4000'
       OPENROUTER_KEY: ${OPENROUTER_KEY}
       REDIS_URL: redis://redis:6379
       COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       BROWSER_SERVICE_URL: http://browser-service:8080
-      BRIDGE_API_KEY: ""
+      BRIDGE_API_KEY: ''
       EXTENSION_BRIDGE_URL: ws://extension-bridge:3001
       CDP_ANALYZER_URL: ${CDP_ANALYZER_URL:-http://cdp-analyzer:5050}
       DEFAULT_BROWSER_AGENT_MODEL: ${DEFAULT_BROWSER_AGENT_MODEL:-google/gemini-2.5-flash}
       EXTENSION_BRIDGE_PUBLIC_URL: ${EXTENSION_BRIDGE_PUBLIC_URL:-ws://localhost:3004}
-      BW_DEVICE_ID: "b661b739-3e2c-4517-9ec0-63cb10842b84"
+      BW_DEVICE_ID: 'b661b739-3e2c-4517-9ec0-63cb10842b84'
       BW_DATA_ROOT: /data/bw-sessions
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_CLI_PROXY_URL: ${CLAUDE_CLI_PROXY_URL:-}
+      # Google OAuth
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       # MinIO / S3 bucket storage
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
@@ -96,17 +99,17 @@ services:
       dockerfile: browser-service/Dockerfile
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - '8080:8080'
     environment:
-      PORT: "8080"
+      PORT: '8080'
       PROFILES_DIR: /app/profiles
       ALLOWED_ORIGINS: ${FRONTEND_URL:-http://localhost:3000}
-      SCREENSHOT_INTERVAL_MS: "200"
-      SCREENSHOT_QUALITY: "60"
-      SCREENSHOT_WIDTH: "1920"
-      SCREENSHOT_HEIGHT: "1080"
+      SCREENSHOT_INTERVAL_MS: '200'
+      SCREENSHOT_QUALITY: '60'
+      SCREENSHOT_WIDTH: '1920'
+      SCREENSHOT_HEIGHT: '1080'
       CAPSOLVER_API_KEY: ${CAPSOLVER_API_KEY}
-      CAPSOLVER_EXTENSION_ENABLED: "true"
+      CAPSOLVER_EXTENSION_ENABLED: 'true'
     volumes:
       - ./browser-service/profiles:/app/profiles
       - ./browser-service/src:/app/src
@@ -116,11 +119,12 @@ services:
     build: ./frontend
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - '3000:3000'
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
       NEXT_PUBLIC_BROWSER_WS_URL: ${NEXT_PUBLIC_BROWSER_WS_URL:-ws://localhost:8080}
       NEXT_PUBLIC_LOGGING: ${NEXT_PUBLIC_LOGGING:-false}
+      NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     depends_on:
       - backend
     volumes:
@@ -130,10 +134,10 @@ services:
     build: ./extension-bridge
     restart: unless-stopped
     ports:
-      - "3004:3001"
+      - '3004:3001'
     environment:
-      BRIDGE_PORT: "3001"
-      BRIDGE_API_KEY: ""
+      BRIDGE_PORT: '3001'
+      BRIDGE_API_KEY: ''
       BACKEND_URL: http://backend:4000
     depends_on:
       - backend
@@ -144,7 +148,7 @@ services:
     build: ./public-frontend
     restart: unless-stopped
     ports:
-      - "3001:3001"
+      - '3001:3001'
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
       API_URL: http://backend:4000
@@ -158,9 +162,9 @@ services:
     build: ./cdp-analyzer
     restart: unless-stopped
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - 'host.docker.internal:host-gateway'
     ports:
-      - "5050:5050"
+      - '5050:5050'
     volumes:
       - ./cdp-analyzer:/app
 
@@ -168,7 +172,7 @@ services:
     build: ./admin-panel
     restart: unless-stopped
     ports:
-      - "3002:3002"
+      - '3002:3002'
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:abhishek0003@postgres:5432/pushable_ai}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
@@ -184,4 +188,3 @@ volumes:
   redisdata:
   bw-data:
   minio-data:
-

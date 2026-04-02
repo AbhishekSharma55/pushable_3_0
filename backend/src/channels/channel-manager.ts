@@ -1,6 +1,7 @@
 import { channelRepository } from "../repositories/channel.repository.ts";
 import { TelegramAdapter, setTelegramMessageHandler, setTelegramApprovalHandler } from "./telegram.channel.ts";
 import { SlackAdapter, setSlackMessageHandler } from "./slack.channel.ts";
+import { PlatformTelegramBot } from "./platform-telegram.ts";
 import { routeMessage, setResponseSender, setApprovalSender, resolveChannelApproval } from "./message-router.ts";
 import { logger } from "../lib/logger.ts";
 import type {
@@ -9,6 +10,8 @@ import type {
     NormalizedResponse,
 } from "./types.ts";
 
+const PLATFORM_CONNECTION_ID = "platform-telegram";
+
 class ChannelManager {
     private adapters = new Map<
         string,
@@ -16,6 +19,7 @@ class ChannelManager {
     >();
     private telegramAdapter = new TelegramAdapter();
     private slackAdapter = new SlackAdapter();
+    private platformTelegramBot: PlatformTelegramBot | null = null;
     private initialized = false;
 
     private setupHandlers() {
@@ -25,10 +29,13 @@ class ChannelManager {
         setResponseSender((connectionId, response) =>
             this.sendMessage(connectionId, response)
         );
-        // Wire HITL approval flow for Telegram
-        setApprovalSender((connectionId, chatId, text, sessionId) =>
-            this.telegramAdapter.sendApprovalMessage(connectionId, chatId, text, sessionId)
-        );
+        // Wire HITL approval flow for Telegram (per-workspace + platform)
+        setApprovalSender((connectionId, chatId, text, sessionId) => {
+            if (connectionId === PLATFORM_CONNECTION_ID && this.platformTelegramBot) {
+                return this.platformTelegramBot.sendApprovalMessage(chatId, text, sessionId);
+            }
+            return this.telegramAdapter.sendApprovalMessage(connectionId, chatId, text, sessionId);
+        });
         setTelegramApprovalHandler(resolveChannelApproval);
         this.initialized = true;
     }
@@ -76,9 +83,48 @@ class ChannelManager {
         connectionId: string,
         response: NormalizedResponse
     ): Promise<void> {
+        // Route to platform bot if applicable
+        if (connectionId === PLATFORM_CONNECTION_ID && this.platformTelegramBot) {
+            await this.platformTelegramBot.sendResponse(response);
+            return;
+        }
+
         const entry = this.adapters.get(connectionId);
         if (!entry) return;
         await entry.adapter.sendMessage(connectionId, response);
+    }
+
+    async initializePlatformTelegram(): Promise<void> {
+        const token = process.env.TELEGRAM_BOT_TOKEN;
+        if (!token) {
+            logger.info("No TELEGRAM_BOT_TOKEN set — platform Telegram bot disabled");
+            return;
+        }
+
+        this.setupHandlers();
+
+        try {
+            this.platformTelegramBot = new PlatformTelegramBot(token);
+            await this.platformTelegramBot.start();
+            logger.info("Platform Telegram bot initialized");
+        } catch (error) {
+            logger.error(
+                { error: error instanceof Error ? error.message : error },
+                "Failed to initialize platform Telegram bot"
+            );
+            this.platformTelegramBot = null;
+        }
+    }
+
+    async shutdownPlatformTelegram(): Promise<void> {
+        if (this.platformTelegramBot) {
+            await this.platformTelegramBot.stop();
+            this.platformTelegramBot = null;
+        }
+    }
+
+    getPlatformTelegramBot(): PlatformTelegramBot | null {
+        return this.platformTelegramBot;
     }
 
     async initializeAllActive(): Promise<void> {

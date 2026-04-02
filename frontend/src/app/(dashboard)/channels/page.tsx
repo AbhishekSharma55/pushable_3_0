@@ -56,8 +56,15 @@ import {
     getConnectionConfig,
 } from '@/lib/api/channels';
 import type { BotInfo } from '@/lib/api/channels';
+import {
+    getTelegramStatus,
+    initiateTelegramLink,
+    checkTelegramLinkStatus,
+    unlinkTelegram,
+} from '@/lib/api/telegram';
+import type { TelegramStatus } from '@/lib/api/telegram';
 import { getAgents } from '@/lib/api/agents';
-import type { ChannelConnection, Agent } from '@/types';
+import type { ChannelConnection, Agent, TelegramUserLink } from '@/types';
 import { QRCodeSVG } from 'qrcode.react';
 
 function ChannelIcon({ type, className = 'h-4 w-4' }: { type: string; className?: string }) {
@@ -99,6 +106,15 @@ export default function ChannelsPage() {
     const [savingConfig, setSavingConfig] = useState(false);
     const [showQr, setShowQr] = useState(false);
 
+    // Platform Telegram state
+    const [telegramStatus, setTelegramStatus] = useState<TelegramStatus | null>(null);
+    const [telegramLoading, setTelegramLoading] = useState(true);
+    const [verificationCode, setVerificationCode] = useState<string | null>(null);
+    const [verificationBotUsername, setVerificationBotUsername] = useState<string | null>(null);
+    const [verificationBotLink, setVerificationBotLink] = useState<string | null>(null);
+    const [linkingInProgress, setLinkingInProgress] = useState(false);
+    const [pollingVerification, setPollingVerification] = useState(false);
+
     const fetchData = useCallback(async () => {
         if (!workspace) return;
         try {
@@ -116,7 +132,22 @@ export default function ChannelsPage() {
         }
     }, [workspace]);
 
+    const fetchTelegramStatus = useCallback(async () => {
+        if (!workspace) return;
+        try {
+            setTelegramLoading(true);
+            const status = await getTelegramStatus(workspace.id);
+            setTelegramStatus(status);
+        } catch {
+            // Platform bot not configured — hide section
+            setTelegramStatus(null);
+        } finally {
+            setTelegramLoading(false);
+        }
+    }, [workspace]);
+
     useEffect(() => { fetchData(); }, [fetchData]);
+    useEffect(() => { fetchTelegramStatus(); }, [fetchTelegramStatus]);
 
     // Load config + bot info when a Telegram connection is selected
     useEffect(() => {
@@ -180,6 +211,55 @@ export default function ChannelsPage() {
     const removeUserId = (id: string) => {
         saveAllowedUsers(allowedUserIds.filter((u) => u !== id));
     };
+
+    // Platform Telegram: initiate link
+    const handleTelegramConnect = async () => {
+        if (!workspace) return;
+        setLinkingInProgress(true);
+        try {
+            const result = await initiateTelegramLink(workspace.id);
+            setVerificationCode(result.code);
+            setVerificationBotUsername(result.botUsername);
+            setVerificationBotLink(result.botLink);
+            setPollingVerification(true);
+        } catch (err: unknown) {
+            const error = err as { response?: { data?: { error?: { message?: string } } } };
+            toast.error(error.response?.data?.error?.message || 'Failed to generate verification code');
+        } finally {
+            setLinkingInProgress(false);
+        }
+    };
+
+    // Platform Telegram: unlink
+    const handleTelegramUnlink = async (linkId: string) => {
+        if (!workspace) return;
+        try {
+            await unlinkTelegram(workspace.id, linkId);
+            toast.success('Telegram account unlinked');
+            fetchTelegramStatus();
+        } catch {
+            toast.error('Failed to unlink');
+        }
+    };
+
+    // Poll for verification completion
+    useEffect(() => {
+        if (!pollingVerification || !workspace) return;
+        const interval = setInterval(async () => {
+            try {
+                const status = await checkTelegramLinkStatus(workspace.id);
+                if (status.verified) {
+                    setPollingVerification(false);
+                    setVerificationCode(null);
+                    toast.success(`Telegram linked! ${status.telegramUsername ? `@${status.telegramUsername}` : 'Account connected.'}`);
+                    fetchTelegramStatus();
+                }
+            } catch {
+                // Ignore polling errors
+            }
+        }, 3000);
+        return () => clearInterval(interval);
+    }, [pollingVerification, workspace, fetchTelegramStatus]);
 
     const resetForm = () => {
         setChannelType(null);
@@ -262,7 +342,7 @@ export default function ChannelsPage() {
                     <div>
                         <h1 className="text-2xl font-bold tracking-tight">Channels</h1>
                         <p className="text-sm text-muted-foreground">
-                            Connect agents to Telegram and Slack
+                            Connect to Telegram and Slack
                         </p>
                     </div>
                 </div>
@@ -565,7 +645,7 @@ export default function ChannelsPage() {
             </div>
 
             {/* Create Channel Sheet */}
-            <Sheet open={sheetOpen} onOpenChange={(v) => { setSheetOpen(v); if (!v) resetForm(); }}>
+            <Sheet open={sheetOpen} onOpenChange={(v) => { setSheetOpen(v); if (!v) { resetForm(); setVerificationCode(null); setPollingVerification(false); } }}>
                 <SheetContent className="sm:max-w-lg overflow-y-auto px-6">
                     <SheetHeader>
                         <SheetTitle className="text-xl font-semibold">Add Channel</SheetTitle>
@@ -576,17 +656,19 @@ export default function ChannelsPage() {
                         {/* Step 1 — Choose type */}
                         {!channelType && (
                             <div className="grid grid-cols-2 gap-3">
-                                <button
-                                    type="button"
-                                    className="flex flex-col items-center gap-3 rounded-xl border-2 border-border p-6 hover:border-primary hover:bg-primary/5 transition-all"
-                                    onClick={() => setChannelType('telegram')}
-                                >
-                                    <Send className="h-8 w-8 text-blue-500" />
-                                    <div className="text-center">
-                                        <p className="text-sm font-semibold">Telegram</p>
-                                        <p className="text-[11px] text-muted-foreground mt-1">Connect a Telegram bot</p>
-                                    </div>
-                                </button>
+                                {telegramStatus?.available && (
+                                    <button
+                                        type="button"
+                                        className="flex flex-col items-center gap-3 rounded-xl border-2 border-border p-6 hover:border-primary hover:bg-primary/5 transition-all"
+                                        onClick={() => setChannelType('telegram')}
+                                    >
+                                        <Send className="h-8 w-8 text-blue-500" />
+                                        <div className="text-center">
+                                            <p className="text-sm font-semibold">Telegram</p>
+                                            <p className="text-[11px] text-muted-foreground mt-1">Chat with your CEO agent</p>
+                                        </div>
+                                    </button>
+                                )}
                                 <button
                                     type="button"
                                     className="flex flex-col items-center gap-3 rounded-xl border-2 border-border p-6 hover:border-primary hover:bg-primary/5 transition-all"
@@ -601,12 +683,157 @@ export default function ChannelsPage() {
                             </div>
                         )}
 
-                        {/* Step 2 — Configure */}
-                        {channelType && (
+                        {/* Step 2 — Telegram connect flow */}
+                        {channelType === 'telegram' && (
+                            <>
+                                <div className="flex items-center gap-2 mb-2">
+                                    <button onClick={() => { resetForm(); setVerificationCode(null); setPollingVerification(false); }} className="text-xs text-muted-foreground hover:text-foreground">&larr; Back</button>
+                                    <Badge variant="outline">telegram</Badge>
+                                </div>
+
+                                {/* Linked accounts */}
+                                {telegramStatus && telegramStatus.links.length > 0 && (
+                                    <div className="space-y-2">
+                                        <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                            Linked Accounts
+                                        </Label>
+                                        <div className="space-y-1.5">
+                                            {telegramStatus.links.map((link: TelegramUserLink) => (
+                                                <div
+                                                    key={link.id}
+                                                    className="flex items-center justify-between rounded-lg bg-muted/50 border border-border/40 px-4 py-3"
+                                                >
+                                                    <div className="flex items-center gap-3">
+                                                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500/10">
+                                                            <Send className="h-3.5 w-3.5 text-blue-500" />
+                                                        </div>
+                                                        <div>
+                                                            <p className="text-sm font-medium">
+                                                                {link.telegramFirstName || 'Telegram User'}
+                                                                {link.telegramUsername && (
+                                                                    <span className="text-muted-foreground font-normal ml-1.5">
+                                                                        @{link.telegramUsername}
+                                                                    </span>
+                                                                )}
+                                                            </p>
+                                                            <p className="text-[11px] text-muted-foreground font-mono">
+                                                                ID: {link.telegramUserId}
+                                                                {link.lastMessageAt && (
+                                                                    <span className="ml-2">
+                                                                        Last active: {new Date(link.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                                                    </span>
+                                                                )}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                    <AlertDialog>
+                                                        <AlertDialogTrigger asChild>
+                                                            <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive">
+                                                                <Trash2 className="h-3.5 w-3.5" />
+                                                            </Button>
+                                                        </AlertDialogTrigger>
+                                                        <AlertDialogContent>
+                                                            <AlertDialogHeader>
+                                                                <AlertDialogTitle>Unlink Telegram Account</AlertDialogTitle>
+                                                                <AlertDialogDescription>
+                                                                    This will disconnect this Telegram account. Messages from this user will no longer reach your CEO agent.
+                                                                </AlertDialogDescription>
+                                                            </AlertDialogHeader>
+                                                            <AlertDialogFooter>
+                                                                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                                                <AlertDialogAction
+                                                                    onClick={() => handleTelegramUnlink(link.id)}
+                                                                    className="bg-destructive text-destructive-foreground"
+                                                                >
+                                                                    Unlink
+                                                                </AlertDialogAction>
+                                                            </AlertDialogFooter>
+                                                        </AlertDialogContent>
+                                                    </AlertDialog>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Verification code flow */}
+                                {verificationCode ? (
+                                    <div className="rounded-lg border-2 border-dashed border-blue-500/30 bg-blue-500/5 p-6 text-center space-y-4">
+                                        <div>
+                                            <p className="text-xs font-medium text-muted-foreground mb-2">
+                                                Send this code to the bot on Telegram
+                                            </p>
+                                            <p className="text-4xl font-mono font-bold tracking-[0.3em] text-blue-600 dark:text-blue-400">
+                                                {verificationCode}
+                                            </p>
+                                        </div>
+                                        <div className="space-y-2">
+                                            {verificationBotLink && verificationBotUsername && (
+                                                <a
+                                                    href={verificationBotLink}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:underline font-medium"
+                                                >
+                                                    Open @{verificationBotUsername} on Telegram
+                                                    <ExternalLink className="h-3.5 w-3.5" />
+                                                </a>
+                                            )}
+                                            <p className="text-[11px] text-muted-foreground">
+                                                Code expires in 10 minutes. Waiting for verification...
+                                            </p>
+                                            {pollingVerification && (
+                                                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                                    Listening for verification...
+                                                </div>
+                                            )}
+                                        </div>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="text-xs"
+                                            onClick={() => {
+                                                setVerificationCode(null);
+                                                setPollingVerification(false);
+                                            }}
+                                        >
+                                            Cancel
+                                        </Button>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-4">
+                                        <div className="rounded-lg bg-muted/50 border border-border/40 p-4 space-y-2">
+                                            <p className="text-sm font-medium">How it works</p>
+                                            <div className="text-xs text-muted-foreground space-y-1.5">
+                                                <p>1. Click <strong>Connect Telegram</strong> below to get a verification code</p>
+                                                <p>2. Open Telegram and search for <strong>@{telegramStatus?.botUsername || 'our bot'}</strong></p>
+                                                <p>3. Send the code to the bot</p>
+                                                <p>4. Done! You can now chat with your CEO agent from Telegram</p>
+                                            </div>
+                                        </div>
+                                        <Button
+                                            className="w-full gap-1.5"
+                                            onClick={handleTelegramConnect}
+                                            disabled={linkingInProgress}
+                                        >
+                                            {linkingInProgress ? (
+                                                <><Loader2 className="h-4 w-4 animate-spin" />Generating code...</>
+                                            ) : (
+                                                <><Send className="h-4 w-4" />Connect Telegram</>
+                                            )}
+                                        </Button>
+                                    </div>
+                                )}
+                            </>
+                        )}
+
+                        {/* Step 2 — Slack configure */}
+                        {channelType === 'slack' && (
                             <>
                                 <div className="flex items-center gap-2 mb-2">
                                     <button onClick={resetForm} className="text-xs text-muted-foreground hover:text-foreground">&larr; Back</button>
-                                    <Badge variant="outline">{channelType}</Badge>
+                                    <Badge variant="outline">slack</Badge>
                                 </div>
 
                                 <div className="space-y-2">
@@ -630,63 +857,38 @@ export default function ChannelsPage() {
                                     <Label>Bot Token</Label>
                                     <Input
                                         type="password"
-                                        placeholder={channelType === 'telegram' ? 'e.g. 123456:ABC-DEF...' : 'xoxb-...'}
+                                        placeholder="xoxb-..."
                                         value={formBotToken}
                                         onChange={(e) => setFormBotToken(e.target.value)}
                                     />
                                 </div>
 
-                                {channelType === 'slack' && (
-                                    <div className="space-y-2">
-                                        <Label>Signing Secret</Label>
-                                        <Input type="password" placeholder="Signing secret from Basic Information" value={formSigningSecret} onChange={(e) => setFormSigningSecret(e.target.value)} />
-                                    </div>
-                                )}
+                                <div className="space-y-2">
+                                    <Label>Signing Secret</Label>
+                                    <Input type="password" placeholder="Signing secret from Basic Information" value={formSigningSecret} onChange={(e) => setFormSigningSecret(e.target.value)} />
+                                </div>
 
                                 {/* Setup guide */}
-                                {channelType === 'telegram' && (
-                                    <div className="rounded-lg border border-border/60">
-                                        <button
-                                            type="button"
-                                            className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-muted-foreground hover:text-foreground"
-                                            onClick={() => setShowTelegramGuide(!showTelegramGuide)}
-                                        >
-                                            How to get your bot token
-                                            {showTelegramGuide ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                                        </button>
-                                        {showTelegramGuide && (
-                                            <div className="px-4 pb-3 text-xs text-muted-foreground space-y-1.5 border-t border-border/40 pt-2.5">
-                                                <p>1. Open Telegram and search for <strong>@BotFather</strong></p>
-                                                <p>2. Send <code>/newbot</code> and follow the prompts</p>
-                                                <p>3. Copy the token BotFather gives you</p>
-                                                <p>4. Paste it in the field above</p>
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-
-                                {channelType === 'slack' && (
-                                    <div className="rounded-lg border border-border/60">
-                                        <button
-                                            type="button"
-                                            className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-muted-foreground hover:text-foreground"
-                                            onClick={() => setShowSlackGuide(!showSlackGuide)}
-                                        >
-                                            How to set up Slack app
-                                            {showSlackGuide ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                                        </button>
-                                        {showSlackGuide && (
-                                            <div className="px-4 pb-3 text-xs text-muted-foreground space-y-1.5 border-t border-border/40 pt-2.5">
-                                                <p>1. Go to <strong>api.slack.com/apps</strong> &rarr; Create New App</p>
-                                                <p>2. From Scratch &rarr; name your app &rarr; pick workspace</p>
-                                                <p>3. OAuth &amp; Permissions &rarr; add scopes: <code>channels:history</code>, <code>chat:write</code>, <code>app_mentions:read</code>, <code>im:history</code>, <code>users:read</code></p>
-                                                <p>4. Install to workspace &rarr; copy Bot User OAuth Token</p>
-                                                <p>5. Basic Information &rarr; copy Signing Secret</p>
-                                                <p>6. Event Subscriptions &rarr; enable &rarr; subscribe to: <code>app_mention</code>, <code>message.im</code></p>
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
+                                <div className="rounded-lg border border-border/60">
+                                    <button
+                                        type="button"
+                                        className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+                                        onClick={() => setShowSlackGuide(!showSlackGuide)}
+                                    >
+                                        How to set up Slack app
+                                        {showSlackGuide ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                                    </button>
+                                    {showSlackGuide && (
+                                        <div className="px-4 pb-3 text-xs text-muted-foreground space-y-1.5 border-t border-border/40 pt-2.5">
+                                            <p>1. Go to <strong>api.slack.com/apps</strong> &rarr; Create New App</p>
+                                            <p>2. From Scratch &rarr; name your app &rarr; pick workspace</p>
+                                            <p>3. OAuth &amp; Permissions &rarr; add scopes: <code>channels:history</code>, <code>chat:write</code>, <code>app_mentions:read</code>, <code>im:history</code>, <code>users:read</code></p>
+                                            <p>4. Install to workspace &rarr; copy Bot User OAuth Token</p>
+                                            <p>5. Basic Information &rarr; copy Signing Secret</p>
+                                            <p>6. Event Subscriptions &rarr; enable &rarr; subscribe to: <code>app_mention</code>, <code>message.im</code></p>
+                                        </div>
+                                    )}
+                                </div>
 
                                 <Button
                                     className="w-full"

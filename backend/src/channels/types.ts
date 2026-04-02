@@ -5,6 +5,7 @@ export interface NormalizedMessage {
     agentId: string;
     externalUserId: string;
     externalUsername: string;
+    platformUserId?: string; // Pushable platform user UUID (for credit tracking)
     text: string;
     threadId?: string;
     messageId?: string;

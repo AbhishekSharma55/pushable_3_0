@@ -16,6 +16,8 @@ import { openrouterService } from "../services/openrouter.service.ts";
 import { agentRepository } from "../repositories/agent.repository.ts";
 import { bucketService } from "../services/bucket.service.ts";
 import { createLLM } from "../lib/gateway.ts";
+import { workspaceRepository } from "../repositories/workspace.repository.ts";
+import { userAgentAccessRepository } from "../repositories/userAgentAccess.repository.ts";
 
 const AGENT_RECURSION_LIMIT = 50; // Safety net behind step_count-based graceful termination
 
@@ -979,6 +981,23 @@ export async function chatRoutes(fastify: FastifyInstance) {
         }
 
         const session = await sessionService.getSession(sessionId, workspaceId);
+
+        // Guard: check if user has access to this agent
+        const isOwnerOrAdmin = await workspaceRepository.isOwnerOrAdmin(workspaceId, user.userId);
+        if (!isOwnerOrAdmin) {
+            const canAccess = await userAgentAccessRepository.isAgentAllowed(
+                workspaceId,
+                user.userId,
+                session.agentId
+            );
+            if (!canAccess) {
+                throw new AppError(
+                    "You do not have access to this agent. Contact your workspace administrator.",
+                    403,
+                    "AGENT_ACCESS_DENIED"
+                );
+            }
+        }
 
         // Guard: prevent concurrent runs on the same session
         const activeRun = await runRepository.findActiveBySession(sessionId, workspaceId);

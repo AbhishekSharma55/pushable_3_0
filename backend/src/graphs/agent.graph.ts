@@ -43,9 +43,10 @@ import { buildSystemPrompt } from "../lib/system-prompt-builder.ts";
 import { browserRepository } from "../repositories/browser.repository.ts";
 import {
     checkCredits,
-    deductCredits,
     calculateCreditCost,
     isPlanSufficient,
+    checkUserCredits,
+    deductUserCredits,
 } from "../lib/credit-engine.ts";
 import { channelRepository } from "../repositories/channel.repository.ts";
 import { channelManager } from "../channels/channel-manager.ts";
@@ -1541,7 +1542,9 @@ export async function createAgentGraph(
 
         // --- Run credit check, memories, notebook, procedural memory, and KB query in PARALLEL ---
         const [creditCheck, memories, notebookSection, proceduralMemorySection, kbResults] = await Promise.all([
-            checkCredits(workspaceId, estimatedCost),
+            userId
+                ? checkUserCredits(workspaceId, userId, estimatedCost)
+                : checkCredits(workspaceId, estimatedCost),
             userId
                 ? memoryRepository
                       .findByUser(workspaceId, agentId, userId)
@@ -1565,7 +1568,9 @@ export async function createAgentGraph(
         ]);
 
         if (!creditCheck.allowed) {
-            const errorMsg = `Insufficient credits. Available: ${creditCheck.available}. Required: ~${estimatedCost}. Top up at Settings > Billing.`;
+            const errorMsg = creditCheck.userLimitExceeded
+                ? `Your personal credit limit has been reached (${creditCheck.available} credits remaining). Please contact your workspace administrator to increase your limit or reset your usage.`
+                : `Insufficient credits. Available: ${creditCheck.available}. Required: ~${estimatedCost}. Top up at Settings > Billing.`;
             return { messages: [new AIMessage(errorMsg)], todos: currentTodos };
         }
 
@@ -1753,11 +1758,12 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
                 `Relevant context from knowledge base:\n${context}`
             );
             // Deduct KB query credits (fire-and-forget)
-            deductCredits({
+            deductUserCredits({
                 workspaceId,
+                userId,
                 amount: calculateCreditCost({ action: "kb_query" }),
                 type: "kb_query",
-                metadata: { agentId, kbIds: allowedKbIds },
+                metadata: { agentId, userId, kbIds: allowedKbIds },
             }).catch((err) =>
                 logger.warn({ err }, "KB query credit deduction failed")
             );
@@ -1959,12 +1965,14 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
         }
 
         // --- Deduct credits AFTER successful LLM response (fire-and-forget) ---
-        deductCredits({
+        deductUserCredits({
             workspaceId,
+            userId,
             amount: estimatedCost,
             type: "chat_message",
             metadata: {
                 agentId,
+                userId,
                 modelId,
                 multiplier: modelMultiplier,
                 baseCredits: 5,

@@ -40,3 +40,7 @@ export { testSuites } from "./testSuites.ts";
 export { testCases } from "./testCases.ts";
 export { workflows } from "./workflows.ts";
 export { workflowRuns, workflowRunStatusEnum } from "./workflowRuns.ts";
+export { workspaceInvitations, invitationStatusEnum } from "./workspaceInvitations.ts";
+export { userCreditLimits } from "./userCreditLimits.ts";
+export { userAgentAccess } from "./userAgentAccess.ts";
+export { telegramUserLinks } from "./telegramUserLinks.ts";

@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { db } from "../db/client.ts";
-import { credits, creditLedger } from "../db/schema/index.ts";
+import { credits, creditLedger, userCreditLimits, workspaces } from "../db/schema/index.ts";
 import { logger } from "./logger.ts";
 
 // --- Base costs (before multiplier) ---
@@ -57,6 +57,7 @@ interface CheckResult {
     allowed: boolean;
     available: number;
     reason?: "insufficient_credits" | "overage_disabled" | "overage_limit_exceeded";
+    userLimitExceeded?: boolean;
 }
 
 interface DeductParams {
@@ -326,4 +327,105 @@ export async function getBalance(workspaceId: string): Promise<BalanceInfo> {
         overageLimit: c.overageLimit,
         totalConsumed: c.totalCreditsConsumed,
     };
+}
+
+// --- Per-user credit functions ---
+
+export async function checkUserCredits(
+    workspaceId: string,
+    userId: string,
+    requiredCredits: number
+): Promise<CheckResult> {
+    // 1. Check workspace-level credits first
+    const workspaceCheck = await checkCredits(workspaceId, requiredCredits);
+    if (!workspaceCheck.allowed) {
+        return workspaceCheck;
+    }
+
+    // 2. Check if this user is the workspace owner (owners are exempt)
+    const workspace = await db
+        .select({ ownerId: workspaces.ownerId })
+        .from(workspaces)
+        .where(eq(workspaces.id, workspaceId))
+        .limit(1);
+
+    if (workspace[0] && workspace[0].ownerId === userId) {
+        return { ...workspaceCheck, userLimitExceeded: false };
+    }
+
+    // 3. Check per-user credit limit
+    const userLimit = await db
+        .select()
+        .from(userCreditLimits)
+        .where(
+            and(
+                eq(userCreditLimits.workspaceId, workspaceId),
+                eq(userCreditLimits.userId, userId)
+            )
+        )
+        .limit(1);
+
+    if (userLimit.length === 0) {
+        // No per-user limit configured — allowed
+        return { ...workspaceCheck, userLimitExceeded: false };
+    }
+
+    const limit = userLimit[0];
+
+    // Lazy period reset: if periodEnd is set and past, reset creditsUsed
+    if (limit.periodEnd && new Date() > limit.periodEnd) {
+        await db
+            .update(userCreditLimits)
+            .set({
+                creditsUsed: 0,
+                periodStart: new Date(),
+                updatedAt: new Date(),
+            })
+            .where(eq(userCreditLimits.id, limit.id));
+        limit.creditsUsed = 0;
+    }
+
+    const remaining = limit.creditLimit - limit.creditsUsed;
+
+    if (remaining < requiredCredits) {
+        return {
+            allowed: false,
+            available: remaining,
+            reason: "insufficient_credits",
+            userLimitExceeded: true,
+        };
+    }
+
+    return { ...workspaceCheck, userLimitExceeded: false };
+}
+
+export async function deductUserCredits(
+    params: DeductParams & { userId?: string }
+): Promise<DeductResult> {
+    // 1. Deduct from workspace pool (existing logic)
+    const result = await deductCredits(params);
+    if (!result.success) return result;
+
+    // 2. If userId provided, atomically increment user's creditsUsed
+    if (params.userId) {
+        try {
+            await db
+                .update(userCreditLimits)
+                .set({
+                    creditsUsed: sql`${userCreditLimits.creditsUsed} + ${params.amount}`,
+                    updatedAt: new Date(),
+                })
+                .where(
+                    and(
+                        eq(userCreditLimits.workspaceId, params.workspaceId),
+                        eq(userCreditLimits.userId, params.userId)
+                    )
+                );
+        } catch (error) {
+            // Non-fatal: workspace credits already deducted, user tracking is best-effort
+            logger.warn({ error, userId: params.userId }, "Failed to increment user credit usage");
+        }
+    }
+
+    return result;
 }

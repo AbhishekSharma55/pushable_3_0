@@ -30,6 +30,82 @@ export async function sendMail(options: {
     }
 }
 
+export function buildInvitationEmail(
+    workspaceName: string,
+    inviterName: string,
+    role: string,
+    inviteLink: string
+): string {
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+</head>
+<body style="margin:0;padding:0;background:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0a0a;padding:40px 20px;">
+        <tr>
+            <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0" style="background:#141414;border:1px solid #222;border-radius:12px;overflow:hidden;">
+                    <!-- Header -->
+                    <tr>
+                        <td style="padding:32px 40px;border-bottom:1px solid #222;">
+                            <h1 style="margin:0;font-size:20px;font-weight:700;color:#ffffff;">Pushable</h1>
+                        </td>
+                    </tr>
+                    <!-- Body -->
+                    <tr>
+                        <td style="padding:40px;">
+                            <h2 style="margin:0 0 16px;font-size:22px;color:#ffffff;">You've been invited!</h2>
+                            <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#a0a0a0;">
+                                <strong style="color:#ccc;">${inviterName}</strong> has invited you to join
+                                <strong style="color:#ccc;">${workspaceName}</strong> as a <strong style="color:#ccc;">${role}</strong> on Pushable.
+                            </p>
+
+                            <!-- Invite button -->
+                            <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+                                <tr>
+                                    <td align="center">
+                                        <a href="${inviteLink}" style="display:inline-block;padding:14px 32px;background:#3b82f6;color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;border-radius:8px;">
+                                            Accept Invitation
+                                        </a>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <p style="margin:0 0 16px;font-size:13px;line-height:1.6;color:#666;">
+                                This invitation will expire in 7 days. If you don't have a Pushable account yet,
+                                you'll be prompted to create one when you click the link.
+                            </p>
+
+                            <!-- Link fallback -->
+                            <table width="100%" cellpadding="0" cellspacing="0" style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;">
+                                <tr>
+                                    <td style="padding:16px;">
+                                        <p style="margin:0 0 8px;font-size:12px;color:#666;">If the button doesn't work, copy and paste this link:</p>
+                                        <p style="margin:0;font-size:12px;color:#3b82f6;word-break:break-all;">${inviteLink}</p>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                    <!-- Footer -->
+                    <tr>
+                        <td style="padding:24px 40px;border-top:1px solid #222;">
+                            <p style="margin:0;font-size:12px;color:#555;">
+                                &copy; ${new Date().getFullYear()} Pushable. All rights reserved.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>`;
+}
+
 export function buildContactConfirmationEmail(name: string, subject: string, message: string): string {
     const subjectLabels: Record<string, string> = {
         general: "General Inquiry",

@@ -166,38 +166,50 @@ channel_connections
 
 ## Telegram Integration
 
-Agents can receive and respond to Telegram messages via bot integration.
+Pushable uses a **shared platform Telegram bot** that serves all workspaces. Each user links their Telegram account to their workspace, and messages are routed to their CEO agent.
 
-### Setup Flow
+### Setup (Admin)
 
-1. Create a Telegram bot via @BotFather
-2. Get the bot token
-3. Connect the bot in Pushable via the Channels page
-4. Assign the channel to an agent
+1. Create a Telegram bot via @BotFather and get the bot token
+2. Set `TELEGRAM_BOT_TOKEN` in your environment / Docker Compose
+3. Restart the backend — the platform bot starts automatically
 
-### Webhook Endpoint
+### User Flow
+
+1. Go to **Channels** page in the dashboard
+2. Click **Connect Telegram**
+3. A 6-character verification code is generated (valid for 10 minutes)
+4. Open Telegram, find the bot (e.g., `@PushableAIBot`), and send the code
+5. The bot confirms the link — the user can now chat with their CEO agent
+
+### API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/webhooks/telegram/:connectionId` | Receive Telegram updates |
+| `GET` | `/api/telegram/status` | Check if platform bot is available, list linked accounts |
+| `POST` | `/api/telegram/link` | Generate a verification code for linking |
+| `GET` | `/api/telegram/link-status` | Poll to check if verification completed |
+| `DELETE` | `/api/telegram/links/:id` | Unlink a Telegram account |
 
 ### How It Works
 
-1. Telegram sends updates to `/webhooks/telegram/:connectionId`
-2. The channel manager validates the connection status
-3. The Grammy framework processes the update
-4. The message is routed to the assigned agent
-5. The agent executes and the response is sent back to Telegram
+1. A single Grammy.js bot instance runs using `TELEGRAM_BOT_TOKEN`
+2. When a user sends a message, the bot looks up `telegram_user_links` by `from.id`
+3. If linked, the message is routed to the workspace's CEO agent via the agent graph
+4. The CEO agent responds, and the reply is sent back to the user in Telegram
+5. One Telegram account can be linked to one workspace (UNIQUE constraint)
 
 ### Human-in-the-Loop via Telegram
 
-When an agent needs approval (HITL), the approval request can be sent to the Telegram channel. The user can approve or reject directly in Telegram, and the agent resumes.
+When the CEO agent needs approval (HITL), an inline keyboard with Approve/Reject buttons is sent. The user taps a button, and the agent resumes with the decision.
 
 ### Implementation
 
-- **Framework:** Grammy.js (v1.41.1) -- Telegram Bot Framework
-- **File:** `backend/src/channels/telegram.channel.ts`
-- **Webhook registration:** Each connection has a unique webhook URL based on its `connectionId`
+- **Framework:** Grammy.js (v1.41.1) — Telegram Bot Framework
+- **Platform bot:** `backend/src/channels/platform-telegram.ts` (shared singleton)
+- **Per-workspace bot (legacy):** `backend/src/channels/telegram.channel.ts`
+- **Verification:** `backend/src/lib/telegram-verification.ts` (in-memory codes with TTL)
+- **DB table:** `telegram_user_links` maps Telegram user IDs to workspaces
 
 ---
 

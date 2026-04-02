@@ -78,7 +78,9 @@
       "Bash(python3 -c \"import websockets; print\\(''websockets OK''\\)\")",
       "Bash(python3 -c \"import fastapi; print\\(''fastapi OK''\\)\")",
       "Bash(python3 -c \"import uvicorn; print\\(''uvicorn OK''\\)\")",
-      "Bash(DOCKER_HOST= docker compose -f docker-compose.dev.yml up backend cdp-analyzer -d --force-recreate --build)"
+      "Bash(DOCKER_HOST= docker compose -f docker-compose.dev.yml up backend cdp-analyzer -d --force-recreate --build)",
+      "Read(//tmp/**)",
+      "Bash(git status:*)"
     ]
   }
 }

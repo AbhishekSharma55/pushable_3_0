@@ -10,7 +10,8 @@ The platform uses PostgreSQL 16 with the pgvector extension for vector similarit
 Users & Workspaces
   ├── users
   ├── workspaces
-  └── workspace_members
+  ├── workspace_members
+  └── workspace_invitations
 
 Agents
   ├── agents
@@ -60,7 +61,11 @@ Vault
 Credits & Billing
   ├── credits
   ├── credit_logs
-  └── credit_ledger
+  ├── credit_ledger
+  └── user_credit_limits
+
+User Management
+  └── user_agent_access
 
 Files
   └── bucket_files
@@ -120,6 +125,9 @@ CREATE TYPE file_source AS ENUM ('chat_upload', 'agent_generated', 'api_upload')
 CREATE TYPE llm_provider AS ENUM ('openai', 'anthropic', 'google', 'deepseek', 'meta');
 CREATE TYPE plan_tier AS ENUM ('free', 'starter', 'pro', 'scale');
 
+-- Invitations
+CREATE TYPE invitation_status AS ENUM ('pending', 'accepted', 'expired', 'revoked');
+
 -- Credits
 CREATE TYPE ledger_type AS ENUM (
   'subscription_grant', 'topup', 'chat_message', 'task_run', 'workflow_step',
@@ -163,6 +171,21 @@ CREATE TYPE ledger_type AS ENUM (
 | `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
 | `user_id` | UUID | NOT NULL, FK → users(id) CASCADE |
 | `role` | member_role | NOT NULL, default 'member' |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+
+### workspace_invitations
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `email` | TEXT | NOT NULL |
+| `role` | member_role | NOT NULL, default 'member' |
+| `invited_by` | UUID | NOT NULL, FK → users(id) |
+| `token` | TEXT | NOT NULL, UNIQUE |
+| `status` | invitation_status | NOT NULL, default 'pending' |
+| `expires_at` | TIMESTAMP | NOT NULL |
+| `accepted_at` | TIMESTAMP | Nullable |
 | `created_at` | TIMESTAMP | NOT NULL, default NOW |
 
 ---
@@ -570,6 +593,26 @@ CREATE TYPE ledger_type AS ENUM (
 | `created_at` | TIMESTAMP | NOT NULL, default NOW |
 | `updated_at` | TIMESTAMP | NOT NULL, default NOW |
 
+### telegram_user_links
+
+Maps Telegram user IDs to workspaces for the shared platform bot.
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `telegram_user_id` | TEXT | NOT NULL, UNIQUE |
+| `telegram_username` | TEXT | Nullable |
+| `telegram_first_name` | TEXT | Nullable |
+| `telegram_chat_id` | TEXT | Nullable |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `user_id` | UUID | Nullable, FK → users(id) SET NULL |
+| `verified_at` | TIMESTAMP | Nullable |
+| `last_message_at` | TIMESTAMP | Nullable |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+| `updated_at` | TIMESTAMP | NOT NULL, default NOW |
+
+**Indexes:** `idx_telegram_links_workspace`, `idx_telegram_links_telegram_user_id`
+
 ---
 
 ## Vault
@@ -644,6 +687,38 @@ CREATE TYPE ledger_type AS ENUM (
 | `credits_deducted` | INTEGER | NOT NULL, default 0 |
 | `model` | TEXT | Nullable |
 | `created_at` | TIMESTAMP | NOT NULL, default NOW |
+
+### user_credit_limits
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `user_id` | UUID | NOT NULL, FK → users(id) CASCADE |
+| `credit_limit` | INTEGER | NOT NULL |
+| `credits_used` | INTEGER | NOT NULL, default 0 |
+| `period_start` | TIMESTAMP | NOT NULL |
+| `period_end` | TIMESTAMP | NOT NULL |
+| `updated_at` | TIMESTAMP | NOT NULL, default NOW |
+
+**Unique constraint:** `(workspace_id, user_id)`
+
+---
+
+## User Management
+
+### user_agent_access
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `user_id` | UUID | NOT NULL, FK → users(id) CASCADE |
+| `agent_id` | UUID | NOT NULL, FK → agents(id) CASCADE |
+| `allowed` | BOOLEAN | NOT NULL, default true |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+
+**Unique constraint:** `(workspace_id, user_id, agent_id)`
 
 ---
 
@@ -738,9 +813,11 @@ CREATE TYPE ledger_type AS ENUM (
 workspaces → agents, sessions, knowledge_bases, schedules, tools, skills,
              integrations, input_channels, channel_connections, credits,
              credit_ledger, credit_logs, bucket_files, browser_profiles,
-             browser_proxies, vault_connections, blogs
+             browser_proxies, vault_connections, blogs,
+             workspace_invitations, user_credit_limits, user_agent_access
 
-agents → sessions, schedules, agent_permissions, agent_integrations, agent_memories
+agents → sessions, schedules, agent_permissions, agent_integrations, agent_memories,
+         user_agent_access
 
 sessions → messages, runs
 

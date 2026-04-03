@@ -83,6 +83,7 @@ export default function ChannelsPage() {
     const [agents, setAgents] = useState<Agent[]>([]);
     const [loading, setLoading] = useState(true);
     const [selected, setSelected] = useState<ChannelConnection | null>(null);
+    const [selectedTelegramLink, setSelectedTelegramLink] = useState<TelegramUserLink | null>(null);
     const [sheetOpen, setSheetOpen] = useState(false);
 
     // Create form state
@@ -362,14 +363,14 @@ export default function ChannelsPage() {
                         </h2>
                     </div>
                     <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
-                        {loading ? (
+                        {loading || telegramLoading ? (
                             Array.from({ length: 3 }).map((_, i) => (
                                 <div key={i} className="p-3 space-y-2">
                                     <Skeleton className="h-4 w-32" />
                                     <Skeleton className="h-3 w-24" />
                                 </div>
                             ))
-                        ) : connections.length === 0 ? (
+                        ) : connections.length === 0 && (!telegramStatus || telegramStatus.links.length === 0) ? (
                             <div className="flex flex-col items-center justify-center h-full text-center px-6 gap-3">
                                 <Radio className="h-8 w-8 text-muted-foreground/30" />
                                 <div>
@@ -380,45 +381,173 @@ export default function ChannelsPage() {
                                 </div>
                             </div>
                         ) : (
-                            connections.map((conn) => (
-                                <div
-                                    key={conn.id}
-                                    className={`group flex items-center gap-3 rounded-lg px-3 py-3 cursor-pointer transition-colors ${
-                                        selected?.id === conn.id ? 'bg-accent ring-1 ring-border' : 'hover:bg-accent/50'
-                                    }`}
-                                    onClick={() => { setSelected(conn); setTestResult(null); }}
-                                >
-                                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted flex-shrink-0">
-                                        <ChannelIcon type={conn.channelType} className="h-4 w-4 text-muted-foreground" />
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-2">
-                                            <p className="text-sm font-medium truncate">{conn.name}</p>
-                                            <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-                                                {conn.channelType}
-                                            </Badge>
+                            <>
+                                {/* Telegram platform links */}
+                                {telegramStatus?.links.map((link) => (
+                                    <div
+                                        key={link.id}
+                                        className={`group flex items-center gap-3 rounded-lg px-3 py-3 cursor-pointer transition-colors ${
+                                            selectedTelegramLink?.id === link.id ? 'bg-accent ring-1 ring-border' : 'hover:bg-accent/50'
+                                        }`}
+                                        onClick={() => { setSelectedTelegramLink(link); setSelected(null); setTestResult(null); }}
+                                    >
+                                        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-500/10 flex-shrink-0">
+                                            <Send className="h-4 w-4 text-blue-500" />
                                         </div>
-                                        <div className="flex items-center gap-2 mt-0.5">
-                                            <StatusDot status={conn.status} />
-                                            <span className="text-[11px] text-muted-foreground">
-                                                {agentNameMap[conn.agentId] || 'Agent'}
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2">
+                                                <p className="text-sm font-medium truncate">
+                                                    {link.telegramFirstName || 'Telegram'}
+                                                    {link.telegramUsername ? ` @${link.telegramUsername}` : ''}
+                                                </p>
+                                                <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                                    telegram
+                                                </Badge>
+                                            </div>
+                                            <div className="flex items-center gap-2 mt-0.5">
+                                                <StatusDot status="active" />
+                                                <span className="text-[11px] text-muted-foreground">CEO Agent</span>
+                                            </div>
+                                        </div>
+                                        {link.lastMessageAt && (
+                                            <span className="text-[10px] text-muted-foreground/60 flex-shrink-0">
+                                                {new Date(link.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                                             </span>
-                                        </div>
+                                        )}
                                     </div>
-                                    {conn.lastMessageAt && (
-                                        <span className="text-[10px] text-muted-foreground/60 flex-shrink-0">
-                                            {new Date(conn.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                                        </span>
-                                    )}
-                                </div>
-                            ))
+                                ))}
+
+                                {/* Slack/custom connections */}
+                                {connections.map((conn) => (
+                                    <div
+                                        key={conn.id}
+                                        className={`group flex items-center gap-3 rounded-lg px-3 py-3 cursor-pointer transition-colors ${
+                                            selected?.id === conn.id ? 'bg-accent ring-1 ring-border' : 'hover:bg-accent/50'
+                                        }`}
+                                        onClick={() => { setSelected(conn); setSelectedTelegramLink(null); setTestResult(null); }}
+                                    >
+                                        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted flex-shrink-0">
+                                            <ChannelIcon type={conn.channelType} className="h-4 w-4 text-muted-foreground" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2">
+                                                <p className="text-sm font-medium truncate">{conn.name}</p>
+                                                <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                                    {conn.channelType}
+                                                </Badge>
+                                            </div>
+                                            <div className="flex items-center gap-2 mt-0.5">
+                                                <StatusDot status={conn.status} />
+                                                <span className="text-[11px] text-muted-foreground">
+                                                    {agentNameMap[conn.agentId] || 'Agent'}
+                                                </span>
+                                            </div>
+                                        </div>
+                                        {conn.lastMessageAt && (
+                                            <span className="text-[10px] text-muted-foreground/60 flex-shrink-0">
+                                                {new Date(conn.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                            </span>
+                                        )}
+                                    </div>
+                                ))}
+                            </>
                         )}
                     </div>
                 </div>
 
                 {/* Right — Detail panel */}
                 <div className="flex-1 rounded-xl border border-border/60 bg-card overflow-y-auto">
-                    {selected ? (
+                    {selectedTelegramLink ? (
+                        <div className="p-6 space-y-6">
+                            <div className="flex items-start justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-500/10">
+                                        <Send className="h-5 w-5 text-blue-500" />
+                                    </div>
+                                    <div>
+                                        <h2 className="text-lg font-semibold">
+                                            {selectedTelegramLink.telegramFirstName || 'Telegram'}
+                                            {selectedTelegramLink.telegramUsername && (
+                                                <span className="text-muted-foreground font-normal ml-2">@{selectedTelegramLink.telegramUsername}</span>
+                                            )}
+                                        </h2>
+                                        <div className="flex items-center gap-2 mt-0.5">
+                                            <StatusDot status="active" />
+                                            <span className="text-sm text-muted-foreground">Connected</span>
+                                            <Badge variant="outline" className="text-xs">telegram</Badge>
+                                        </div>
+                                    </div>
+                                </div>
+                                <AlertDialog>
+                                    <AlertDialogTrigger asChild>
+                                        <Button variant="outline" size="sm" className="text-destructive hover:text-destructive gap-1.5">
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                            Unlink
+                                        </Button>
+                                    </AlertDialogTrigger>
+                                    <AlertDialogContent>
+                                        <AlertDialogHeader>
+                                            <AlertDialogTitle>Unlink Telegram Account</AlertDialogTitle>
+                                            <AlertDialogDescription>
+                                                This will disconnect this Telegram account. Messages from this user will no longer reach your CEO agent.
+                                            </AlertDialogDescription>
+                                        </AlertDialogHeader>
+                                        <AlertDialogFooter>
+                                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                            <AlertDialogAction
+                                                onClick={() => { handleTelegramUnlink(selectedTelegramLink.id); setSelectedTelegramLink(null); }}
+                                                className="bg-destructive text-destructive-foreground"
+                                            >
+                                                Unlink
+                                            </AlertDialogAction>
+                                        </AlertDialogFooter>
+                                    </AlertDialogContent>
+                                </AlertDialog>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Telegram User ID</p>
+                                    <p className="text-sm font-mono font-medium">{selectedTelegramLink.telegramUserId}</p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Connected Agent</p>
+                                    <p className="text-sm font-medium">CEO Agent</p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Linked At</p>
+                                    <p className="text-sm font-medium">
+                                        {selectedTelegramLink.verifiedAt
+                                            ? new Date(selectedTelegramLink.verifiedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                            : 'Pending'}
+                                    </p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Last Message</p>
+                                    <p className="text-sm font-medium">
+                                        {selectedTelegramLink.lastMessageAt
+                                            ? new Date(selectedTelegramLink.lastMessageAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                            : 'None yet'}
+                                    </p>
+                                </div>
+                            </div>
+
+                            {telegramStatus?.botUsername && (
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Bot</p>
+                                    <a
+                                        href={`https://t.me/${telegramStatus.botUsername}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-sm text-blue-600 hover:underline font-medium inline-flex items-center gap-1"
+                                    >
+                                        @{telegramStatus.botUsername}
+                                        <ExternalLink className="h-3 w-3" />
+                                    </a>
+                                </div>
+                            )}
+                        </div>
+                    ) : selected ? (
                         <div className="p-6 space-y-6">
                             <div className="flex items-start justify-between">
                                 <div className="flex items-center gap-3">

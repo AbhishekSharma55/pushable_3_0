@@ -2,9 +2,11 @@ import { Bot, InlineKeyboard } from "grammy";
 import { logger } from "../lib/logger.ts";
 import { telegramLinkRepository } from "../repositories/telegram-link.repository.ts";
 import { ceoService } from "../services/ceo.service.ts";
+import { telegramExclusivityService } from "../services/telegram-exclusivity.service.ts";
 import {
     validateAndConsume,
 } from "../lib/telegram-verification.ts";
+import { AppError } from "../lib/errors.ts";
 import { routeMessage, resolveChannelApproval } from "./message-router.ts";
 import type { NormalizedMessage, NormalizedResponse } from "./types.ts";
 
@@ -67,6 +69,9 @@ export class PlatformTelegramBot {
                 const result = validateAndConsume(text);
                 if (result) {
                     try {
+                        // Check exclusivity: ensure this Telegram account isn't in any custom bot
+                        await telegramExclusivityService.assertNotInCustomBot(telegramUserId);
+
                         await telegramLinkRepository.create({
                             telegramUserId,
                             telegramUsername: ctx.from.username,
@@ -81,15 +86,19 @@ export class PlatformTelegramBot {
                         );
                         return;
                     } catch (error: unknown) {
-                        const msg = error instanceof Error ? error.message : String(error);
-                        if (msg.includes("unique") || msg.includes("duplicate")) {
-                            await ctx.reply(
-                                "This Telegram account is already linked to a workspace. " +
-                                "Please unlink it from your dashboard first before linking to a new workspace."
-                            );
+                        if (error instanceof AppError) {
+                            await ctx.reply(error.message);
                         } else {
-                            logger.error({ error, telegramUserId }, "Failed to create telegram link");
-                            await ctx.reply("Something went wrong linking your account. Please try again.");
+                            const msg = error instanceof Error ? error.message : String(error);
+                            if (msg.includes("unique") || msg.includes("duplicate")) {
+                                await ctx.reply(
+                                    "This Telegram account is already linked to a workspace. " +
+                                    "Please unlink it from your dashboard first before linking to a new workspace."
+                                );
+                            } else {
+                                logger.error({ error, telegramUserId }, "Failed to create telegram link");
+                                await ctx.reply("Something went wrong linking your account. Please try again.");
+                            }
                         }
                         return;
                     }

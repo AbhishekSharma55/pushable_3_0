@@ -44,8 +44,17 @@ export async function webhookRoutes(fastify: FastifyInstance) {
 
         const teamId = body.team_id as string;
 
+        // Handle app_uninstalled event
+        if (event.type === "app_uninstalled" || (body.event as Record<string, unknown>)?.type === "tokens_revoked") {
+            const platformBot = channelManager.getPlatformSlackBot();
+            if (platformBot) {
+                await platformBot.removeInstallation(teamId);
+            }
+            return reply.status(200).send({ ok: true });
+        }
+
         try {
-            // Find connection by team ID
+            // First, check for per-workspace channel connections
             const connections = await channelRepository.findActiveConnections();
             const connection = connections.find((c) => {
                 const config = c.config as Record<string, unknown>;
@@ -53,8 +62,15 @@ export async function webhookRoutes(fastify: FastifyInstance) {
             });
 
             if (connection) {
+                // Per-workspace connection takes priority
                 const slackAdapter = channelManager.getSlackAdapter();
                 await slackAdapter.handleEvent(connection.id, event);
+            } else {
+                // Fallback to platform Slack bot
+                const platformBot = channelManager.getPlatformSlackBot();
+                if (platformBot && platformBot.hasTeam(teamId)) {
+                    await platformBot.handleEvent(teamId, event);
+                }
             }
         } catch (error) {
             logger.error({ teamId, error }, "Slack webhook error");
@@ -63,8 +79,30 @@ export async function webhookRoutes(fastify: FastifyInstance) {
         return reply.status(200).send({ ok: true });
     });
 
-    // POST /webhooks/slack/interactive (future use)
-    fastify.post("/webhooks/slack/interactive", async (_request, reply) => {
+    // POST /webhooks/slack/interactive — handle HITL approval buttons
+    fastify.post("/webhooks/slack/interactive", async (request, reply) => {
+        try {
+            // Slack sends interactive payloads as application/x-www-form-urlencoded
+            // with a `payload` field containing JSON
+            let payload: Record<string, unknown>;
+
+            const body = request.body as Record<string, unknown>;
+            if (typeof body.payload === "string") {
+                payload = JSON.parse(body.payload);
+            } else if (body.payload && typeof body.payload === "object") {
+                payload = body.payload as Record<string, unknown>;
+            } else {
+                payload = body;
+            }
+
+            const platformBot = channelManager.getPlatformSlackBot();
+            if (platformBot) {
+                await platformBot.handleInteraction(payload);
+            }
+        } catch (error) {
+            logger.error({ error }, "Slack interactive webhook error");
+        }
+
         return reply.status(200).send({ ok: true });
     });
 }

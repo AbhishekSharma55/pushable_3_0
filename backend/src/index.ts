@@ -44,6 +44,8 @@ import { cdpAnalyzerRoutes } from "./routes/cdp-analyzer.ts";
 import { invitationRoutes } from "./routes/invitations.ts";
 import { memberRoutes } from "./routes/members.ts";
 import { telegramLinkRoutes } from "./routes/telegram-link.ts";
+import { slackLinkRoutes } from "./routes/slack-link.ts";
+import { slackOAuthRoutes } from "./routes/slack-oauth.ts";
 import { browserService } from "./services/browser.service.ts";
 
 const app = Fastify({ logger: false });
@@ -120,9 +122,11 @@ await app.register(cdpAnalyzerRoutes, { prefix: "/api" });
 await app.register(invitationRoutes, { prefix: "/api" });
 await app.register(memberRoutes, { prefix: "/api" });
 await app.register(telegramLinkRoutes, { prefix: "/api" });
+await app.register(slackLinkRoutes, { prefix: "/api" });
 
-// Webhook routes — NO auth, external platforms call these
+// Webhook routes + OAuth routes — NO auth, external platforms call these
 await app.register(webhookRoutes);
+await app.register(slackOAuthRoutes);
 
 const port = Number(process.env.PORT) || 4000;
 await app.listen({ port, host: "0.0.0.0" });
@@ -139,6 +143,7 @@ startWorkers();
 await initScheduler();
 await channelManager.initializeAllActive();
 await channelManager.initializePlatformTelegram();
+await channelManager.initializePlatformSlack();
 
 logger.info(`Server running on port ${port}`);
 
@@ -146,6 +151,7 @@ logger.info(`Server running on port ${port}`);
 const shutdown = async () => {
   logger.info("Shutting down...");
   await channelManager.shutdownPlatformTelegram();
+  await channelManager.shutdownPlatformSlack();
   await stopWorkers();
   await scheduleQueue.close();
   await app.close();

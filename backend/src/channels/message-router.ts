@@ -184,8 +184,9 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
         });
 
         // Create agent graph and invoke (non-streaming for channels)
-        // Use platformUserId (UUID) for credit tracking, fall back to externalUserId for memory scoping
-        const graphUserId = message.platformUserId || message.externalUserId;
+        // Use platformUserId (UUID) for credit tracking and memory scoping
+        // For custom bots without a platform user, pass undefined (workspace-level credit check only)
+        const graphUserId = message.platformUserId || undefined;
         const { graph } = await createAgentGraph(message.agentId, message.workspaceId, graphUserId);
 
         const result = await graph.invoke(
@@ -233,7 +234,7 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
             }
 
             // Update last message timestamp (skip for platform bot — handled by telegram-link repo)
-            if (message.connectionId !== "platform-telegram") {
+            if (message.connectionId !== "platform-telegram" && message.connectionId !== "platform-slack") {
                 await channelRepository.updateLastMessageAt(message.connectionId);
             }
             return; // Don't send normal response — waiting for approval
@@ -266,7 +267,7 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
         });
 
         // Update last message timestamp (skip for platform bot — handled by telegram-link repo)
-        if (message.connectionId !== "platform-telegram") {
+        if (message.connectionId !== "platform-telegram" && message.connectionId !== "platform-slack") {
             await channelRepository.updateLastMessageAt(message.connectionId);
         }
 

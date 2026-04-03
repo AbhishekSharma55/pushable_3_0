@@ -44,3 +44,8 @@ export { workspaceInvitations, invitationStatusEnum } from "./workspaceInvitatio
 export { userCreditLimits } from "./userCreditLimits.ts";
 export { userAgentAccess } from "./userAgentAccess.ts";
 export { telegramUserLinks } from "./telegramUserLinks.ts";
+export { slackInstallations } from "./slackInstallations.ts";
+export { slackUserLinks } from "./slackUserLinks.ts";
+export { platformBotConfigs } from "./platformBotConfigs.ts";
+export { creditCostRanges } from "./creditCostRanges.ts";
+export { creditCostMultipliers } from "./creditCostMultipliers.ts";

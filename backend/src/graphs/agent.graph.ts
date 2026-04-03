@@ -44,10 +44,12 @@ import { browserRepository } from "../repositories/browser.repository.ts";
 import {
     checkCredits,
     calculateCreditCost,
+    calculateCreditFromDollarCost,
     isPlanSufficient,
     checkUserCredits,
     deductUserCredits,
 } from "../lib/credit-engine.ts";
+import { calculateDollarCost } from "../lib/dollar-cost.ts";
 import { channelRepository } from "../repositories/channel.repository.ts";
 import { channelManager } from "../channels/channel-manager.ts";
 import { getBrowserAgentSettings } from "../lib/system-settings.ts";
@@ -1965,22 +1967,54 @@ You have notebook tools (\`write_notebook\`, \`read_notebook\`, \`list_notebook\
         }
 
         // --- Deduct credits AFTER successful LLM response (fire-and-forget) ---
-        deductUserCredits({
-            workspaceId,
-            userId,
-            amount: estimatedCost,
-            type: "chat_message",
-            metadata: {
-                agentId,
-                userId,
-                modelId,
-                multiplier: modelMultiplier,
-                baseCredits: 5,
-                finalCredits: estimatedCost,
-            },
-        }).catch((err) =>
-            logger.warn({ err }, "Chat message credit deduction failed")
-        );
+        // Try range-based deduction using actual token usage and dollar cost
+        (async () => {
+            try {
+                let actualCost = estimatedCost; // fallback to old formula
+                let dollarCost: number | null = null;
+                let tokenUsage: { input_tokens?: number; output_tokens?: number } | undefined;
+
+                const aiMsg = response as AIMessage;
+                const usageMeta = aiMsg.usage_metadata;
+
+                if (usageMeta && (usageMeta.input_tokens || usageMeta.output_tokens)) {
+                    tokenUsage = {
+                        input_tokens: usageMeta.input_tokens,
+                        output_tokens: usageMeta.output_tokens,
+                    };
+                    dollarCost = await calculateDollarCost(
+                        modelId,
+                        usageMeta.input_tokens ?? 0,
+                        usageMeta.output_tokens ?? 0
+                    );
+                    if (dollarCost !== null) {
+                        const rangeCost = await calculateCreditFromDollarCost(dollarCost);
+                        if (rangeCost !== null) {
+                            actualCost = rangeCost;
+                        }
+                    }
+                }
+
+                await deductUserCredits({
+                    workspaceId,
+                    userId,
+                    amount: actualCost,
+                    type: "chat_message",
+                    metadata: {
+                        agentId,
+                        userId,
+                        modelId,
+                        multiplier: modelMultiplier,
+                        baseCredits: 5,
+                        finalCredits: actualCost,
+                        dollarCost,
+                        tokenUsage,
+                    },
+                });
+            } catch (err) {
+                logger.warn({ err }, "Chat message credit deduction failed");
+            }
+        })();
 
         return { messages: [response], todos: currentTodos, step_count: stepCount };
     };

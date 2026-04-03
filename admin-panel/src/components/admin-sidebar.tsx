@@ -12,6 +12,8 @@ import {
   Zap,
   LogOut,
   Wrench,
+  Radio,
+  DollarSign,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -21,6 +23,8 @@ const navItems = [
   { href: '/monitoring',label: 'Resource Monitoring', icon: Server          },
   { href: '/tools',     label: 'Tools',               icon: Wrench          },
   { href: '/plans',     label: 'Plans Management',   icon: CreditCard      },
+  { href: '/credit-ranges', label: 'Credit Ranges',     icon: DollarSign      },
+  { href: '/channel-config', label: 'Channel Config',   icon: Radio           },
   { href: '/settings',  label: 'Configuration',      icon: Settings        },
 ]
 

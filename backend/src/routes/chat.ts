@@ -13,6 +13,7 @@ import { stripToolCallXml, stripToolCallXmlFinal } from "../lib/sanitize-llm-out
 import type { BrowserAgentEventEmitter } from "../lib/browser-agent-tool.ts";
 import { fileProcessingService, type ProcessedAttachment } from "../services/file-processing.service.ts";
 import { openrouterService } from "../services/openrouter.service.ts";
+import { calculateDollarCost } from "../lib/dollar-cost.ts";
 import { agentRepository } from "../repositories/agent.repository.ts";
 import { bucketService } from "../services/bucket.service.ts";
 import { createLLM } from "../lib/gateway.ts";
@@ -426,14 +427,8 @@ async function calculateAndEmitCost(
     if (!modelId || (usage.inputTokens === 0 && usage.outputTokens === 0)) return undefined;
 
     try {
-        const models = await openrouterService.getModels();
-        const modelInfo = models.find((m) => m.id === modelId);
-        if (!modelInfo) return undefined;
-
-        const promptPrice = parseFloat(modelInfo.pricing.prompt);
-        const completionPrice = parseFloat(modelInfo.pricing.completion);
-        const totalCost =
-            usage.inputTokens * promptPrice + usage.outputTokens * completionPrice;
+        const totalCost = await calculateDollarCost(modelId, usage.inputTokens, usage.outputTokens);
+        if (totalCost === null) return undefined;
 
         const costData = {
             inputTokens: usage.inputTokens,

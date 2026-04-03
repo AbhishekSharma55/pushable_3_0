@@ -1,4 +1,4 @@
-import { boolean, integer, pgTable, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, numeric, pgTable, timestamp, uuid } from "drizzle-orm/pg-core";
 import { workspaces } from "./workspaces.ts";
 
 export const credits = pgTable("credits", {
@@ -7,11 +7,11 @@ export const credits = pgTable("credits", {
         .unique()
         .notNull()
         .references(() => workspaces.id, { onDelete: "cascade" }),
-    balance: integer("balance").default(1000).notNull(),
-    planCredits: integer("plan_credits").default(1000).notNull(),
-    topupCredits: integer("topup_credits").default(0).notNull(),
+    balance: numeric("balance", { precision: 12, scale: 4 }).default("1000").notNull(),
+    planCredits: numeric("plan_credits", { precision: 12, scale: 4 }).default("1000").notNull(),
+    topupCredits: numeric("topup_credits", { precision: 12, scale: 4 }).default("0").notNull(),
     overageEnabled: boolean("overage_enabled").default(false).notNull(),
-    overageLimit: integer("overage_limit").default(500).notNull(),
-    totalCreditsConsumed: integer("total_credits_consumed").default(0).notNull(),
+    overageLimit: numeric("overage_limit", { precision: 12, scale: 4 }).default("500").notNull(),
+    totalCreditsConsumed: numeric("total_credits_consumed", { precision: 12, scale: 4 }).default("0").notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

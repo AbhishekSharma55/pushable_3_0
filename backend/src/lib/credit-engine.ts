@@ -1,7 +1,13 @@
 import { eq, and, sql } from "drizzle-orm";
 import { db } from "../db/client.ts";
-import { credits, creditLedger, userCreditLimits, workspaces } from "../db/schema/index.ts";
+import { credits, creditLedger, userCreditLimits, workspaces, creditCostRanges, creditCostMultipliers } from "../db/schema/index.ts";
 import { logger } from "./logger.ts";
+
+// --- Helper: numeric columns come back as strings from Drizzle ---
+
+function n(val: string | number): number {
+    return typeof val === "string" ? parseFloat(val) : val;
+}
 
 // --- Base costs (before multiplier) ---
 
@@ -104,6 +110,117 @@ export function isPlanSufficient(
     return (PLAN_ORDER[workspacePlan] ?? 0) >= (PLAN_ORDER[requiredPlan] ?? 0);
 }
 
+// --- Range-based credit lookup with in-memory cache ---
+
+interface CachedRange {
+    minDollar: number;
+    maxDollar: number;
+    creditAmount: number;
+}
+
+let rangesCache: CachedRange[] | null = null;
+let rangesCacheTimestamp = 0;
+const RANGES_CACHE_TTL_MS = 60_000; // 60 seconds
+
+async function loadCreditRanges(): Promise<CachedRange[]> {
+    const now = Date.now();
+    if (rangesCache && now - rangesCacheTimestamp < RANGES_CACHE_TTL_MS) {
+        return rangesCache;
+    }
+
+    try {
+        const rows = await db
+            .select()
+            .from(creditCostRanges)
+            .where(eq(creditCostRanges.isActive, true))
+            .orderBy(creditCostRanges.minDollar);
+
+        rangesCache = rows.map((r) => ({
+            minDollar: n(r.minDollar),
+            maxDollar: n(r.maxDollar),
+            creditAmount: n(r.creditAmount),
+        }));
+        rangesCacheTimestamp = now;
+        return rangesCache;
+    } catch (error) {
+        logger.warn({ error }, "Failed to load credit cost ranges, using empty list");
+        return [];
+    }
+}
+
+// --- Multiplier-based credit lookup with in-memory cache ---
+
+interface CachedMultiplier {
+    aboveDollar: number;
+    multiplier: number;
+}
+
+let multipliersCache: CachedMultiplier[] | null = null;
+let multipliersCacheTimestamp = 0;
+
+async function loadCreditMultipliers(): Promise<CachedMultiplier[]> {
+    const now = Date.now();
+    if (multipliersCache && now - multipliersCacheTimestamp < RANGES_CACHE_TTL_MS) {
+        return multipliersCache;
+    }
+
+    try {
+        const rows = await db
+            .select()
+            .from(creditCostMultipliers)
+            .where(eq(creditCostMultipliers.isActive, true))
+            .orderBy(creditCostMultipliers.aboveDollar);
+
+        // Sort descending so we match the highest threshold first
+        multipliersCache = rows
+            .map((r) => ({
+                aboveDollar: n(r.aboveDollar),
+                multiplier: n(r.multiplier),
+            }))
+            .sort((a, b) => b.aboveDollar - a.aboveDollar);
+        multipliersCacheTimestamp = now;
+        return multipliersCache;
+    } catch (error) {
+        logger.warn({ error }, "Failed to load credit cost multipliers, using empty list");
+        return [];
+    }
+}
+
+/** Force-refresh the cached ranges and multipliers (call after admin updates) */
+export function invalidateCreditRangesCache(): void {
+    rangesCache = null;
+    rangesCacheTimestamp = 0;
+    multipliersCache = null;
+    multipliersCacheTimestamp = 0;
+}
+
+/**
+ * Look up the credit amount for a given dollar cost.
+ *
+ * 1. Try configured ranges first (min <= cost < max → fixed credit amount)
+ * 2. If no range matches, try multiplier tiers (cost above threshold → cost × multiplier)
+ * 3. If nothing matches, return null (caller falls back to old formula)
+ */
+export async function calculateCreditFromDollarCost(dollarCost: number): Promise<number | null> {
+    // 1. Try ranges
+    const ranges = await loadCreditRanges();
+    for (const range of ranges) {
+        if (dollarCost >= range.minDollar && dollarCost < range.maxDollar) {
+            return range.creditAmount;
+        }
+    }
+
+    // 2. Try multipliers (sorted descending by threshold, so first match is highest applicable tier)
+    const multipliers = await loadCreditMultipliers();
+    for (const tier of multipliers) {
+        if (dollarCost >= tier.aboveDollar) {
+            return dollarCost * tier.multiplier;
+        }
+    }
+
+    return null; // no match — caller falls back to old formula
+}
+
 // --- Core functions ---
 
 export function calculateCreditCost(params: CalculateCostParams): number {
@@ -166,7 +283,7 @@ export async function checkCredits(
     }
 
     const c = row[0];
-    const available = c.planCredits + c.topupCredits;
+    const available = n(c.planCredits) + n(c.topupCredits);
 
     if (available >= requiredCredits) {
         return { allowed: true, available };
@@ -178,7 +295,7 @@ export async function checkCredits(
 
     // With overage: allow if deficit won't exceed overage limit
     const deficit = requiredCredits - available;
-    if (deficit <= c.overageLimit) {
+    if (deficit <= n(c.overageLimit)) {
         return { allowed: true, available };
     }
 
@@ -200,19 +317,21 @@ export async function deductCredits(params: DeductParams): Promise<DeductResult>
         }
 
         const c = row[0];
+        const planCr = n(c.planCredits);
+        const topupCr = n(c.topupCredits);
         let planDeduct = 0;
         let topupDeduct = 0;
         let remaining = amount;
 
         // Deduct from planCredits first
-        if (c.planCredits > 0) {
-            planDeduct = Math.min(c.planCredits, remaining);
+        if (planCr > 0) {
+            planDeduct = Math.min(planCr, remaining);
             remaining -= planDeduct;
         }
 
         // Then from topupCredits
-        if (remaining > 0 && c.topupCredits > 0) {
-            topupDeduct = Math.min(c.topupCredits, remaining);
+        if (remaining > 0 && topupCr > 0) {
+            topupDeduct = Math.min(topupCr, remaining);
             remaining -= topupDeduct;
         }
 
@@ -221,18 +340,18 @@ export async function deductCredits(params: DeductParams): Promise<DeductResult>
             planDeduct += remaining; // will make planCredits negative
         }
 
-        const newPlan = c.planCredits - planDeduct;
-        const newTopup = c.topupCredits - topupDeduct;
+        const newPlan = planCr - planDeduct;
+        const newTopup = topupCr - topupDeduct;
         const newBalance = newPlan + newTopup;
-        const newTotalConsumed = c.totalCreditsConsumed + amount;
+        const newTotalConsumed = n(c.totalCreditsConsumed) + amount;
 
         await db
             .update(credits)
             .set({
-                planCredits: newPlan,
-                topupCredits: newTopup,
-                balance: newBalance,
-                totalCreditsConsumed: newTotalConsumed,
+                planCredits: String(newPlan),
+                topupCredits: String(newTopup),
+                balance: String(newBalance),
+                totalCreditsConsumed: String(newTotalConsumed),
                 updatedAt: new Date(),
             })
             .where(eq(credits.workspaceId, workspaceId));
@@ -240,9 +359,9 @@ export async function deductCredits(params: DeductParams): Promise<DeductResult>
         // Insert ledger entry
         await db.insert(creditLedger).values({
             workspaceId,
-            amount: -amount,
+            amount: String(-amount),
             type,
-            creditsAfter: newBalance,
+            creditsAfter: String(newBalance),
             metadata,
         });
 
@@ -267,8 +386,8 @@ export async function addCredits(params: AddParams): Promise<{ creditsAfter: num
     }
 
     const c = row[0];
-    let newPlan = c.planCredits;
-    let newTopup = c.topupCredits;
+    let newPlan = n(c.planCredits);
+    let newTopup = n(c.topupCredits);
 
     if (type === "subscription_grant") {
         newPlan += amount;
@@ -282,18 +401,18 @@ export async function addCredits(params: AddParams): Promise<{ creditsAfter: num
     await db
         .update(credits)
         .set({
-            planCredits: newPlan,
-            topupCredits: newTopup,
-            balance: newBalance,
+            planCredits: String(newPlan),
+            topupCredits: String(newTopup),
+            balance: String(newBalance),
             updatedAt: new Date(),
         })
         .where(eq(credits.workspaceId, workspaceId));
 
     await db.insert(creditLedger).values({
         workspaceId,
-        amount,
+        amount: String(amount),
         type,
-        creditsAfter: newBalance,
+        creditsAfter: String(newBalance),
         metadata,
     });
 
@@ -320,12 +439,12 @@ export async function getBalance(workspaceId: string): Promise<BalanceInfo> {
 
     const c = row[0];
     return {
-        planCredits: c.planCredits,
-        topupCredits: c.topupCredits,
-        availableCredits: c.planCredits + c.topupCredits,
+        planCredits: n(c.planCredits),
+        topupCredits: n(c.topupCredits),
+        availableCredits: n(c.planCredits) + n(c.topupCredits),
         overageEnabled: c.overageEnabled,
-        overageLimit: c.overageLimit,
-        totalConsumed: c.totalCreditsConsumed,
+        overageLimit: n(c.overageLimit),
+        totalConsumed: n(c.totalCreditsConsumed),
     };
 }
 
@@ -377,15 +496,15 @@ export async function checkUserCredits(
         await db
             .update(userCreditLimits)
             .set({
-                creditsUsed: 0,
+                creditsUsed: "0",
                 periodStart: new Date(),
                 updatedAt: new Date(),
             })
             .where(eq(userCreditLimits.id, limit.id));
-        limit.creditsUsed = 0;
+        limit.creditsUsed = "0";
     }
 
-    const remaining = limit.creditLimit - limit.creditsUsed;
+    const remaining = n(limit.creditLimit) - n(limit.creditsUsed);
 
     if (remaining < requiredCredits) {
         return {
@@ -412,7 +531,7 @@ export async function deductUserCredits(
             await db
                 .update(userCreditLimits)
                 .set({
-                    creditsUsed: sql`${userCreditLimits.creditsUsed} + ${params.amount}`,
+                    creditsUsed: sql`(${userCreditLimits.creditsUsed}::numeric + ${params.amount})`,
                     updatedAt: new Date(),
                 })
                 .where(

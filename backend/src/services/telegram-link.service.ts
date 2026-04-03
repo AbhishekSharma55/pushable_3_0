@@ -5,7 +5,7 @@ import { AppError } from "../lib/errors.ts";
 
 export const telegramLinkService = {
     isAvailable(): boolean {
-        return !!process.env.TELEGRAM_BOT_TOKEN;
+        return channelManager.getPlatformTelegramBot() !== null;
     },
 
     getBotUsername(): string | null {

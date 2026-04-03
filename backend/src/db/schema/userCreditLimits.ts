@@ -1,4 +1,4 @@
-import { integer, pgTable, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+import { numeric, pgTable, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 import { workspaces } from "./workspaces.ts";
 import { users } from "./users.ts";
 
@@ -12,8 +12,8 @@ export const userCreditLimits = pgTable(
         userId: uuid("user_id")
             .notNull()
             .references(() => users.id, { onDelete: "cascade" }),
-        creditLimit: integer("credit_limit").notNull(),
-        creditsUsed: integer("credits_used").default(0).notNull(),
+        creditLimit: numeric("credit_limit", { precision: 12, scale: 4 }).notNull(),
+        creditsUsed: numeric("credits_used", { precision: 12, scale: 4 }).default("0").notNull(),
         periodStart: timestamp("period_start").defaultNow().notNull(),
         periodEnd: timestamp("period_end"),
         updatedAt: timestamp("updated_at").defaultNow().notNull(),

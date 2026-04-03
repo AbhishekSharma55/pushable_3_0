@@ -1,4 +1,4 @@
-import { integer, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { integer, numeric, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { workspaces } from "./workspaces.ts";
 
 export const creditLogs = pgTable("credit_logs", {
@@ -9,7 +9,7 @@ export const creditLogs = pgTable("credit_logs", {
     agentId: uuid("agent_id"),
     sessionId: uuid("session_id"),
     tokensUsed: integer("tokens_used").notNull(),
-    creditsDeducted: integer("credits_deducted").notNull(),
+    creditsDeducted: numeric("credits_deducted", { precision: 12, scale: 4 }).notNull(),
     model: text("model").notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
 });

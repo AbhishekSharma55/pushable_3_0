@@ -80,7 +80,15 @@
       "Bash(python3 -c \"import uvicorn; print\\(''uvicorn OK''\\)\")",
       "Bash(DOCKER_HOST= docker compose -f docker-compose.dev.yml up backend cdp-analyzer -d --force-recreate --build)",
       "Read(//tmp/**)",
-      "Bash(git status:*)"
+      "Bash(git status:*)",
+      "Bash(snap list:*)",
+      "Bash(tar -xzf /tmp/ngrok.tgz -C /tmp)",
+      "Bash(sudo mv:*)",
+      "Bash(ngrok --version)",
+      "Bash(cp /tmp/ngrok ~/ngrok)",
+      "Bash(~/ngrok --version)",
+      "Bash(~/ngrok config:*)",
+      "Bash(~/ngrok http:*)"
     ]
   }
 }

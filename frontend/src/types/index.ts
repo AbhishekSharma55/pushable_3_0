@@ -274,6 +274,21 @@ export interface TelegramUserLink {
     updatedAt: string;
 }
 
+export interface SlackUserLink {
+    id: string;
+    slackUserId: string;
+    slackTeamId: string;
+    slackUsername: string | null;
+    slackDisplayName: string | null;
+    slackDmChannelId: string | null;
+    workspaceId: string;
+    userId: string | null;
+    verifiedAt: string | null;
+    lastMessageAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
 export interface BrowserProfile {
     id: string;
     workspaceId: string;

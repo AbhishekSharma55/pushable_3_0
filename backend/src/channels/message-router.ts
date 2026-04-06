@@ -142,6 +142,37 @@ function formatApprovalMessage(
     return lines.join("\n");
 }
 
+function formatConfirmationMessage(payload: {
+    question: string;
+    context?: string;
+}): string {
+    const lines = ["⚠️ *Confirmation Required*\n"];
+    lines.push(payload.question);
+    if (payload.context) {
+        lines.push("");
+        lines.push(payload.context);
+    }
+    lines.push("");
+    lines.push("Reply *yes* to approve or *no* to reject.");
+    return lines.join("\n");
+}
+
+const APPROVE_PATTERNS = /^(yes|y|approve|ok|confirm|go|proceed|sure|do it)$/i;
+const REJECT_PATTERNS = /^(no|n|reject|cancel|stop|don't|nope|abort)$/i;
+
+/** Check if a message is an approval/rejection for a pending confirmation */
+function findPendingApprovalForUser(
+    connectionId: string,
+    threadId: string
+): { sessionId: string; pending: PendingApproval } | null {
+    for (const [sessionId, pending] of pendingChannelApprovals) {
+        if (pending.connectionId === connectionId && pending.threadId === threadId) {
+            return { sessionId, pending };
+        }
+    }
+    return null;
+}
+
 async function findOrCreateSession(
     workspaceId: string,
     agentId: string,
@@ -166,6 +197,46 @@ async function findOrCreateSession(
 
 export async function routeMessage(message: NormalizedMessage): Promise<void> {
     try {
+        // Check if this user has a pending approval and the message is a yes/no response
+        if (message.threadId) {
+            const pendingMatch = findPendingApprovalForUser(
+                message.connectionId,
+                message.threadId
+            );
+            if (pendingMatch) {
+                const text = message.text.trim();
+                const isApprove = APPROVE_PATTERNS.test(text);
+                const isReject = REJECT_PATTERNS.test(text);
+
+                if (isApprove || isReject) {
+                    const decision = isApprove ? "approve" : "reject";
+
+                    // Save user message
+                    await messageRepository.create({
+                        workspaceId: message.workspaceId,
+                        sessionId: pendingMatch.sessionId,
+                        role: "user",
+                        content: message.text,
+                        tokenCount: 0,
+                    });
+
+                    const result = await resolveChannelApproval(
+                        pendingMatch.sessionId,
+                        decision
+                    );
+                    if (result && result.content && sendResponseFn) {
+                        await sendResponseFn(result.connectionId, {
+                            text: result.content,
+                            threadId: result.threadId,
+                        });
+                    }
+                    return;
+                }
+                // If not a yes/no reply, treat as a regular message
+                // (remove pending approval so agent gets the new context)
+            }
+        }
+
         // Find or create session for this user+agent pair
         const sessionId = await findOrCreateSession(
             message.workspaceId,
@@ -204,11 +275,14 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
 
         if (pendingInterrupts.length > 0) {
             const interruptPayload = pendingInterrupts[0]?.value as {
+                type?: string;
+                question?: string;
+                context?: string;
                 toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
             };
 
-            if (interruptPayload?.toolCalls && sendApprovalFn && message.threadId) {
-                // Store pending approval
+            // Store pending approval for both interrupt types
+            if (message.threadId && (interruptPayload?.toolCalls || interruptPayload?.type === "confirmation")) {
                 pendingChannelApprovals.set(sessionId, {
                     sessionId,
                     agentId: message.agentId,
@@ -218,17 +292,28 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
                     threadId: message.threadId,
                 });
 
-                // Send approval message with inline keyboard
-                const approvalText = formatApprovalMessage(interruptPayload.toolCalls);
-                await sendApprovalFn(
-                    message.connectionId,
-                    message.threadId,
-                    approvalText,
-                    sessionId
-                );
+                // Format and send the appropriate approval message
+                let approvalText: string;
+                if (interruptPayload.type === "confirmation") {
+                    approvalText = formatConfirmationMessage({
+                        question: interruptPayload.question || "Do you want to proceed?",
+                        context: interruptPayload.context,
+                    });
+                } else {
+                    approvalText = formatApprovalMessage(interruptPayload.toolCalls!);
+                }
+
+                if (sendApprovalFn) {
+                    await sendApprovalFn(
+                        message.connectionId,
+                        message.threadId,
+                        approvalText,
+                        sessionId
+                    );
+                }
 
                 logger.info(
-                    { sessionId, toolCount: interruptPayload.toolCalls.length },
+                    { sessionId, type: interruptPayload.type || "toolCalls" },
                     "Channel HITL: approval request sent"
                 );
             }

@@ -56,14 +56,33 @@ export class PlatformWhatsAppBot {
             const contacts = value.contacts as Array<Record<string, unknown>>;
 
             for (const msg of messages) {
-                if (msg.type !== "text") continue;
-
                 const from = msg.from as string; // phone number
-                const text = ((msg.text as Record<string, unknown>)?.body as string) || "";
                 const messageId = msg.id as string;
                 const contactName = contacts?.[0]
                     ? ((contacts[0].profile as Record<string, unknown>)?.name as string) || from
                     : from;
+
+                let text = "";
+
+                if (msg.type === "text") {
+                    text = ((msg.text as Record<string, unknown>)?.body as string) || "";
+                } else if (msg.type === "interactive") {
+                    // Handle button replies (from approval messages)
+                    const interactive = msg.interactive as Record<string, unknown>;
+                    if (interactive?.type === "button_reply") {
+                        const buttonReply = interactive.button_reply as Record<string, unknown>;
+                        // Map button IDs to approval text
+                        text = buttonReply?.id === "approve" ? "yes" : "no";
+                    } else if (interactive?.type === "list_reply") {
+                        const listReply = interactive.list_reply as Record<string, unknown>;
+                        text = (listReply?.title as string) || (listReply?.id as string) || "";
+                    }
+                } else {
+                    // Skip unsupported message types (image, audio, etc.)
+                    continue;
+                }
+
+                if (!text) continue;
 
                 await this.handleIncomingMessage(from, contactName, text, messageId);
             }
@@ -214,10 +233,55 @@ export class PlatformWhatsAppBot {
         text: string,
         _sessionId: string
     ): Promise<void> {
-        // WhatsApp doesn't support inline buttons for arbitrary messages via Cloud API
-        // in the same way as Telegram. Send as text with instructions.
-        const approvalText =
-            text + "\n\nReply with *approve* or *reject* to proceed.";
-        await this.sendMessage(chatId, approvalText);
+        // Send interactive button message via WhatsApp Cloud API
+        // Body text max 1024 chars for interactive messages
+        const body = text.length > 1024 ? text.slice(0, 1020) + "..." : text;
+
+        try {
+            const response = await fetch(
+                `${WHATSAPP_API_BASE}/${this.phoneNumberId}/messages`,
+                {
+                    method: "POST",
+                    headers: {
+                        "Authorization": `Bearer ${this.accessToken}`,
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                        messaging_product: "whatsapp",
+                        to: chatId,
+                        type: "interactive",
+                        interactive: {
+                            type: "button",
+                            body: { text: body },
+                            action: {
+                                buttons: [
+                                    {
+                                        type: "reply",
+                                        reply: { id: "approve", title: "Yes, Approve" },
+                                    },
+                                    {
+                                        type: "reply",
+                                        reply: { id: "reject", title: "No, Reject" },
+                                    },
+                                ],
+                            },
+                        },
+                    }),
+                }
+            );
+
+            if (!response.ok) {
+                const errBody = await response.text();
+                logger.error(
+                    { status: response.status, body: errBody, to: chatId },
+                    "WhatsApp send interactive message failed, falling back to text"
+                );
+                // Fallback to plain text if interactive fails
+                await this.sendMessage(chatId, text + "\n\nReply *yes* to approve or *no* to reject.");
+            }
+        } catch (error) {
+            logger.error({ error, to: chatId }, "WhatsApp interactive message error");
+            await this.sendMessage(chatId, text + "\n\nReply *yes* to approve or *no* to reject.");
+        }
     }
 }

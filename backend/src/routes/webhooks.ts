@@ -4,6 +4,30 @@ import { channelManager } from "../channels/channel-manager.ts";
 import { logger } from "../lib/logger.ts";
 
 export async function webhookRoutes(fastify: FastifyInstance) {
+    // GET /webhooks/whatsapp — verification challenge from Meta
+    fastify.get("/webhooks/whatsapp", async (request, reply) => {
+        const query = request.query as Record<string, string>;
+        const mode = query["hub.mode"];
+        const token = query["hub.verify_token"];
+        const challenge = query["hub.challenge"];
+
+        const bot = channelManager.getPlatformWhatsAppBot();
+        if (mode === "subscribe" && bot && token === bot.getWebhookVerifyToken()) {
+            logger.info("WhatsApp webhook verified");
+            return reply.status(200).send(challenge);
+        }
+
+        return reply.status(403).send("Forbidden");
+    });
+
+    // POST /webhooks/whatsapp — incoming messages from WhatsApp Cloud API
+    fastify.post("/webhooks/whatsapp", async (request, reply) => {
+        const bot = channelManager.getPlatformWhatsAppBot();
+        if (bot) {
+            await bot.handleWebhook(request.body as Record<string, unknown>);
+        }
+        return reply.status(200).send("OK");
+    });
     // POST /webhooks/telegram/:connectionId
     fastify.post("/webhooks/telegram/:connectionId", async (request, reply) => {
         const { connectionId } = request.params as { connectionId: string };

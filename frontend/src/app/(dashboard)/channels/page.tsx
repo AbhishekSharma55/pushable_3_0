@@ -13,6 +13,7 @@ import {
     ChevronDown,
     ChevronRight,
     ExternalLink,
+    MessageCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -70,12 +71,20 @@ import {
     unlinkSlack,
 } from '@/lib/api/slack';
 import type { SlackStatus } from '@/lib/api/slack';
+import {
+    getWhatsAppStatus,
+    initiateWhatsAppLink,
+    checkWhatsAppLinkStatus,
+    unlinkWhatsApp,
+} from '@/lib/api/whatsapp';
+import type { WhatsAppStatus } from '@/lib/api/whatsapp';
 import { getAgents } from '@/lib/api/agents';
-import type { ChannelConnection, Agent, TelegramUserLink, SlackUserLink } from '@/types';
+import type { ChannelConnection, Agent, TelegramUserLink, SlackUserLink, WhatsAppUserLink } from '@/types';
 import { QRCodeSVG } from 'qrcode.react';
 
 function ChannelIcon({ type, className = 'h-4 w-4' }: { type: string; className?: string }) {
     if (type === 'telegram') return <Send className={className} />;
+    if (type === 'whatsapp') return <MessageCircle className={className} />;
     return <Hash className={className} />;
 }
 
@@ -92,6 +101,7 @@ export default function ChannelsPage() {
     const [selected, setSelected] = useState<ChannelConnection | null>(null);
     const [selectedTelegramLink, setSelectedTelegramLink] = useState<TelegramUserLink | null>(null);
     const [selectedSlackLink, setSelectedSlackLink] = useState<SlackUserLink | null>(null);
+    const [selectedWhatsAppLink, setSelectedWhatsAppLink] = useState<WhatsAppUserLink | null>(null);
     const [sheetOpen, setSheetOpen] = useState(false);
 
     // Create form state
@@ -131,6 +141,13 @@ export default function ChannelsPage() {
     const [slackVerificationCode, setSlackVerificationCode] = useState<string | null>(null);
     const [slackLinkingInProgress, setSlackLinkingInProgress] = useState(false);
     const [pollingSlackVerification, setPollingSlackVerification] = useState(false);
+
+    // Platform WhatsApp state
+    const [whatsappStatus, setWhatsappStatus] = useState<WhatsAppStatus | null>(null);
+    const [whatsappLoading, setWhatsappLoading] = useState(true);
+    const [whatsappVerificationCode, setWhatsappVerificationCode] = useState<string | null>(null);
+    const [whatsappLinkingInProgress, setWhatsappLinkingInProgress] = useState(false);
+    const [pollingWhatsappVerification, setPollingWhatsappVerification] = useState(false);
 
     const fetchData = useCallback(async () => {
         if (!workspace) return;
@@ -176,9 +193,23 @@ export default function ChannelsPage() {
         }
     }, [workspace]);
 
+    const fetchWhatsAppStatus = useCallback(async () => {
+        if (!workspace) return;
+        try {
+            setWhatsappLoading(true);
+            const status = await getWhatsAppStatus(workspace.id);
+            setWhatsappStatus(status);
+        } catch {
+            setWhatsappStatus(null);
+        } finally {
+            setWhatsappLoading(false);
+        }
+    }, [workspace]);
+
     useEffect(() => { fetchData(); }, [fetchData]);
     useEffect(() => { fetchTelegramStatus(); }, [fetchTelegramStatus]);
     useEffect(() => { fetchSlackStatus(); }, [fetchSlackStatus]);
+    useEffect(() => { fetchWhatsAppStatus(); }, [fetchWhatsAppStatus]);
 
     // Load config + bot info when a Telegram connection is selected
     useEffect(() => {
@@ -339,6 +370,53 @@ export default function ChannelsPage() {
         return () => clearInterval(interval);
     }, [pollingSlackVerification, workspace, fetchSlackStatus]);
 
+    // Platform WhatsApp: initiate link
+    const handleWhatsAppConnect = async () => {
+        if (!workspace) return;
+        setWhatsappLinkingInProgress(true);
+        try {
+            const result = await initiateWhatsAppLink(workspace.id);
+            setWhatsappVerificationCode(result.code);
+            setPollingWhatsappVerification(true);
+        } catch (err: unknown) {
+            const error = err as { response?: { data?: { error?: { message?: string } } } };
+            toast.error(error.response?.data?.error?.message || 'Failed to generate verification code');
+        } finally {
+            setWhatsappLinkingInProgress(false);
+        }
+    };
+
+    // Platform WhatsApp: unlink
+    const handleWhatsAppUnlink = async (linkId: string) => {
+        if (!workspace) return;
+        try {
+            await unlinkWhatsApp(workspace.id, linkId);
+            toast.success('WhatsApp account unlinked');
+            fetchWhatsAppStatus();
+        } catch {
+            toast.error('Failed to unlink');
+        }
+    };
+
+    // Poll for WhatsApp verification completion
+    useEffect(() => {
+        if (!pollingWhatsappVerification || !workspace) return;
+        const interval = setInterval(async () => {
+            try {
+                const status = await checkWhatsAppLinkStatus(workspace.id);
+                if (status.verified) {
+                    setPollingWhatsappVerification(false);
+                    setWhatsappVerificationCode(null);
+                    toast.success(`WhatsApp linked! ${status.whatsappName || status.whatsappPhone || 'Account connected.'}`);
+                    fetchWhatsAppStatus();
+                }
+            } catch {
+                // Ignore polling errors
+            }
+        }, 3000);
+        return () => clearInterval(interval);
+    }, [pollingWhatsappVerification, workspace, fetchWhatsAppStatus]);
+
     const resetForm = () => {
         setChannelType(null);
         setTelegramSubType(null);
@@ -421,7 +499,7 @@ export default function ChannelsPage() {
                     <div>
                         <h1 className="text-2xl font-bold tracking-tight">Channels</h1>
                         <p className="text-sm text-muted-foreground">
-                            Connect to Telegram and Slack
+                            Connect to Telegram, Slack, and WhatsApp
                         </p>
                     </div>
                 </div>
@@ -441,14 +519,14 @@ export default function ChannelsPage() {
                         </h2>
                     </div>
                     <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
-                        {loading || telegramLoading || slackLoading ? (
+                        {loading || telegramLoading || slackLoading || whatsappLoading ? (
                             Array.from({ length: 3 }).map((_, i) => (
                                 <div key={i} className="p-3 space-y-2">
                                     <Skeleton className="h-4 w-32" />
                                     <Skeleton className="h-3 w-24" />
                                 </div>
                             ))
-                        ) : connections.length === 0 && (!telegramStatus || telegramStatus.links.length === 0) && (!slackStatus || slackStatus.links.length === 0) ? (
+                        ) : connections.length === 0 && (!telegramStatus || telegramStatus.links.length === 0) && (!slackStatus || slackStatus.links.length === 0) && (!whatsappStatus || whatsappStatus.links.length === 0) ? (
                             <div className="flex flex-col items-center justify-center h-full text-center px-6 gap-3">
                                 <Radio className="h-8 w-8 text-muted-foreground/30" />
                                 <div>
@@ -529,6 +607,40 @@ export default function ChannelsPage() {
                                     </div>
                                 ))}
 
+                                {/* WhatsApp platform links */}
+                                {whatsappStatus?.links.map((link) => (
+                                    <div
+                                        key={link.id}
+                                        className={`group flex items-center gap-3 rounded-lg px-3 py-3 cursor-pointer transition-colors ${
+                                            selectedWhatsAppLink?.id === link.id ? 'bg-accent ring-1 ring-border' : 'hover:bg-accent/50'
+                                        }`}
+                                        onClick={() => { setSelectedWhatsAppLink(link); setSelected(null); setSelectedTelegramLink(null); setSelectedSlackLink(null); setTestResult(null); }}
+                                    >
+                                        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-green-500/10 flex-shrink-0">
+                                            <MessageCircle className="h-4 w-4 text-green-500" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2">
+                                                <p className="text-sm font-medium truncate">
+                                                    {link.whatsappName || link.whatsappPhone}
+                                                </p>
+                                                <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                                    whatsapp
+                                                </Badge>
+                                            </div>
+                                            <div className="flex items-center gap-2 mt-0.5">
+                                                <StatusDot status="active" />
+                                                <span className="text-[11px] text-muted-foreground">CEO Agent</span>
+                                            </div>
+                                        </div>
+                                        {link.lastMessageAt && (
+                                            <span className="text-[10px] text-muted-foreground/60 flex-shrink-0">
+                                                {new Date(link.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                            </span>
+                                        )}
+                                    </div>
+                                ))}
+
                                 {/* Per-workspace connections */}
                                 {connections.map((conn) => (
                                     <div
@@ -569,7 +681,79 @@ export default function ChannelsPage() {
 
                 {/* Right — Detail panel */}
                 <div className="flex-1 rounded-xl border border-border/60 bg-card overflow-y-auto">
-                    {selectedSlackLink ? (
+                    {selectedWhatsAppLink ? (
+                        <div className="p-6 space-y-6">
+                            <div className="flex items-start justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-green-500/10">
+                                        <MessageCircle className="h-5 w-5 text-green-500" />
+                                    </div>
+                                    <div>
+                                        <h2 className="text-lg font-semibold">
+                                            {selectedWhatsAppLink.whatsappName || selectedWhatsAppLink.whatsappPhone}
+                                        </h2>
+                                        <div className="flex items-center gap-2 mt-0.5">
+                                            <StatusDot status="active" />
+                                            <span className="text-sm text-muted-foreground">Connected</span>
+                                            <Badge variant="outline" className="text-xs">whatsapp</Badge>
+                                        </div>
+                                    </div>
+                                </div>
+                                <AlertDialog>
+                                    <AlertDialogTrigger asChild>
+                                        <Button variant="outline" size="sm" className="text-destructive hover:text-destructive gap-1.5">
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                            Unlink
+                                        </Button>
+                                    </AlertDialogTrigger>
+                                    <AlertDialogContent>
+                                        <AlertDialogHeader>
+                                            <AlertDialogTitle>Unlink WhatsApp Account</AlertDialogTitle>
+                                            <AlertDialogDescription>
+                                                This will disconnect this WhatsApp account. Messages from this number will no longer reach your CEO agent.
+                                            </AlertDialogDescription>
+                                        </AlertDialogHeader>
+                                        <AlertDialogFooter>
+                                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                            <AlertDialogAction
+                                                onClick={() => { handleWhatsAppUnlink(selectedWhatsAppLink.id); setSelectedWhatsAppLink(null); }}
+                                                className="bg-destructive text-destructive-foreground"
+                                            >
+                                                Unlink
+                                            </AlertDialogAction>
+                                        </AlertDialogFooter>
+                                    </AlertDialogContent>
+                                </AlertDialog>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Phone Number</p>
+                                    <p className="text-sm font-mono font-medium">+{selectedWhatsAppLink.whatsappPhone}</p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Connected Agent</p>
+                                    <p className="text-sm font-medium">CEO Agent</p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Linked At</p>
+                                    <p className="text-sm font-medium">
+                                        {selectedWhatsAppLink.verifiedAt
+                                            ? new Date(selectedWhatsAppLink.verifiedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                            : 'Pending'}
+                                    </p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Last Message</p>
+                                    <p className="text-sm font-medium">
+                                        {selectedWhatsAppLink.lastMessageAt
+                                            ? new Date(selectedWhatsAppLink.lastMessageAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                            : 'None yet'}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    ) : selectedSlackLink ? (
                         <div className="p-6 space-y-6">
                             <div className="flex items-start justify-between">
                                 <div className="flex items-center gap-3">
@@ -965,7 +1149,7 @@ export default function ChannelsPage() {
             </div>
 
             {/* Create Channel Sheet */}
-            <Sheet open={sheetOpen} onOpenChange={(v) => { setSheetOpen(v); if (!v) { resetForm(); setVerificationCode(null); setPollingVerification(false); setSlackVerificationCode(null); setPollingSlackVerification(false); } }}>
+            <Sheet open={sheetOpen} onOpenChange={(v) => { setSheetOpen(v); if (!v) { resetForm(); setVerificationCode(null); setPollingVerification(false); setSlackVerificationCode(null); setPollingSlackVerification(false); setWhatsappVerificationCode(null); setPollingWhatsappVerification(false); } }}>
                 <SheetContent className="sm:max-w-lg overflow-y-auto px-6">
                     <SheetHeader>
                         <SheetTitle className="text-xl font-semibold">Add Channel</SheetTitle>
@@ -1000,6 +1184,19 @@ export default function ChannelsPage() {
                                         <p className="text-[11px] text-muted-foreground mt-1">Connect to your Slack workspace</p>
                                     </div>
                                 </button>
+                                {whatsappStatus?.available && (
+                                    <button
+                                        type="button"
+                                        className="flex flex-col items-center gap-3 rounded-xl border-2 border-border p-6 hover:border-primary hover:bg-primary/5 transition-all"
+                                        onClick={() => setChannelType('whatsapp' as any)}
+                                    >
+                                        <MessageCircle className="h-8 w-8 text-green-500" />
+                                        <div className="text-center">
+                                            <p className="text-sm font-semibold">WhatsApp</p>
+                                            <p className="text-[11px] text-muted-foreground mt-1">Chat via WhatsApp Business</p>
+                                        </div>
+                                    </button>
+                                )}
                             </div>
                         )}
 
@@ -1502,6 +1699,135 @@ export default function ChannelsPage() {
                                         )}
                                     </Button>
                                 </div>
+                            </>
+                        )}
+                        {/* Step 2 — WhatsApp connect flow */}
+                        {(channelType as string) === 'whatsapp' && (
+                            <>
+                                <div className="flex items-center gap-2 mb-2">
+                                    <button onClick={() => { resetForm(); setWhatsappVerificationCode(null); setPollingWhatsappVerification(false); }} className="text-xs text-muted-foreground hover:text-foreground">&larr; Back</button>
+                                    <Badge variant="outline">whatsapp</Badge>
+                                </div>
+
+                                {/* Linked WhatsApp accounts */}
+                                {whatsappStatus && whatsappStatus.links.length > 0 && (
+                                    <div className="space-y-2">
+                                        <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                            Linked Accounts
+                                        </Label>
+                                        <div className="space-y-1.5">
+                                            {whatsappStatus.links.map((link: WhatsAppUserLink) => (
+                                                <div
+                                                    key={link.id}
+                                                    className="flex items-center justify-between rounded-lg bg-muted/50 border border-border/40 px-4 py-3"
+                                                >
+                                                    <div className="flex items-center gap-3">
+                                                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-green-500/10">
+                                                            <MessageCircle className="h-3.5 w-3.5 text-green-500" />
+                                                        </div>
+                                                        <div>
+                                                            <p className="text-sm font-medium">
+                                                                {link.whatsappName || 'WhatsApp User'}
+                                                            </p>
+                                                            <p className="text-[11px] text-muted-foreground font-mono">
+                                                                +{link.whatsappPhone}
+                                                                {link.lastMessageAt && (
+                                                                    <span className="ml-2">
+                                                                        Last active: {new Date(link.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                                                    </span>
+                                                                )}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                    <AlertDialog>
+                                                        <AlertDialogTrigger asChild>
+                                                            <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive">
+                                                                <Trash2 className="h-3.5 w-3.5" />
+                                                            </Button>
+                                                        </AlertDialogTrigger>
+                                                        <AlertDialogContent>
+                                                            <AlertDialogHeader>
+                                                                <AlertDialogTitle>Unlink WhatsApp Account</AlertDialogTitle>
+                                                                <AlertDialogDescription>
+                                                                    This will disconnect this WhatsApp number. Messages from this user will no longer reach your CEO agent.
+                                                                </AlertDialogDescription>
+                                                            </AlertDialogHeader>
+                                                            <AlertDialogFooter>
+                                                                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                                                <AlertDialogAction
+                                                                    onClick={() => handleWhatsAppUnlink(link.id)}
+                                                                    className="bg-destructive text-destructive-foreground"
+                                                                >
+                                                                    Unlink
+                                                                </AlertDialogAction>
+                                                            </AlertDialogFooter>
+                                                        </AlertDialogContent>
+                                                    </AlertDialog>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* WhatsApp verification code flow */}
+                                {whatsappVerificationCode ? (
+                                    <div className="rounded-lg border-2 border-dashed border-green-500/30 bg-green-500/5 p-6 text-center space-y-4">
+                                        <div>
+                                            <p className="text-xs font-medium text-muted-foreground mb-2">
+                                                Send this code to the WhatsApp Business number
+                                            </p>
+                                            <p className="text-4xl font-mono font-bold tracking-[0.3em] text-green-600 dark:text-green-400">
+                                                {whatsappVerificationCode}
+                                            </p>
+                                        </div>
+                                        <div className="space-y-2">
+                                            <p className="text-[11px] text-muted-foreground">
+                                                Open WhatsApp and send this code to the Pushable Business number.
+                                                Code expires in 10 minutes.
+                                            </p>
+                                            {pollingWhatsappVerification && (
+                                                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                                    Listening for verification...
+                                                </div>
+                                            )}
+                                        </div>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="text-xs"
+                                            onClick={() => {
+                                                setWhatsappVerificationCode(null);
+                                                setPollingWhatsappVerification(false);
+                                            }}
+                                        >
+                                            Cancel
+                                        </Button>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-4">
+                                        <div className="rounded-lg bg-muted/50 border border-border/40 p-4 space-y-2">
+                                            <p className="text-sm font-medium">How it works</p>
+                                            <div className="text-xs text-muted-foreground space-y-1.5">
+                                                <p>1. Click <strong>Connect WhatsApp</strong> below to get a verification code</p>
+                                                <p>2. Open WhatsApp and message the Pushable Business number</p>
+                                                <p>3. Send the 6-character code</p>
+                                                <p>4. Done! You can now chat with your CEO agent from WhatsApp</p>
+                                            </div>
+                                        </div>
+                                        <Button
+                                            className="w-full gap-1.5"
+                                            onClick={handleWhatsAppConnect}
+                                            disabled={whatsappLinkingInProgress}
+                                        >
+                                            {whatsappLinkingInProgress ? (
+                                                <><Loader2 className="h-4 w-4 animate-spin" />Generating code...</>
+                                            ) : (
+                                                <><MessageCircle className="h-4 w-4" />Connect WhatsApp</>
+                                            )}
+                                        </Button>
+                                    </div>
+                                )}
                             </>
                         )}
                     </div>

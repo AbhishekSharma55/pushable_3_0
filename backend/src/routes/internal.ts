@@ -41,7 +41,14 @@ export async function internalRoutes(fastify: FastifyInstance) {
             return { success: true, status: config?.status ?? "inactive", botName: config?.botName };
         }
 
-        return reply.status(400).send({ error: "Invalid platform. Use 'telegram' or 'slack'." });
+        if (platform === "whatsapp") {
+            await channelManager.shutdownPlatformWhatsApp();
+            await channelManager.initializePlatformWhatsApp();
+            const config = await platformBotConfigRepository.findByPlatform("whatsapp");
+            return { success: true, status: config?.status ?? "inactive", botName: config?.botName };
+        }
+
+        return reply.status(400).send({ error: "Invalid platform. Use 'telegram', 'slack', or 'whatsapp'." });
     });
 
     // GET /internal/platform-bots/status
@@ -56,6 +63,10 @@ export async function internalRoutes(fastify: FastifyInstance) {
             slack: {
                 running: channelManager.getPlatformSlackBot() !== null,
                 config: configs.find(c => c.platform === "slack") ?? null,
+            },
+            whatsapp: {
+                running: channelManager.getPlatformWhatsAppBot() !== null,
+                config: configs.find(c => c.platform === "whatsapp") ?? null,
             },
         };
     });

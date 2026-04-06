@@ -234,7 +234,7 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
             }
 
             // Update last message timestamp (skip for platform bot — handled by telegram-link repo)
-            if (message.connectionId !== "platform-telegram" && message.connectionId !== "platform-slack") {
+            if (message.connectionId !== "platform-telegram" && message.connectionId !== "platform-slack" && message.connectionId !== "platform-whatsapp") {
                 await channelRepository.updateLastMessageAt(message.connectionId);
             }
             return; // Don't send normal response — waiting for approval
@@ -267,7 +267,7 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
         });
 
         // Update last message timestamp (skip for platform bot — handled by telegram-link repo)
-        if (message.connectionId !== "platform-telegram" && message.connectionId !== "platform-slack") {
+        if (message.connectionId !== "platform-telegram" && message.connectionId !== "platform-slack" && message.connectionId !== "platform-whatsapp") {
             await channelRepository.updateLastMessageAt(message.connectionId);
         }
 

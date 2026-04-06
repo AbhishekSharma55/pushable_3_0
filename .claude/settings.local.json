@@ -88,7 +88,9 @@
       "Bash(cp /tmp/ngrok ~/ngrok)",
       "Bash(~/ngrok --version)",
       "Bash(~/ngrok config:*)",
-      "Bash(~/ngrok http:*)"
+      "Bash(~/ngrok http:*)",
+      "Bash(find /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0 -name \"package.json\" -not -path \"*/node_modules/*\" -exec grep -l \"whatsapp\\\\|baileys\\\\|whiskeysockets\" {} \\\\;)",
+      "WebSearch"
     ]
   }
 }

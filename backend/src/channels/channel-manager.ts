@@ -5,6 +5,7 @@ import { TelegramAdapter, setTelegramMessageHandler, setTelegramApprovalHandler 
 import { SlackAdapter, setSlackMessageHandler } from "./slack.channel.ts";
 import { PlatformTelegramBot } from "./platform-telegram.ts";
 import { PlatformSlackBot } from "./platform-slack.ts";
+import { PlatformWhatsAppBot } from "./platform-whatsapp.ts";
 import { routeMessage, setResponseSender, setApprovalSender, resolveChannelApproval } from "./message-router.ts";
 import { platformBotConfigRepository } from "../repositories/platform-bot-config.repository.ts";
 import { logger } from "../lib/logger.ts";
@@ -16,6 +17,7 @@ import type {
 
 const PLATFORM_TELEGRAM_CONNECTION_ID = "platform-telegram";
 const PLATFORM_SLACK_CONNECTION_ID = "platform-slack";
+const PLATFORM_WHATSAPP_CONNECTION_ID = "platform-whatsapp";
 
 class ChannelManager {
     private adapters = new Map<
@@ -26,6 +28,7 @@ class ChannelManager {
     private slackAdapter = new SlackAdapter();
     private platformTelegramBot: PlatformTelegramBot | null = null;
     private platformSlackBot: PlatformSlackBot | null = null;
+    private platformWhatsAppBot: PlatformWhatsAppBot | null = null;
     private initialized = false;
 
     private setupHandlers() {
@@ -42,6 +45,9 @@ class ChannelManager {
             }
             if (connectionId === PLATFORM_SLACK_CONNECTION_ID && this.platformSlackBot) {
                 return this.platformSlackBot.sendApprovalMessage(chatId, text, sessionId);
+            }
+            if (connectionId === PLATFORM_WHATSAPP_CONNECTION_ID && this.platformWhatsAppBot) {
+                return this.platformWhatsAppBot.sendApprovalMessage(chatId, text, sessionId);
             }
             return this.telegramAdapter.sendApprovalMessage(connectionId, chatId, text, sessionId);
         });
@@ -99,6 +105,10 @@ class ChannelManager {
         }
         if (connectionId === PLATFORM_SLACK_CONNECTION_ID && this.platformSlackBot) {
             await this.platformSlackBot.sendResponse(response);
+            return;
+        }
+        if (connectionId === PLATFORM_WHATSAPP_CONNECTION_ID && this.platformWhatsAppBot) {
+            await this.platformWhatsAppBot.sendResponse(response);
             return;
         }
 
@@ -275,6 +285,86 @@ class ChannelManager {
 
     getPlatformSlackBot(): PlatformSlackBot | null {
         return this.platformSlackBot;
+    }
+
+    async initializePlatformWhatsApp(): Promise<void> {
+        // DB-first: check platform_bot_configs, fall back to env vars
+        let phoneNumberId: string | undefined;
+        let accessToken: string | undefined;
+        let appSecret: string | undefined;
+        let webhookVerifyToken: string | undefined;
+
+        try {
+            const dbConfig = await platformBotConfigRepository.findByPlatform("whatsapp");
+            const cfg = dbConfig?.config as {
+                phoneNumberId?: string;
+                accessToken?: string;
+                appSecret?: string;
+                webhookVerifyToken?: string;
+            } | undefined;
+
+            if (cfg?.phoneNumberId && cfg?.accessToken) {
+                phoneNumberId = cfg.phoneNumberId;
+                accessToken = cfg.accessToken;
+                appSecret = cfg.appSecret;
+                webhookVerifyToken = cfg.webhookVerifyToken;
+                logger.info("Using WhatsApp config from database");
+            }
+        } catch (err) {
+            logger.warn({ error: err instanceof Error ? err.message : err }, "Failed to read WhatsApp config from DB, falling back to env");
+        }
+
+        if (!phoneNumberId || !accessToken) {
+            phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+            accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+            appSecret = appSecret || process.env.WHATSAPP_APP_SECRET;
+            webhookVerifyToken = webhookVerifyToken || process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+        }
+
+        if (!phoneNumberId || !accessToken) {
+            logger.info("No WHATSAPP_PHONE_NUMBER_ID/ACCESS_TOKEN set — platform WhatsApp bot disabled");
+            return;
+        }
+
+        this.setupHandlers();
+
+        try {
+            this.platformWhatsAppBot = new PlatformWhatsAppBot({
+                phoneNumberId,
+                accessToken,
+                appSecret: appSecret || "",
+                webhookVerifyToken: webhookVerifyToken || "pushable_whatsapp_verify",
+            });
+
+            // Cache config and update status in DB
+            try {
+                await platformBotConfigRepository.upsert({
+                    platform: "whatsapp",
+                    config: { phoneNumberId, accessToken, appSecret, webhookVerifyToken },
+                    botName: "WhatsApp Business",
+                });
+                await platformBotConfigRepository.updateStatus("whatsapp", "active");
+            } catch { /* non-critical */ }
+
+            logger.info("Platform WhatsApp bot initialized");
+        } catch (error) {
+            const errMsg = error instanceof Error ? error.message : String(error);
+            logger.error({ error: errMsg }, "Failed to initialize platform WhatsApp bot");
+
+            try {
+                await platformBotConfigRepository.updateStatus("whatsapp", "error", errMsg);
+            } catch { /* non-critical */ }
+
+            this.platformWhatsAppBot = null;
+        }
+    }
+
+    async shutdownPlatformWhatsApp(): Promise<void> {
+        this.platformWhatsAppBot = null;
+    }
+
+    getPlatformWhatsAppBot(): PlatformWhatsAppBot | null {
+        return this.platformWhatsAppBot;
     }
 
     async initializeAllActive(): Promise<void> {

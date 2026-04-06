@@ -49,3 +49,4 @@ export { slackUserLinks } from "./slackUserLinks.ts";
 export { platformBotConfigs } from "./platformBotConfigs.ts";
 export { creditCostRanges } from "./creditCostRanges.ts";
 export { creditCostMultipliers } from "./creditCostMultipliers.ts";
+export { whatsappUserLinks } from "./whatsappUserLinks.ts";

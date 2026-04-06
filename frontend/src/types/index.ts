@@ -289,6 +289,18 @@ export interface SlackUserLink {
     updatedAt: string;
 }
 
+export interface WhatsAppUserLink {
+    id: string;
+    whatsappPhone: string;
+    whatsappName: string | null;
+    workspaceId: string;
+    userId: string | null;
+    verifiedAt: string | null;
+    lastMessageAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
 export interface BrowserProfile {
     id: string;
     workspaceId: string;

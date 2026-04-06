@@ -1,6 +1,6 @@
 export interface NormalizedMessage {
     connectionId: string;
-    channelType: "telegram" | "slack";
+    channelType: "telegram" | "slack" | "whatsapp";
     workspaceId: string;
     agentId: string;
     externalUserId: string;
@@ -22,7 +22,7 @@ export interface ChannelConnection {
     id: string;
     workspaceId: string;
     agentId: string;
-    channelType: "telegram" | "slack";
+    channelType: "telegram" | "slack" | "whatsapp";
     name: string;
     status: "active" | "inactive" | "error";
     credentials: Record<string, unknown>;
@@ -34,7 +34,7 @@ export interface ChannelConnection {
 }
 
 export interface ChannelAdapter {
-    channelType: "telegram" | "slack";
+    channelType: "telegram" | "slack" | "whatsapp";
     initialize(connection: ChannelConnection): Promise<void>;
     shutdown(connectionId: string): Promise<void>;
     sendMessage(connectionId: string, response: NormalizedResponse): Promise<void>;

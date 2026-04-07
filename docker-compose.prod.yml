@@ -146,6 +146,7 @@ services:
         NEXT_PUBLIC_BROWSER_WS_URL: ${NEXT_PUBLIC_BROWSER_WS_URL:-wss://browser.pushable.ai}
         NEXT_PUBLIC_LOGGING: ${NEXT_PUBLIC_LOGGING:-false}
         NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+        NEXT_PUBLIC_EMAIL_DOMAIN: ${EMAIL_DOMAIN:-pushable.ai}
     restart: unless-stopped
     ports:
       - '${FRONTEND_PORT:-3000}:3000'

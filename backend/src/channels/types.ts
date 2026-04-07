@@ -10,6 +10,8 @@ export interface NormalizedMessage {
     threadId?: string;
     messageId?: string;
     raw: unknown;
+    /** Processed file attachments (images as base64, docs as extracted text) */
+    attachments?: import("../services/file-processing.service.ts").ProcessedAttachment[];
 }
 
 export interface NormalizedResponse {

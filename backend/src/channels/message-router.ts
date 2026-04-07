@@ -255,13 +255,41 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
         });
 
         // Create agent graph and invoke (non-streaming for channels)
-        // Use platformUserId (UUID) for credit tracking and memory scoping
-        // For custom bots without a platform user, pass undefined (workspace-level credit check only)
         const graphUserId = message.platformUserId || undefined;
         const { graph } = await createAgentGraph(message.agentId, message.workspaceId, graphUserId);
 
+        // Build multimodal HumanMessage if attachments are present
+        let humanMessage: HumanMessage;
+        if (message.attachments && message.attachments.length > 0) {
+            const contentParts: Array<unknown> = [{ type: "text", text: message.text }];
+
+            // Add document attachments as additional text blocks
+            for (const att of message.attachments.filter(a => a.type === "document")) {
+                contentParts.push({
+                    type: "text",
+                    text: `\n[Attachment: ${att.filename}]\n${att.content}`,
+                });
+            }
+
+            // Add image attachments as image_url blocks
+            for (const att of message.attachments.filter(a => a.type === "image")) {
+                contentParts.push({
+                    type: "image_url",
+                    image_url: { url: att.content },
+                });
+            }
+
+            humanMessage = new HumanMessage({ content: contentParts as never });
+            logger.info(
+                { images: message.attachments.filter(a => a.type === "image").length, docs: message.attachments.filter(a => a.type === "document").length },
+                "Built multimodal message for channel"
+            );
+        } else {
+            humanMessage = new HumanMessage(message.text);
+        }
+
         const result = await graph.invoke(
-            { messages: [new HumanMessage(message.text)] },
+            { messages: [humanMessage] },
             { configurable: { thread_id: sessionId } }
         );
 

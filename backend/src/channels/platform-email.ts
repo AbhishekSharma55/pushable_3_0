@@ -11,6 +11,8 @@ import { ceoService } from "../services/ceo.service.ts";
 import { routeMessage } from "./message-router.ts";
 import { sendReplyMail } from "../lib/mailer.ts";
 import { getStorage } from "../lib/storage.ts";
+import { fileProcessingService } from "../services/file-processing.service.ts";
+import type { ProcessedAttachment } from "../services/file-processing.service.ts";
 import type { NormalizedMessage, NormalizedResponse } from "./types.ts";
 
 export const PLATFORM_EMAIL_CONNECTION_ID = "platform-email";
@@ -126,10 +128,15 @@ export class PlatformEmailHandler {
                 return;
             }
 
-            // Parse and upload attachments from raw MIME
-            const attachments = await extractAndUploadAttachments(rawBodyText, workspaceId);
+            // Parse attachments from raw MIME — both upload to MinIO (for storage/display)
+            // and process for LLM consumption (images → base64, docs → text)
+            const { stored: attachments, processed: processedAttachments } =
+                await extractAndUploadAttachments(rawBodyText, workspaceId);
             if (attachments.length > 0) {
-                logger.info({ count: attachments.length, files: attachments.map(a => a.filename) }, "Email attachments extracted");
+                logger.info(
+                    { count: attachments.length, files: attachments.map(a => a.filename) },
+                    "Email attachments extracted and processed for agent"
+                );
             }
 
             // Create inbound email record
@@ -175,6 +182,10 @@ export class PlatformEmailHandler {
             let messageText = `[Email from ${fromName || fromAddress} <${fromAddress}>]\n`;
             messageText += `Subject: ${subject || "(no subject)"}\n`;
             if (cc) messageText += `CC: ${cc}\n`;
+            if (bcc) messageText += `BCC: ${bcc}\n`;
+            if (attachments.length > 0) {
+                messageText += `Attachments: ${attachments.map(a => a.filename).join(", ")}\n`;
+            }
             messageText += `\n${bodyText || "(no body)"}`;
 
             // Prepend custom instructions if configured
@@ -191,8 +202,10 @@ export class PlatformEmailHandler {
                 externalUserId: fromAddress,
                 externalUsername: fromName || fromAddress,
                 text: messageText,
-                threadId: inboundEmail.id, // Used to link response back to this email
+                threadId: inboundEmail.id,
                 raw: payload,
+                // Pass processed attachments so the agent can see images/docs
+                attachments: processedAttachments.length > 0 ? processedAttachments : undefined,
             };
 
             // Update status to processing
@@ -471,20 +484,22 @@ function collectAttachmentParts(text: string, results: RawAttachment[]): void {
 async function extractAndUploadAttachments(
     rawEmail: string,
     workspaceId: string
-): Promise<EmailAttachmentMeta[]> {
-    if (!rawEmail) return [];
+): Promise<{ stored: EmailAttachmentMeta[]; processed: ProcessedAttachment[] }> {
+    if (!rawEmail) return { stored: [], processed: [] };
 
     const raw = extractMimeAttachments(rawEmail);
-    if (raw.length === 0) return [];
+    if (raw.length === 0) return { stored: [], processed: [] };
 
     const storage = getStorage();
-    const results: EmailAttachmentMeta[] = [];
+    const stored: EmailAttachmentMeta[] = [];
+    const processed: ProcessedAttachment[] = [];
 
     for (const att of raw) {
         try {
+            // 1. Upload to MinIO for storage/display
             const storageKey = `${workspaceId}/email-attachments/${randomUUID()}-${att.filename}`;
             await storage.put(storageKey, att.buffer, att.mimeType);
-            results.push({
+            stored.push({
                 filename: att.filename,
                 mimeType: att.mimeType,
                 size: att.buffer.length,
@@ -492,12 +507,27 @@ async function extractAndUploadAttachments(
                 isInline: att.isInline,
                 contentId: att.contentId,
             });
+
+            // 2. Process for LLM consumption (images → base64, docs → text)
+            if (fileProcessingService.isSupported(att.filename, att.mimeType)) {
+                try {
+                    const processedAtt = await fileProcessingService.processFile(
+                        att.filename,
+                        att.mimeType,
+                        att.buffer
+                    );
+                    processed.push(processedAtt);
+                    logger.info({ filename: att.filename, type: processedAtt.type }, "Attachment processed for agent");
+                } catch (procErr) {
+                    logger.warn({ procErr, filename: att.filename }, "Could not process attachment for agent (unsupported type)");
+                }
+            }
         } catch (err) {
             logger.warn({ err, filename: att.filename }, "Failed to upload email attachment");
         }
     }
 
-    return results;
+    return { stored, processed };
 }
 
 function decodeMimeWord(encoded: string): string {

@@ -351,8 +351,8 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
             tokenCount: 0,
         });
 
-        // Update last message timestamp (skip for platform bot — handled by telegram-link repo)
-        if (message.connectionId !== "platform-telegram" && message.connectionId !== "platform-slack" && message.connectionId !== "platform-whatsapp") {
+        // Update last message timestamp (skip for platform bots — not channel_connections rows)
+        if (message.connectionId !== "platform-telegram" && message.connectionId !== "platform-slack" && message.connectionId !== "platform-whatsapp" && message.connectionId !== "platform-email") {
             await channelRepository.updateLastMessageAt(message.connectionId);
         }
 

@@ -184,11 +184,17 @@ export class PlatformEmailHandler {
         }
     }
 
-    /** Send a reply email back to the original sender */
+    /** Send a reply email back to the original sender (disabled — replies not sent for now) */
     async sendResponse(response: NormalizedResponse): Promise<void> {
         if (!response.threadId) return;
 
         try {
+            // Just update the inbound email record with the agent's response content
+            // without sending an actual reply email
+            await inboundEmailRepository.updateReply(response.threadId, response.text);
+            logger.info({ threadId: response.threadId }, "Email agent response saved (reply sending disabled)");
+            return;
+
             // Look up the original inbound email by threadId (which is inboundEmail.id)
             const inboundEmail = await inboundEmailRepository.findByIdGlobal(
                 response.threadId

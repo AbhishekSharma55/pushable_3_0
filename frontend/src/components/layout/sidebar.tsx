@@ -24,6 +24,7 @@ import {
     Layers,
     FlaskConical,
     Route,
+    Mail,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -70,6 +71,7 @@ const navItems = [
     { label: 'Credits', href: '/credits', icon: CreditCard },
     { label: 'Members', href: '/members', icon: Users },
     { label: 'Channels', href: '/channels', icon: Radio },
+    { label: 'Email', href: '/email', icon: Mail },
 ];
 
 export function Sidebar() {

@@ -50,3 +50,7 @@ export { platformBotConfigs } from "./platformBotConfigs.ts";
 export { creditCostRanges } from "./creditCostRanges.ts";
 export { creditCostMultipliers } from "./creditCostMultipliers.ts";
 export { whatsappUserLinks } from "./whatsappUserLinks.ts";
+export { emailWorkspaceAddresses } from "./emailWorkspaceAddresses.ts";
+export { emailApprovedSenders } from "./emailApprovedSenders.ts";
+export { inboundEmails, emailStatusEnum } from "./inboundEmails.ts";
+export { emailWorkflowAddresses } from "./emailWorkflowAddresses.ts";

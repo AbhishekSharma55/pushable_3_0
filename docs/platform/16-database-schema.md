@@ -1,6 +1,6 @@
 # Database Schema
 
-The platform uses PostgreSQL 16 with the pgvector extension for vector similarity search. The ORM is Drizzle ORM 0.45.1. This document lists all 33+ tables with their columns, types, and relationships.
+The platform uses PostgreSQL 16 with the pgvector extension for vector similarity search. The ORM is Drizzle ORM 0.45.1. This document lists all 36+ tables with their columns, types, and relationships.
 
 ---
 
@@ -53,6 +53,11 @@ Channels & Integrations
   ├── integrations
   ├── input_channels
   └── channel_connections
+
+Email
+  ├── email_workspace_addresses
+  ├── email_approved_senders
+  └── inbound_emails
 
 Vault
   ├── vault_connections
@@ -109,6 +114,12 @@ CREATE TYPE proxy_test_status AS ENUM ('success', 'failed', 'untested');
 -- Channels
 CREATE TYPE channel_type AS ENUM ('telegram', 'slack');
 CREATE TYPE connection_status AS ENUM ('active', 'inactive', 'error');
+
+-- Email
+CREATE TYPE email_status AS ENUM (
+  'received', 'routing', 'processing', 'awaiting_approval',
+  'approved', 'rejected', 'completed', 'failed', 'spam'
+);
 
 -- Integrations
 CREATE TYPE integration_status AS ENUM ('active', 'inactive', 'pending', 'failed');
@@ -615,6 +626,61 @@ Maps Telegram user IDs to workspaces for the shared platform bot.
 
 ---
 
+## Email
+
+### email_workspace_addresses
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE, UNIQUE |
+| `address` | TEXT | NOT NULL, UNIQUE |
+| `display_name` | TEXT | Nullable |
+| `custom_instructions` | TEXT | Nullable |
+| `enabled` | BOOLEAN | NOT NULL, default true |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+| `updated_at` | TIMESTAMP | NOT NULL, default NOW |
+
+### email_approved_senders
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `sender_pattern` | TEXT | NOT NULL |
+| `note` | TEXT | Nullable |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+
+### inbound_emails
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `email_address_id` | UUID | NOT NULL, FK → email_workspace_addresses(id) CASCADE |
+| `session_id` | UUID | Nullable, FK → sessions(id) SET NULL |
+| `from_address` | TEXT | NOT NULL |
+| `from_name` | TEXT | Nullable |
+| `to_address` | TEXT | NOT NULL |
+| `subject` | TEXT | Nullable |
+| `body_text` | TEXT | Nullable |
+| `body_html` | TEXT | Nullable |
+| `cc` | TEXT | Nullable |
+| `message_id` | TEXT | Nullable |
+| `in_reply_to` | TEXT | Nullable |
+| `references` | TEXT | Nullable |
+| `status` | email_status | NOT NULL, default 'received' |
+| `routed_to_agent_id` | UUID | Nullable, FK → agents(id) SET NULL |
+| `status_history` | JSONB | Nullable |
+| `reply_sent` | BOOLEAN | NOT NULL, default false |
+| `reply_content` | TEXT | Nullable |
+| `error_message` | TEXT | Nullable |
+| `raw_payload` | JSONB | Nullable |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+| `updated_at` | TIMESTAMP | NOT NULL, default NOW |
+
+---
+
 ## Vault
 
 ### vault_connections
@@ -814,7 +880,10 @@ workspaces → agents, sessions, knowledge_bases, schedules, tools, skills,
              integrations, input_channels, channel_connections, credits,
              credit_ledger, credit_logs, bucket_files, browser_profiles,
              browser_proxies, vault_connections, blogs,
-             workspace_invitations, user_credit_limits, user_agent_access
+             workspace_invitations, user_credit_limits, user_agent_access,
+             email_workspace_addresses, email_approved_senders, inbound_emails
+
+email_workspace_addresses → inbound_emails
 
 agents → sessions, schedules, agent_permissions, agent_integrations, agent_memories,
          user_agent_access
@@ -840,6 +909,8 @@ browser_profiles.assigned_agent_id → agents (SET NULL)
 browser_sessions.agent_id → agents (SET NULL)
 bucket_files.session_id → sessions (SET NULL)
 bucket_files.agent_id → agents (SET NULL)
+inbound_emails.session_id → sessions (SET NULL)
+inbound_emails.routed_to_agent_id → agents (SET NULL)
 ```
 
 ---

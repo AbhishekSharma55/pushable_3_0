@@ -171,6 +171,13 @@ The production deployment script:
 | `AUTH_SECRET` | `pushable-admin-secret-key-change-in-prod` | Admin JWT secret |
 | `ADMIN_COOKIE_SECURE` | `true` (prod) | Secure cookie flag |
 
+### Email
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EMAIL_DOMAIN` | _(empty)_ | Domain for workspace email addresses (e.g. `mydomain.com`) |
+| `EMAIL_WEBHOOK_SECRET` | _(empty)_ | Optional shared secret for Cloudflare webhook verification |
+
 ### Feature Flags
 
 | Variable | Default | Description |

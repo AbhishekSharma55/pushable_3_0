@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { channelRepository } from "../repositories/channel.repository.ts";
 import { channelManager } from "../channels/channel-manager.ts";
+import { emailWorkspaceAddressRepository } from "../repositories/email-workspace-address.repository.ts";
 import { logger } from "../lib/logger.ts";
 
 export async function webhookRoutes(fastify: FastifyInstance) {
@@ -99,6 +100,60 @@ export async function webhookRoutes(fastify: FastifyInstance) {
         } catch (error) {
             logger.error({ teamId, error }, "Slack webhook error");
         }
+
+        return reply.status(200).send({ ok: true });
+    });
+
+    // POST /webhooks/email — Cloudflare Email Routing catch-all webhook
+    // Cloudflare is configured with a single catch-all rule: *@pushable.ai → this endpoint.
+    // We verify the recipient address exists in our DB. If not, we reject with 404
+    // so Cloudflare knows the address is invalid (and can bounce the sender).
+    fastify.post("/webhooks/email", async (request, reply) => {
+        // Optional shared secret verification
+        const secret = request.headers["x-email-webhook-secret"] as string;
+        if (
+            process.env.EMAIL_WEBHOOK_SECRET &&
+            secret !== process.env.EMAIL_WEBHOOK_SECRET
+        ) {
+            return reply.status(403).send({ error: "Forbidden" });
+        }
+
+        const body = request.body as Record<string, unknown>;
+
+        // Extract recipient address from Cloudflare payload
+        const toRaw = (body.to as string) || "";
+        const toAddress = toRaw.includes("<")
+            ? (toRaw.match(/<([^>]+)>/)?.[1] ?? toRaw).trim().toLowerCase()
+            : toRaw.trim().toLowerCase();
+
+        if (!toAddress) {
+            logger.warn({ body }, "Email webhook: missing 'to' address");
+            return reply.status(400).send({ error: "Missing recipient address" });
+        }
+
+        // Verify recipient workspace exists in DB
+        const emailConfig = await emailWorkspaceAddressRepository.findByAddress(toAddress);
+
+        if (!emailConfig) {
+            // Address not found — reject so Cloudflare can bounce back to sender
+            logger.info({ to: toAddress }, "Email webhook: no workspace found for address, rejecting");
+            return reply.status(404).send({ error: `No workspace found for ${toAddress}` });
+        }
+
+        if (!emailConfig.enabled) {
+            logger.info({ to: toAddress }, "Email webhook: address is disabled, rejecting");
+            return reply.status(404).send({ error: `Email address ${toAddress} is disabled` });
+        }
+
+        const handler = channelManager.getPlatformEmailHandler();
+        if (!handler) {
+            return reply.status(503).send({ error: "Email channel not configured" });
+        }
+
+        // Address verified — fire-and-forget processing, return 200 immediately
+        handler
+            .handleInboundEmail(body)
+            .catch((err) => logger.error({ err }, "Email webhook processing failed"));
 
         return reply.status(200).send({ ok: true });
     });

@@ -363,6 +363,25 @@ All authenticated endpoints require:
 
 ---
 
+## Email
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/email/address` | JWT + WS | Get workspace email address config |
+| `POST` | `/api/email/address` | JWT + WS | Claim an email address for the workspace |
+| `PUT` | `/api/email/address` | JWT + WS | Update email address settings (display name, instructions, enabled) |
+| `DELETE` | `/api/email/address` | JWT + WS | Release the workspace email address |
+| `GET` | `/api/email/approved-senders` | JWT + WS | List approved sender patterns |
+| `POST` | `/api/email/approved-senders` | JWT + WS | Add an approved sender pattern |
+| `DELETE` | `/api/email/approved-senders` | JWT + WS | Remove an approved sender pattern |
+| `GET` | `/api/email/inbox` | JWT + WS | List inbound emails (paginated, filterable by status) |
+| `GET` | `/api/email/inbox/:id` | JWT + WS | Get inbound email details |
+| `POST` | `/api/email/inbox/:id/approve` | JWT + WS | Approve a pending email reply |
+| `POST` | `/api/email/inbox/:id/reject` | JWT + WS | Reject a pending email reply |
+| `POST` | `/api/email/simulate` | JWT + WS | Simulate an inbound email (dev only) |
+
+---
+
 ## Webhooks (External)
 
 | Method | Path | Auth | Description |
@@ -370,6 +389,7 @@ All authenticated endpoints require:
 | `POST` | `/webhooks/telegram/:connectionId` | No | Telegram bot updates |
 | `POST` | `/webhooks/slack/events` | No | Slack event callbacks |
 | `POST` | `/webhooks/slack/interactive` | No | Slack interactive events |
+| `POST` | `/webhooks/email` | No | Cloudflare Email Routing webhook (optional shared secret) |
 
 ---
 

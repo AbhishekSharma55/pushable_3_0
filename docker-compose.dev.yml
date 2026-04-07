@@ -96,6 +96,9 @@ services:
       WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
       WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
       WHATSAPP_WEBHOOK_VERIFY_TOKEN: ${WHATSAPP_WEBHOOK_VERIFY_TOKEN:-pushable_whatsapp_verify}
+      # Email Channel (Mail Manus)
+      EMAIL_DOMAIN: ${EMAIL_DOMAIN:-}
+      EMAIL_WEBHOOK_SECRET: ${EMAIL_WEBHOOK_SECRET:-}
       # MinIO / S3 bucket storage
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
@@ -145,6 +148,7 @@ services:
       NEXT_PUBLIC_BROWSER_WS_URL: ${NEXT_PUBLIC_BROWSER_WS_URL:-ws://192.168.1.35:8080}
       NEXT_PUBLIC_LOGGING: ${NEXT_PUBLIC_LOGGING:-false}
       NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      NEXT_PUBLIC_EMAIL_DOMAIN: ${EMAIL_DOMAIN:-pushable.ai}
     depends_on:
       - backend
     volumes:

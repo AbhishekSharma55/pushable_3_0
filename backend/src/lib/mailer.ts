@@ -30,6 +30,53 @@ export async function sendMail(options: {
     }
 }
 
+/**
+ * Send a reply email with proper threading headers (In-Reply-To, References).
+ * Used by the email channel to reply to inbound emails.
+ */
+export async function sendReplyMail(options: {
+    to: string;
+    subject: string;
+    text?: string;
+    html: string;
+    from: string;
+    fromName?: string;
+    inReplyTo?: string;
+    references?: string;
+}) {
+    const fromField = options.fromName
+        ? `"${options.fromName}" <${options.from}>`
+        : options.from;
+
+    const subject = options.subject.startsWith("Re: ")
+        ? options.subject
+        : `Re: ${options.subject}`;
+
+    const headers: Record<string, string> = {};
+    if (options.inReplyTo) {
+        headers["In-Reply-To"] = options.inReplyTo;
+    }
+    if (options.references) {
+        headers["References"] = options.references;
+    }
+
+    try {
+        await transporter.sendMail({
+            from: fromField,
+            replyTo: options.from,
+            to: options.to,
+            subject,
+            text: options.text,
+            html: options.html,
+            headers,
+        });
+        logger.info(`Reply email sent to ${options.to}`);
+    } catch (err) {
+        logger.error(`Failed to send reply email to ${options.to}: ${err}`);
+        throw err;
+    }
+}
+
 export function buildInvitationEmail(
     workspaceName: string,
     inviterName: string,

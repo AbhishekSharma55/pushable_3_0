@@ -47,6 +47,7 @@ import { telegramLinkRoutes } from "./routes/telegram-link.ts";
 import { slackLinkRoutes } from "./routes/slack-link.ts";
 import { slackOAuthRoutes } from "./routes/slack-oauth.ts";
 import { whatsappLinkRoutes } from "./routes/whatsapp-link.ts";
+import { emailRoutes } from "./routes/email.ts";
 import { browserService } from "./services/browser.service.ts";
 
 const app = Fastify({ logger: false });
@@ -125,6 +126,7 @@ await app.register(memberRoutes, { prefix: "/api" });
 await app.register(telegramLinkRoutes, { prefix: "/api" });
 await app.register(slackLinkRoutes, { prefix: "/api" });
 await app.register(whatsappLinkRoutes, { prefix: "/api" });
+await app.register(emailRoutes, { prefix: "/api" });
 
 // Webhook routes + OAuth routes — NO auth, external platforms call these
 await app.register(webhookRoutes);
@@ -147,6 +149,7 @@ await channelManager.initializeAllActive();
 await channelManager.initializePlatformTelegram();
 await channelManager.initializePlatformSlack();
 await channelManager.initializePlatformWhatsApp();
+await channelManager.initializePlatformEmail();
 
 logger.info(`Server running on port ${port}`);
 
@@ -156,6 +159,7 @@ const shutdown = async () => {
   await channelManager.shutdownPlatformTelegram();
   await channelManager.shutdownPlatformSlack();
   await channelManager.shutdownPlatformWhatsApp();
+  await channelManager.shutdownPlatformEmail();
   await stopWorkers();
   await scheduleQueue.close();
   await app.close();

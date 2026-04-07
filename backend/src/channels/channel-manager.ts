@@ -6,6 +6,7 @@ import { SlackAdapter, setSlackMessageHandler } from "./slack.channel.ts";
 import { PlatformTelegramBot } from "./platform-telegram.ts";
 import { PlatformSlackBot } from "./platform-slack.ts";
 import { PlatformWhatsAppBot } from "./platform-whatsapp.ts";
+import { PlatformEmailHandler, PLATFORM_EMAIL_CONNECTION_ID } from "./platform-email.ts";
 import { routeMessage, setResponseSender, setApprovalSender, resolveChannelApproval } from "./message-router.ts";
 import { platformBotConfigRepository } from "../repositories/platform-bot-config.repository.ts";
 import { logger } from "../lib/logger.ts";
@@ -18,6 +19,7 @@ import type {
 const PLATFORM_TELEGRAM_CONNECTION_ID = "platform-telegram";
 const PLATFORM_SLACK_CONNECTION_ID = "platform-slack";
 const PLATFORM_WHATSAPP_CONNECTION_ID = "platform-whatsapp";
+const PLATFORM_EMAIL_CONN_ID = PLATFORM_EMAIL_CONNECTION_ID;
 
 class ChannelManager {
     private adapters = new Map<
@@ -29,6 +31,7 @@ class ChannelManager {
     private platformTelegramBot: PlatformTelegramBot | null = null;
     private platformSlackBot: PlatformSlackBot | null = null;
     private platformWhatsAppBot: PlatformWhatsAppBot | null = null;
+    private platformEmailHandler: PlatformEmailHandler | null = null;
     private initialized = false;
 
     private setupHandlers() {
@@ -48,6 +51,9 @@ class ChannelManager {
             }
             if (connectionId === PLATFORM_WHATSAPP_CONNECTION_ID && this.platformWhatsAppBot) {
                 return this.platformWhatsAppBot.sendApprovalMessage(chatId, text, sessionId);
+            }
+            if (connectionId === PLATFORM_EMAIL_CONN_ID && this.platformEmailHandler) {
+                return this.platformEmailHandler.sendApprovalMessage(chatId, text, sessionId);
             }
             return this.telegramAdapter.sendApprovalMessage(connectionId, chatId, text, sessionId);
         });
@@ -109,6 +115,10 @@ class ChannelManager {
         }
         if (connectionId === PLATFORM_WHATSAPP_CONNECTION_ID && this.platformWhatsAppBot) {
             await this.platformWhatsAppBot.sendResponse(response);
+            return;
+        }
+        if (connectionId === PLATFORM_EMAIL_CONN_ID && this.platformEmailHandler) {
+            await this.platformEmailHandler.sendResponse(response);
             return;
         }
 
@@ -365,6 +375,51 @@ class ChannelManager {
 
     getPlatformWhatsAppBot(): PlatformWhatsAppBot | null {
         return this.platformWhatsAppBot;
+    }
+
+    async initializePlatformEmail(): Promise<void> {
+        const emailDomain = process.env.EMAIL_DOMAIN;
+        if (!emailDomain) {
+            logger.info("No EMAIL_DOMAIN set — platform email handler disabled");
+            return;
+        }
+
+        this.setupHandlers();
+
+        try {
+            this.platformEmailHandler = new PlatformEmailHandler();
+
+            // Wire cross-channel approval notifiers so email approvals
+            // fan out to Telegram, Slack, WhatsApp (admin approves from anywhere)
+            this.platformEmailHandler.setChannelNotifiers({
+                telegram: this.platformTelegramBot
+                    ? (chatId, text, sessionId) =>
+                          this.platformTelegramBot!.sendApprovalMessage(chatId, text, sessionId)
+                    : undefined,
+                slack: this.platformSlackBot
+                    ? (chatId, text, sessionId) =>
+                          this.platformSlackBot!.sendApprovalMessage(chatId, text, sessionId)
+                    : undefined,
+                whatsapp: this.platformWhatsAppBot
+                    ? (chatId, text, sessionId) =>
+                          this.platformWhatsAppBot!.sendApprovalMessage(chatId, text, sessionId)
+                    : undefined,
+            });
+
+            logger.info({ domain: emailDomain }, "Platform email handler initialized");
+        } catch (error) {
+            const errMsg = error instanceof Error ? error.message : String(error);
+            logger.error({ error: errMsg }, "Failed to initialize platform email handler");
+            this.platformEmailHandler = null;
+        }
+    }
+
+    async shutdownPlatformEmail(): Promise<void> {
+        this.platformEmailHandler = null;
+    }
+
+    getPlatformEmailHandler(): PlatformEmailHandler | null {
+        return this.platformEmailHandler;
     }
 
     async initializeAllActive(): Promise<void> {

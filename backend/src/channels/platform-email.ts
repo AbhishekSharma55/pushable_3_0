@@ -23,6 +23,22 @@ export class PlatformEmailHandler {
      */
     async handleInboundEmail(payload: Record<string, unknown>): Promise<void> {
         try {
+            // Log the full raw payload for debugging
+            logger.info({
+                cloudflare_payload_keys: Object.keys(payload),
+                cloudflare_payload_from: payload.from,
+                cloudflare_payload_to: payload.to,
+                cloudflare_payload_subject: payload.subject,
+                cloudflare_payload_has_text: !!payload.text,
+                cloudflare_payload_has_plain: !!payload.plain,
+                cloudflare_payload_has_html: !!payload.html,
+                cloudflare_payload_has_headers: !!payload.headers,
+                cloudflare_payload_headers: payload.headers,
+                cloudflare_payload_text_preview: typeof payload.text === 'string' ? payload.text.slice(0, 300) : null,
+                cloudflare_payload_html_preview: typeof payload.html === 'string' ? payload.html.slice(0, 300) : null,
+                cloudflare_payload_full: payload,
+            }, "CLOUDFLARE EMAIL PAYLOAD DEBUG");
+
             // Extract fields from Cloudflare Email Routing payload
             const fromRaw = (payload.from as string) || "";
             const toRaw = (payload.to as string) || "";
@@ -30,6 +46,12 @@ export class PlatformEmailHandler {
             const rawBodyText = (payload.text as string) || (payload.plain as string) || "";
             const bodyText = extractBodyFromMime(rawBodyText);
             const bodyHtml = (payload.html as string) || "";
+
+            logger.info({
+                raw_body_text_preview: rawBodyText.slice(0, 300),
+                extracted_body_text: bodyText.slice(0, 300),
+                body_html_preview: bodyHtml.slice(0, 300),
+            }, "CLOUDFLARE EMAIL BODY EXTRACTION DEBUG");
             const cc = (payload.cc as string) || "";
             const rawHeaders = payload.headers as Record<string, string> | undefined;
             const messageId = rawHeaders?.["message-id"] || (payload.messageId as string) || "";

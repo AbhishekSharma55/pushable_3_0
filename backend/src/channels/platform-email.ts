@@ -27,7 +27,8 @@ export class PlatformEmailHandler {
             const fromRaw = (payload.from as string) || "";
             const toRaw = (payload.to as string) || "";
             const subject = (payload.subject as string) || "";
-            const bodyText = (payload.text as string) || (payload.plain as string) || "";
+            const rawBodyText = (payload.text as string) || (payload.plain as string) || "";
+            const bodyText = extractBodyFromMime(rawBodyText);
             const bodyHtml = (payload.html as string) || "";
             const cc = (payload.cc as string) || "";
             const rawHeaders = payload.headers as Record<string, string> | undefined;
@@ -330,6 +331,97 @@ export class PlatformEmailHandler {
         slack?: (chatId: string, text: string, sessionId: string) => Promise<void>;
         whatsapp?: (chatId: string, text: string, sessionId: string) => Promise<void>;
     } = {};
+}
+
+/**
+ * Extract clean plain-text body from a raw MIME email string.
+ * Cloudflare Workers sometimes forward the raw RFC 2822 source as `text`.
+ * Handles transport headers (Received, ARC, DKIM) → message headers → multipart body.
+ */
+function extractBodyFromMime(raw: string): string {
+    if (!raw) return "";
+
+    const looksLikeMime = /^(Received:|MIME-Version:|Content-Type:|DKIM-Signature:|ARC-|From:|To:|Subject:)/m.test(raw);
+    if (!looksLikeMime) return raw.trim();
+
+    return parseMimePart(raw) ?? raw.trim();
+}
+
+/**
+ * Recursively parse a MIME part and return the first text/plain content found.
+ * Handles: transport headers → message envelope → multipart → text/plain
+ */
+function parseMimePart(text: string): string | null {
+    const splitIdx = findMimeSplit(text);
+    if (splitIdx === -1) return null;
+
+    const headers = text.slice(0, splitIdx);
+    const body = text.slice(splitIdx);
+
+    const contentTypeMatch = headers.match(/^Content-Type:\s*([^\r\n;]+)/im);
+    const contentType = contentTypeMatch?.[1]?.trim().toLowerCase() ?? "";
+
+    // No Content-Type means this is likely the transport header section.
+    // The body is the actual message (which has its own headers) — recurse into it.
+    if (!contentType) {
+        if (/^[A-Za-z-]+:\s/m.test(body.slice(0, 1000))) {
+            return parseMimePart(body);
+        }
+        return body.trim() || null;
+    }
+
+    if (contentType.startsWith("multipart/")) {
+        const boundaryMatch = headers.match(/boundary="?([^"\r\n;]+)"?/i);
+        if (!boundaryMatch) return null;
+        const boundary = boundaryMatch[1].trim();
+
+        const parts = body.split(new RegExp(`--${escapeRegex(boundary)}`));
+        // Prefer text/plain, fallback to first parseable part
+        let fallback: string | null = null;
+        for (const part of parts) {
+            if (!part || part.trimStart().startsWith("--") || part.trim() === "") continue;
+            const result = parseMimePart(part.trimStart());
+            if (result && !fallback) fallback = result;
+            // Check if this part is specifically text/plain
+            const partCtMatch = part.match(/^Content-Type:\s*text\/plain/im);
+            if (partCtMatch && result) return result;
+        }
+        return fallback;
+    }
+
+    if (contentType.startsWith("text/plain")) {
+        const encodingMatch = headers.match(/^Content-Transfer-Encoding:\s*([^\r\n]+)/im);
+        const encoding = encodingMatch?.[1]?.trim().toLowerCase() ?? "";
+        if (encoding === "quoted-printable") return decodeQuotedPrintable(body.trim());
+        if (encoding === "base64") return Buffer.from(body.replace(/\s/g, ""), "base64").toString("utf-8").trim();
+        return body.trim();
+    }
+
+    // text/html or other non-text types — skip
+    return null;
+}
+
+function findMimeSplit(text: string): number {
+    const rn = text.indexOf("\r\n\r\n");
+    const n = text.indexOf("\n\n");
+    if (rn === -1 && n === -1) return -1;
+    if (rn === -1) return n + 2;
+    if (n === -1) return rn + 4;
+    return Math.min(rn + 4, n + 2);
+}
+
+function stripMimeHeaders(text: string): string {
+    return text.replace(/^([A-Za-z-]+:\s[^\n]*\n)+\n?/, "").trim();
+}
+
+function decodeQuotedPrintable(text: string): string {
+    return text
+        .replace(/=\r?\n/g, "") // soft line breaks
+        .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+function escapeRegex(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** Parse "Name <email@domain.com>" or "email@domain.com" */

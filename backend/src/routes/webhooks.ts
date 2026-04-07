@@ -109,16 +109,20 @@ export async function webhookRoutes(fastify: FastifyInstance) {
     // We verify the recipient address exists in our DB. If not, we reject with 404
     // so Cloudflare knows the address is invalid (and can bounce the sender).
     fastify.post("/webhooks/email", async (request, reply) => {
+        logger.info({ ip: request.ip, headers: request.headers }, "Email webhook: request received from Cloudflare");
+
         // Optional shared secret verification
         const secret = request.headers["x-email-webhook-secret"] as string;
         if (
             process.env.EMAIL_WEBHOOK_SECRET &&
             secret !== process.env.EMAIL_WEBHOOK_SECRET
         ) {
+            logger.warn({ ip: request.ip }, "Email webhook: invalid secret, rejecting");
             return reply.status(403).send({ error: "Forbidden" });
         }
 
         const body = request.body as Record<string, unknown>;
+        logger.info({ from: body.from, to: body.to, subject: body.subject }, "Email webhook: payload received");
 
         // Extract recipient address from Cloudflare payload
         const toRaw = (body.to as string) || "";
@@ -131,22 +135,26 @@ export async function webhookRoutes(fastify: FastifyInstance) {
             return reply.status(400).send({ error: "Missing recipient address" });
         }
 
+        logger.info({ toAddress }, "Email webhook: looking up workspace for address");
+
         // Verify recipient workspace exists in DB
         const emailConfig = await emailWorkspaceAddressRepository.findByAddress(toAddress);
 
         if (!emailConfig) {
-            // Address not found — reject so Cloudflare can bounce back to sender
-            logger.info({ to: toAddress }, "Email webhook: no workspace found for address, rejecting");
+            logger.warn({ toAddress }, "Email webhook: no workspace found for address, rejecting");
             return reply.status(404).send({ error: `No workspace found for ${toAddress}` });
         }
 
         if (!emailConfig.enabled) {
-            logger.info({ to: toAddress }, "Email webhook: address is disabled, rejecting");
+            logger.warn({ toAddress }, "Email webhook: address is disabled, rejecting");
             return reply.status(404).send({ error: `Email address ${toAddress} is disabled` });
         }
 
+        logger.info({ toAddress, workspaceId: emailConfig.workspaceId }, "Email webhook: address verified, processing");
+
         const handler = channelManager.getPlatformEmailHandler();
         if (!handler) {
+            logger.error("Email webhook: platform email handler not configured");
             return reply.status(503).send({ error: "Email channel not configured" });
         }
 

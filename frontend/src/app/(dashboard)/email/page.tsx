@@ -207,9 +207,9 @@ export default function EmailInboxPage() {
     }
 
     return (
-        <div className="flex h-full bg-background overflow-hidden">
+        <div className="flex bg-background overflow-hidden" style={{ height: 'calc(100vh - 80px)', maxHeight: 'calc(100vh - 80px)' }}>
             {/* ── Left: Email List ── */}
-            <div className={`flex flex-col border-r border-border shrink-0 ${selected ? 'w-[340px]' : 'flex-1 max-w-2xl mx-auto w-full'}`}>
+            <div className={`flex flex-col border-r border-border shrink-0 overflow-hidden ${selected ? 'w-[340px]' : 'flex-1 max-w-2xl mx-auto w-full'}`}>
                 {/* Header */}
                 <div className="flex items-center justify-between px-4 h-12 border-b border-border shrink-0">
                     <div className="flex items-center gap-2">

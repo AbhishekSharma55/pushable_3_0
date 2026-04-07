@@ -43,6 +43,7 @@ export const inboundEmails = pgTable("inbound_emails", {
     bodyText: text("body_text"),
     bodyHtml: text("body_html"),
     cc: text("cc"),
+    bcc: text("bcc"),
     messageId: text("message_id"),
     inReplyTo: text("in_reply_to"),
     references: text("references"),
@@ -50,6 +51,7 @@ export const inboundEmails = pgTable("inbound_emails", {
     routedToAgentId: uuid("routed_to_agent_id").references(() => agents.id, {
         onDelete: "set null",
     }),
+    attachments: jsonb("attachments").default([]).notNull(),
     statusHistory: jsonb("status_history").default([]).notNull(),
     replySent: boolean("reply_sent").default(false).notNull(),
     replyContent: text("reply_content"),

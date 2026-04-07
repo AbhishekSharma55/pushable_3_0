@@ -31,6 +31,15 @@ export type EmailStatus =
     | 'failed'
     | 'spam';
 
+export interface EmailAttachment {
+    filename: string;
+    mimeType: string;
+    size: number;
+    storageKey: string;
+    isInline: boolean;
+    contentId?: string;
+}
+
 export interface InboundEmail {
     id: string;
     workspaceId: string;
@@ -43,11 +52,13 @@ export interface InboundEmail {
     bodyText: string | null;
     bodyHtml: string | null;
     cc: string | null;
+    bcc: string | null;
     messageId: string | null;
     inReplyTo: string | null;
     references: string | null;
     status: EmailStatus;
     routedToAgentId: string | null;
+    attachments: EmailAttachment[];
     statusHistory: Array<{
         status: string;
         timestamp: string;
@@ -131,3 +142,7 @@ export const approveEmail = (workspaceId: string, id: string): Promise<void> =>
 
 export const rejectEmail = (workspaceId: string, id: string): Promise<void> =>
     apiClient.post(`/api/email/inbox/${id}/reject`, {}, { headers: { 'x-workspace-id': workspaceId } });
+
+/** Returns a URL to fetch an attachment via the backend (authenticated via cookie/token). */
+export const getAttachmentUrl = (workspaceId: string, emailId: string, index: number): string =>
+    `/api/email/inbox/${emailId}/attachment/${index}?workspaceId=${workspaceId}`;

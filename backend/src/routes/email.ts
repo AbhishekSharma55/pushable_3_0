@@ -313,6 +313,36 @@ export async function emailRoutes(fastify: FastifyInstance) {
         return { success: true };
     });
 
+    // GET /email/inbox/:id/attachment/:index — serve attachment file from storage
+    fastify.get("/email/inbox/:id/attachment/:index", async (request, reply) => {
+        const workspaceId = request.headers["x-workspace-id"] as string;
+        const { id, index } = request.params as { id: string; index: string };
+
+        const email = await inboundEmailRepository.findById(id, workspaceId);
+        if (!email) {
+            throw new AppError("Email not found", 404, "EMAIL_NOT_FOUND");
+        }
+
+        const attachments = (email.attachments as Array<{
+            filename: string; mimeType: string; size: number; storageKey: string;
+        }>) || [];
+        const idx = parseInt(index, 10);
+        const attachment = attachments[idx];
+        if (!attachment) {
+            throw new AppError("Attachment not found", 404, "ATTACHMENT_NOT_FOUND");
+        }
+
+        const { getStorage } = await import("../lib/storage.ts");
+        const storage = getStorage();
+        const { buffer, contentType } = await storage.get(attachment.storageKey);
+
+        reply
+            .header("Content-Type", contentType)
+            .header("Content-Disposition", `inline; filename="${attachment.filename}"`)
+            .header("Content-Length", buffer.length)
+            .send(buffer);
+    });
+
     // ==========================================
     // Local Testing (non-production only)
     // ==========================================

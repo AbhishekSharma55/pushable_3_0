@@ -1,13 +1,16 @@
+import { randomUUID } from "crypto";
 import { logger } from "../lib/logger.ts";
 import { emailWorkspaceAddressRepository } from "../repositories/email-workspace-address.repository.ts";
 import { emailApprovedSenderRepository } from "../repositories/email-approved-sender.repository.ts";
 import { inboundEmailRepository } from "../repositories/inbound-email.repository.ts";
+import type { EmailAttachmentMeta } from "../repositories/inbound-email.repository.ts";
 import { telegramLinkRepository } from "../repositories/telegram-link.repository.ts";
 import { slackLinkRepository } from "../repositories/slack-link.repository.ts";
 import { whatsappLinkRepository } from "../repositories/whatsapp-link.repository.ts";
 import { ceoService } from "../services/ceo.service.ts";
 import { routeMessage } from "./message-router.ts";
 import { sendReplyMail } from "../lib/mailer.ts";
+import { getStorage } from "../lib/storage.ts";
 import type { NormalizedMessage, NormalizedResponse } from "./types.ts";
 
 export const PLATFORM_EMAIL_CONNECTION_ID = "platform-email";
@@ -46,17 +49,18 @@ export class PlatformEmailHandler {
             const rawBodyText = (payload.text as string) || (payload.plain as string) || "";
             const bodyText = extractBodyFromMime(rawBodyText);
             const bodyHtml = (payload.html as string) || "";
+            const cc = (payload.cc as string) || "";
+            const bcc = (payload.bcc as string) || "";
+            const rawHeaders = payload.headers as Record<string, string> | undefined;
+            const messageId = rawHeaders?.["message-id"] || (payload.messageId as string) || "";
+            const inReplyTo = rawHeaders?.["in-reply-to"] || (payload.inReplyTo as string) || "";
+            const references = rawHeaders?.references || (payload.references as string) || "";
 
             logger.info({
                 raw_body_text_preview: rawBodyText.slice(0, 300),
                 extracted_body_text: bodyText.slice(0, 300),
                 body_html_preview: bodyHtml.slice(0, 300),
             }, "CLOUDFLARE EMAIL BODY EXTRACTION DEBUG");
-            const cc = (payload.cc as string) || "";
-            const rawHeaders = payload.headers as Record<string, string> | undefined;
-            const messageId = rawHeaders?.["message-id"] || (payload.messageId as string) || "";
-            const inReplyTo = rawHeaders?.["in-reply-to"] || (payload.inReplyTo as string) || "";
-            const references = rawHeaders?.references || (payload.references as string) || "";
 
             // Parse from address: "Name <email>" or just "email"
             const { email: fromAddress, name: fromName } = parseEmailAddress(fromRaw);
@@ -96,8 +100,8 @@ export class PlatformEmailHandler {
             );
 
             if (!isApproved) {
-                // Store as spam
-                await inboundEmailRepository.create({
+                // Store as spam (no attachment parsing for spam)
+                const spamRecord = await inboundEmailRepository.create({
                     workspaceId,
                     emailAddressId: emailConfig.id,
                     fromAddress,
@@ -107,22 +111,25 @@ export class PlatformEmailHandler {
                     bodyText,
                     bodyHtml,
                     cc,
+                    bcc,
                     messageId,
                     inReplyTo,
                     references,
                     rawPayload: payload,
                 });
-                // Update status to spam
-                const spamEmails = await inboundEmailRepository.findByWorkspace(workspaceId, { limit: 1 });
-                if (spamEmails[0]) {
-                    await inboundEmailRepository.updateStatus(
-                        spamEmails[0].id,
-                        "spam",
-                        `Sender ${fromAddress} not in approved senders list`
-                    );
-                }
+                await inboundEmailRepository.updateStatus(
+                    spamRecord.id,
+                    "spam",
+                    `Sender ${fromAddress} not in approved senders list`
+                );
                 logger.info({ from: fromAddress, workspaceId }, "Email rejected: sender not approved");
                 return;
+            }
+
+            // Parse and upload attachments from raw MIME
+            const attachments = await extractAndUploadAttachments(rawBodyText, workspaceId);
+            if (attachments.length > 0) {
+                logger.info({ count: attachments.length, files: attachments.map(a => a.filename) }, "Email attachments extracted");
             }
 
             // Create inbound email record
@@ -136,10 +143,12 @@ export class PlatformEmailHandler {
                 bodyText,
                 bodyHtml,
                 cc,
+                bcc,
                 messageId,
                 inReplyTo,
                 references,
                 rawPayload: payload,
+                attachments,
             });
 
             // Get the CEO agent for this workspace
@@ -353,6 +362,157 @@ export class PlatformEmailHandler {
         slack?: (chatId: string, text: string, sessionId: string) => Promise<void>;
         whatsapp?: (chatId: string, text: string, sessionId: string) => Promise<void>;
     } = {};
+}
+
+// ── Attachment Extraction ─────────────────────────────────────────────────────
+
+type RawAttachment = {
+    filename: string;
+    mimeType: string;
+    buffer: Buffer;
+    isInline: boolean;
+    contentId?: string;
+};
+
+/**
+ * Walk all MIME parts of a raw email, collecting attachment parts.
+ * Returns decoded buffers ready for storage upload.
+ */
+function extractMimeAttachments(raw: string): RawAttachment[] {
+    const results: RawAttachment[] = [];
+    collectAttachmentParts(raw, results);
+    return results;
+}
+
+function collectAttachmentParts(text: string, results: RawAttachment[]): void {
+    const splitIdx = findMimeSplit(text);
+    if (splitIdx === -1) return;
+
+    const headers = text.slice(0, splitIdx);
+    const body = text.slice(splitIdx);
+
+    const contentTypeMatch = headers.match(/^Content-Type:\s*([^\r\n;]+)/im);
+    const contentType = contentTypeMatch?.[1]?.trim().toLowerCase() ?? "";
+
+    if (contentType.startsWith("multipart/")) {
+        const boundaryMatch = headers.match(/boundary="?([^"\r\n;]+)"?/i);
+        if (!boundaryMatch) return;
+        const boundary = boundaryMatch[1].trim();
+        const parts = body.split(new RegExp(`--${escapeRegex(boundary)}`));
+        for (const part of parts) {
+            if (!part || part.trimStart().startsWith("--") || part.trim() === "") continue;
+            collectAttachmentParts(part.trimStart(), results);
+        }
+        return;
+    }
+
+    // No content-type → outer transport headers, recurse into body
+    if (!contentType && /^[A-Za-z-]+:\s/m.test(body.slice(0, 1000))) {
+        collectAttachmentParts(body, results);
+        return;
+    }
+
+    // Check disposition
+    const dispositionMatch = headers.match(/^Content-Disposition:\s*([^\r\n;]+)/im);
+    const disposition = dispositionMatch?.[1]?.trim().toLowerCase() ?? "";
+    const isAttachment = disposition === "attachment" || disposition.startsWith("attachment");
+    const isInline = disposition === "inline" || disposition.startsWith("inline");
+
+    // Get filename from Content-Disposition or Content-Type
+    let filename =
+        headers.match(/Content-Disposition:[^\r\n]*filename\*?=(?:UTF-8'')?["']?([^"'\r\n;]+)["']?/i)?.[1]?.trim() ||
+        headers.match(/Content-Type:[^\r\n]*name\*?=(?:UTF-8'')?["']?([^"'\r\n;]+)["']?/i)?.[1]?.trim() ||
+        "";
+
+    // Decode RFC 5987 encoded filenames (=?UTF-8?B?...?= or =?UTF-8?Q?...?=)
+    if (filename.startsWith("=?")) {
+        filename = decodeMimeWord(filename);
+    }
+
+    const contentId = headers.match(/^Content-ID:\s*<([^>]+)>/im)?.[1]?.trim();
+
+    // Only collect if it's an explicit attachment, or inline with a filename (inline images)
+    if (!isAttachment && !(isInline && filename) && !contentId) return;
+    if (!filename && !contentId) return;
+    if (!filename) filename = contentId ? `inline-${contentId.replace(/[^\w.]/g, "_")}` : "attachment";
+
+    // Skip text/plain and text/html parts — those are the body
+    if (contentType.startsWith("text/plain") || contentType.startsWith("text/html")) return;
+
+    const encodingMatch = headers.match(/^Content-Transfer-Encoding:\s*([^\r\n]+)/im);
+    const encoding = encodingMatch?.[1]?.trim().toLowerCase() ?? "";
+
+    let buffer: Buffer;
+    try {
+        if (encoding === "base64") {
+            buffer = Buffer.from(body.replace(/\s/g, ""), "base64");
+        } else if (encoding === "quoted-printable") {
+            buffer = Buffer.from(decodeQuotedPrintable(body.trim()), "binary");
+        } else {
+            buffer = Buffer.from(body.trim(), "binary");
+        }
+    } catch {
+        return; // Skip unparseable parts
+    }
+
+    results.push({
+        filename: filename.replace(/[^\w.\-\s]/g, "_").slice(0, 200),
+        mimeType: contentType || "application/octet-stream",
+        buffer,
+        isInline: isInline || !!contentId,
+        contentId,
+    });
+}
+
+/**
+ * Extract attachments from raw MIME email and upload them to MinIO/S3.
+ * Returns attachment metadata for storage in the DB.
+ */
+async function extractAndUploadAttachments(
+    rawEmail: string,
+    workspaceId: string
+): Promise<EmailAttachmentMeta[]> {
+    if (!rawEmail) return [];
+
+    const raw = extractMimeAttachments(rawEmail);
+    if (raw.length === 0) return [];
+
+    const storage = getStorage();
+    const results: EmailAttachmentMeta[] = [];
+
+    for (const att of raw) {
+        try {
+            const storageKey = `${workspaceId}/email-attachments/${randomUUID()}-${att.filename}`;
+            await storage.put(storageKey, att.buffer, att.mimeType);
+            results.push({
+                filename: att.filename,
+                mimeType: att.mimeType,
+                size: att.buffer.length,
+                storageKey,
+                isInline: att.isInline,
+                contentId: att.contentId,
+            });
+        } catch (err) {
+            logger.warn({ err, filename: att.filename }, "Failed to upload email attachment");
+        }
+    }
+
+    return results;
+}
+
+function decodeMimeWord(encoded: string): string {
+    // Handle =?charset?B?base64?= and =?charset?Q?qp?=
+    return encoded.replace(/=\?([^?]+)\?([BQ])\?([^?]*)\?=/gi, (_, _charset, encoding, text) => {
+        try {
+            if (encoding.toUpperCase() === "B") {
+                return Buffer.from(text, "base64").toString("utf-8");
+            } else {
+                return decodeQuotedPrintable(text.replace(/_/g, " "));
+            }
+        } catch {
+            return text;
+        }
+    });
 }
 
 /**

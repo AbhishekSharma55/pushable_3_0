@@ -2,6 +2,15 @@ import { eq, and, desc, sql } from "drizzle-orm";
 import { db } from "../db/client.ts";
 import { inboundEmails } from "../db/schema/index.ts";
 
+export type EmailAttachmentMeta = {
+    filename: string;
+    mimeType: string;
+    size: number;
+    storageKey: string;
+    isInline: boolean;
+    contentId?: string;
+};
+
 type EmailStatus =
     | "received"
     | "routing"
@@ -24,10 +33,12 @@ export const inboundEmailRepository = {
         bodyText?: string;
         bodyHtml?: string;
         cc?: string;
+        bcc?: string;
         messageId?: string;
         inReplyTo?: string;
         references?: string;
         rawPayload?: unknown;
+        attachments?: EmailAttachmentMeta[];
     }) {
         const result = await db
             .insert(inboundEmails)

@@ -98,6 +98,9 @@ services:
       WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
       WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
       WHATSAPP_WEBHOOK_VERIFY_TOKEN: ${WHATSAPP_WEBHOOK_VERIFY_TOKEN:-pushable_whatsapp_verify}
+      # Email Channel
+      EMAIL_DOMAIN: ${EMAIL_DOMAIN:-pushable.ai}
+      EMAIL_WEBHOOK_SECRET: ${EMAIL_WEBHOOK_SECRET:-}
       # MinIO / S3 bucket storage
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}

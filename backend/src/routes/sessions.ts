@@ -4,6 +4,8 @@ import { sessionService } from "../services/session.service.ts";
 import { browserRepository } from "../repositories/browser.repository.ts";
 import { AppError, UnauthorizedError } from "../lib/errors.ts";
 import { logger } from "../lib/logger.ts";
+import { workspaceRepository } from "../repositories/workspace.repository.ts";
+import { userAgentAccessRepository } from "../repositories/userAgentAccess.repository.ts";
 
 const createSessionSchema = z.object({
     title: z.string().min(1, "Title is required"),
@@ -46,6 +48,25 @@ export async function sessionRoutes(fastify: FastifyInstance) {
     fastify.post("/agents/:agentId/sessions", async (request, reply) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
         const { agentId } = request.params as { agentId: string };
+        const user = request.user as { userId: string };
+
+        // Check if user has access to this agent
+        const isOwnerOrAdmin = await workspaceRepository.isOwnerOrAdmin(workspaceId, user.userId);
+        if (!isOwnerOrAdmin) {
+            const canAccess = await userAgentAccessRepository.isAgentAllowed(
+                workspaceId,
+                user.userId,
+                agentId
+            );
+            if (!canAccess) {
+                throw new AppError(
+                    "You do not have access to this agent. Contact your workspace administrator.",
+                    403,
+                    "AGENT_ACCESS_DENIED"
+                );
+            }
+        }
+
         const body = createSessionSchema.parse(request.body);
         const session = await sessionService.createSession(
             { agentId, title: body.title },

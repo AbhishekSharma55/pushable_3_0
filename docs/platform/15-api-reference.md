@@ -259,6 +259,15 @@ All authenticated endpoints require:
 | `GET` | `/api/channels/:id/config` | JWT + WS | Get channel config |
 | `DELETE` | `/api/channels/:id` | JWT + WS | Delete channel |
 
+## Platform Telegram (Shared Bot)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/telegram/status` | JWT + WS | Check bot availability + list linked accounts |
+| `POST` | `/api/telegram/link` | JWT + WS | Generate verification code for Telegram linking |
+| `GET` | `/api/telegram/link-status` | JWT + WS | Poll to check if verification completed |
+| `DELETE` | `/api/telegram/links/:id` | JWT + WS | Unlink a Telegram account |
+
 ---
 
 ## File Storage (Bucket)
@@ -275,6 +284,33 @@ All authenticated endpoints require:
 | `GET` | `/api/bucket/folders` | JWT + WS | List folders |
 | `POST` | `/api/bucket/folders` | JWT + WS | Create folder |
 | `GET` | `/api/bucket/usage` | JWT + WS | Get storage usage |
+
+---
+
+## Invitations
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/workspaces/:workspaceId/invitations` | JWT | Invite user by email (owner/admin only) |
+| `GET` | `/api/workspaces/:workspaceId/invitations` | JWT | List workspace invitations (owner/admin only) |
+| `DELETE` | `/api/workspaces/:workspaceId/invitations/:invitationId` | JWT | Revoke invitation |
+| `POST` | `/api/invitations/accept` | JWT | Accept invitation (any authenticated user) |
+| `GET` | `/api/invitations/:token` | JWT | Get invitation details by token |
+
+---
+
+## Members
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/members` | JWT + WS | List workspace members with credit info |
+| `PATCH` | `/api/members/:userId/role` | JWT + WS | Change member role (owner only) |
+| `DELETE` | `/api/members/:userId` | JWT + WS | Remove member from workspace (owner/admin) |
+| `PUT` | `/api/members/:userId/credit-limit` | JWT + WS | Set per-user credit limit |
+| `DELETE` | `/api/members/:userId/credit-limit` | JWT + WS | Remove per-user credit limit |
+| `POST` | `/api/members/:userId/credit-limit/reset` | JWT + WS | Reset user's used credits to zero |
+| `GET` | `/api/members/:userId/agent-access` | JWT + WS | Get user's agent access configuration |
+| `PUT` | `/api/members/:userId/agent-access` | JWT + WS | Set user's agent access configuration |
 
 ---
 
@@ -327,6 +363,25 @@ All authenticated endpoints require:
 
 ---
 
+## Email
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/email/address` | JWT + WS | Get workspace email address config |
+| `POST` | `/api/email/address` | JWT + WS | Claim an email address for the workspace |
+| `PUT` | `/api/email/address` | JWT + WS | Update email address settings (display name, instructions, enabled) |
+| `DELETE` | `/api/email/address` | JWT + WS | Release the workspace email address |
+| `GET` | `/api/email/approved-senders` | JWT + WS | List approved sender patterns |
+| `POST` | `/api/email/approved-senders` | JWT + WS | Add an approved sender pattern |
+| `DELETE` | `/api/email/approved-senders` | JWT + WS | Remove an approved sender pattern |
+| `GET` | `/api/email/inbox` | JWT + WS | List inbound emails (paginated, filterable by status) |
+| `GET` | `/api/email/inbox/:id` | JWT + WS | Get inbound email details |
+| `POST` | `/api/email/inbox/:id/approve` | JWT + WS | Approve a pending email reply |
+| `POST` | `/api/email/inbox/:id/reject` | JWT + WS | Reject a pending email reply |
+| `POST` | `/api/email/simulate` | JWT + WS | Simulate an inbound email (dev only) |
+
+---
+
 ## Webhooks (External)
 
 | Method | Path | Auth | Description |
@@ -334,6 +389,7 @@ All authenticated endpoints require:
 | `POST` | `/webhooks/telegram/:connectionId` | No | Telegram bot updates |
 | `POST` | `/webhooks/slack/events` | No | Slack event callbacks |
 | `POST` | `/webhooks/slack/interactive` | No | Slack interactive events |
+| `POST` | `/webhooks/email` | No | Cloudflare Email Routing webhook (optional shared secret) |
 
 ---
 

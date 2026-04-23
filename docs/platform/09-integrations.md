@@ -1,6 +1,6 @@
 # Integrations
 
-Pushable AI supports multiple integration types: **Composio** (1200+ third-party toolkits), **Slack** and **Telegram** channels, **Bitwarden** vault, and custom **MCP server** tools.
+Pushable AI supports multiple integration types: **Composio** (1200+ third-party toolkits), **Slack**, **Telegram**, and **Email** channels, **Bitwarden** vault, and custom **MCP server** tools.
 
 ---
 
@@ -166,38 +166,50 @@ channel_connections
 
 ## Telegram Integration
 
-Agents can receive and respond to Telegram messages via bot integration.
+Pushable uses a **shared platform Telegram bot** that serves all workspaces. Each user links their Telegram account to their workspace, and messages are routed to their CEO agent.
 
-### Setup Flow
+### Setup (Admin)
 
-1. Create a Telegram bot via @BotFather
-2. Get the bot token
-3. Connect the bot in Pushable via the Channels page
-4. Assign the channel to an agent
+1. Create a Telegram bot via @BotFather and get the bot token
+2. Set `TELEGRAM_BOT_TOKEN` in your environment / Docker Compose
+3. Restart the backend — the platform bot starts automatically
 
-### Webhook Endpoint
+### User Flow
+
+1. Go to **Channels** page in the dashboard
+2. Click **Connect Telegram**
+3. A 6-character verification code is generated (valid for 10 minutes)
+4. Open Telegram, find the bot (e.g., `@PushableAIBot`), and send the code
+5. The bot confirms the link — the user can now chat with their CEO agent
+
+### API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/webhooks/telegram/:connectionId` | Receive Telegram updates |
+| `GET` | `/api/telegram/status` | Check if platform bot is available, list linked accounts |
+| `POST` | `/api/telegram/link` | Generate a verification code for linking |
+| `GET` | `/api/telegram/link-status` | Poll to check if verification completed |
+| `DELETE` | `/api/telegram/links/:id` | Unlink a Telegram account |
 
 ### How It Works
 
-1. Telegram sends updates to `/webhooks/telegram/:connectionId`
-2. The channel manager validates the connection status
-3. The Grammy framework processes the update
-4. The message is routed to the assigned agent
-5. The agent executes and the response is sent back to Telegram
+1. A single Grammy.js bot instance runs using `TELEGRAM_BOT_TOKEN`
+2. When a user sends a message, the bot looks up `telegram_user_links` by `from.id`
+3. If linked, the message is routed to the workspace's CEO agent via the agent graph
+4. The CEO agent responds, and the reply is sent back to the user in Telegram
+5. One Telegram account can be linked to one workspace (UNIQUE constraint)
 
 ### Human-in-the-Loop via Telegram
 
-When an agent needs approval (HITL), the approval request can be sent to the Telegram channel. The user can approve or reject directly in Telegram, and the agent resumes.
+When the CEO agent needs approval (HITL), an inline keyboard with Approve/Reject buttons is sent. The user taps a button, and the agent resumes with the decision.
 
 ### Implementation
 
-- **Framework:** Grammy.js (v1.41.1) -- Telegram Bot Framework
-- **File:** `backend/src/channels/telegram.channel.ts`
-- **Webhook registration:** Each connection has a unique webhook URL based on its `connectionId`
+- **Framework:** Grammy.js (v1.41.1) — Telegram Bot Framework
+- **Platform bot:** `backend/src/channels/platform-telegram.ts` (shared singleton)
+- **Per-workspace bot (legacy):** `backend/src/channels/telegram.channel.ts`
+- **Verification:** `backend/src/lib/telegram-verification.ts` (in-memory codes with TTL)
+- **DB table:** `telegram_user_links` maps Telegram user IDs to workspaces
 
 ---
 
@@ -318,6 +330,131 @@ This many-to-many relationship allows:
 
 ---
 
+## Email Channel
+
+Workspaces can receive and process emails through a dedicated email address. Incoming emails are routed to the CEO agent, which delegates them to specialist agents based on content.
+
+### How It Works
+
+```
+1. Workspace claims an email address  → e.g. team@mydomain.com
+2. External sender sends an email     → Cloudflare Email Routing forwards it
+3. Webhook receives the email         → POST /webhooks/email
+4. CEO agent analyzes the email       → Routes to the best specialist agent
+5. Specialist processes and responds  → Reply sent or queued for approval
+```
+
+### One Address Per Workspace
+
+Each workspace can register exactly one email address on the platform's `EMAIL_DOMAIN` (e.g. `team@mydomain.com`). The address is created via the Email Settings UI or the API.
+
+### Cloudflare Email Routing
+
+Emails are ingested via a Cloudflare Email Routing catch-all rule that forwards all inbound mail to the backend webhook at `POST /webhooks/email`. The webhook optionally verifies a shared secret (`EMAIL_WEBHOOK_SECRET`) before processing.
+
+### Approved Senders Whitelist
+
+Workspaces can restrict which senders are allowed to trigger agent processing. Approved sender patterns support exact addresses (e.g. `jane@example.com`) or wildcard domains (e.g. `*@example.com`). Emails from unapproved senders are marked as spam.
+
+### Custom Instructions
+
+Each workspace can set custom instructions on their email address configuration. These instructions are injected into the CEO agent's context when routing inbound emails, allowing workspaces to control how emails are categorized and handled.
+
+### Human-in-the-Loop Approvals
+
+When agents require approval before sending a reply, the email is placed in the **awaiting_approval** state. Users can review pending emails in the web-based Inbox UI and approve or reject the proposed response.
+
+### Inbox UI
+
+The frontend provides an Inbox page where users can:
+- View all inbound emails with their current status
+- Read email content and agent-proposed replies
+- Approve or reject pending responses
+- Track the full status history of each email
+
+### Email Settings UI
+
+The Settings page allows workspace admins to:
+- Claim or update the workspace email address
+- Manage the approved senders list
+- Set custom routing instructions
+- Enable or disable the email channel
+
+### Local Testing
+
+In development, use the simulation endpoint to test email processing without Cloudflare:
+
+```json
+POST /api/email/simulate
+{
+  "from": "sender@example.com",
+  "to": "team@mydomain.com",
+  "subject": "Test email",
+  "text": "Hello, I need help with...",
+  "fromName": "Test Sender"
+}
+```
+
+### API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/email/address` | Get workspace email address config |
+| `POST` | `/api/email/address` | Claim an email address |
+| `PUT` | `/api/email/address` | Update address settings |
+| `DELETE` | `/api/email/address` | Release the email address |
+| `GET` | `/api/email/approved-senders` | List approved sender patterns |
+| `POST` | `/api/email/approved-senders` | Add an approved sender |
+| `DELETE` | `/api/email/approved-senders` | Remove an approved sender |
+| `GET` | `/api/email/inbox` | List inbound emails (paginated) |
+| `GET` | `/api/email/inbox/:id` | Get inbound email details |
+| `POST` | `/api/email/inbox/:id/approve` | Approve a pending reply |
+| `POST` | `/api/email/inbox/:id/reject` | Reject a pending reply |
+| `POST` | `/api/email/simulate` | Simulate inbound email (dev only) |
+
+### Database Schema
+
+```sql
+email_workspace_addresses
+  ├── id                    UUID
+  ├── workspaceId           UUID (FK → workspaces, UNIQUE)
+  ├── address               TEXT (UNIQUE)
+  ├── displayName           TEXT
+  ├── customInstructions    TEXT
+  └── enabled               BOOLEAN
+
+email_approved_senders
+  ├── id                    UUID
+  ├── workspaceId           UUID (FK → workspaces)
+  ├── senderPattern         TEXT (exact or wildcard)
+  └── note                  TEXT
+
+inbound_emails
+  ├── id                    UUID
+  ├── workspaceId           UUID (FK → workspaces)
+  ├── emailAddressId        UUID (FK → email_workspace_addresses)
+  ├── sessionId             UUID (FK → sessions)
+  ├── fromAddress           TEXT
+  ├── fromName              TEXT
+  ├── toAddress             TEXT
+  ├── subject               TEXT
+  ├── bodyText              TEXT
+  ├── bodyHtml              TEXT
+  ├── cc                    TEXT
+  ├── messageId             TEXT
+  ├── inReplyTo             TEXT
+  ├── references            TEXT
+  ├── status                ENUM (email_status)
+  ├── routedToAgentId       UUID (FK → agents)
+  ├── statusHistory         JSONB
+  ├── replySent             BOOLEAN
+  ├── replyContent          TEXT
+  ├── errorMessage          TEXT
+  └── rawPayload            JSONB
+```
+
+---
+
 ## Integration Summary
 
 | Integration | Protocol | Auth Method | Real-time? |
@@ -325,6 +462,7 @@ This many-to-many relationship allows:
 | **Composio** | REST API | API key + OAuth per service | No (on-demand) |
 | **Slack** | Webhooks | Bot token + signing secret | Yes (events) |
 | **Telegram** | Webhooks | Bot token | Yes (updates) |
+| **Email** | Webhook | Shared secret (optional) | Yes (webhook) |
 | **Bitwarden** | CLI/API | Encrypted credentials | No (on-demand) |
 | **MCP Servers** | SSE/WebSocket | Per-server config | Depends |
 

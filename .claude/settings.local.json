@@ -78,7 +78,21 @@
       "Bash(python3 -c \"import websockets; print\\(''websockets OK''\\)\")",
       "Bash(python3 -c \"import fastapi; print\\(''fastapi OK''\\)\")",
       "Bash(python3 -c \"import uvicorn; print\\(''uvicorn OK''\\)\")",
-      "Bash(DOCKER_HOST= docker compose -f docker-compose.dev.yml up backend cdp-analyzer -d --force-recreate --build)"
+      "Bash(DOCKER_HOST= docker compose -f docker-compose.dev.yml up backend cdp-analyzer -d --force-recreate --build)",
+      "Read(//tmp/**)",
+      "Bash(git status:*)",
+      "Bash(snap list:*)",
+      "Bash(tar -xzf /tmp/ngrok.tgz -C /tmp)",
+      "Bash(sudo mv:*)",
+      "Bash(ngrok --version)",
+      "Bash(cp /tmp/ngrok ~/ngrok)",
+      "Bash(~/ngrok --version)",
+      "Bash(~/ngrok config:*)",
+      "Bash(~/ngrok http:*)",
+      "Bash(find /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0 -name \"package.json\" -not -path \"*/node_modules/*\" -exec grep -l \"whatsapp\\\\|baileys\\\\|whiskeysockets\" {} \\\\;)",
+      "WebSearch",
+      "WebFetch(domain:manus.im)",
+      "Bash(docker-compose restart:*)"
     ]
   }
 }

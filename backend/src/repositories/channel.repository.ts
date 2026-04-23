@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, ne, sql } from "drizzle-orm";
 import { db } from "../db/client.ts";
 import { channelConnections } from "../db/schema/index.ts";
 
@@ -112,5 +112,31 @@ export const channelRepository = {
             .select()
             .from(channelConnections)
             .where(eq(channelConnections.status, "active"));
+    },
+
+    async findTelegramConnectionsWithUser(telegramUserId: string, excludeConnectionId?: string) {
+        const conditions = [
+            eq(channelConnections.channelType, "telegram"),
+            sql`${channelConnections.config}->'allowedUserIds' @> ${JSON.stringify([telegramUserId])}::jsonb`,
+        ];
+        if (excludeConnectionId) {
+            conditions.push(ne(channelConnections.id, excludeConnectionId));
+        }
+        return db
+            .select()
+            .from(channelConnections)
+            .where(and(...conditions));
+    },
+
+    async findByBotToken(botToken: string) {
+        return db
+            .select()
+            .from(channelConnections)
+            .where(
+                and(
+                    eq(channelConnections.channelType, "telegram"),
+                    sql`${channelConnections.credentials}->>'botToken' = ${botToken}`
+                )
+            );
     },
 };

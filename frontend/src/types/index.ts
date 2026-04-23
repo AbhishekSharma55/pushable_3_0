@@ -260,6 +260,47 @@ export interface ChannelConnection {
     updatedAt: string;
 }
 
+export interface TelegramUserLink {
+    id: string;
+    telegramUserId: string;
+    telegramUsername: string | null;
+    telegramFirstName: string | null;
+    telegramChatId: string | null;
+    workspaceId: string;
+    userId: string | null;
+    verifiedAt: string | null;
+    lastMessageAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface SlackUserLink {
+    id: string;
+    slackUserId: string;
+    slackTeamId: string;
+    slackUsername: string | null;
+    slackDisplayName: string | null;
+    slackDmChannelId: string | null;
+    workspaceId: string;
+    userId: string | null;
+    verifiedAt: string | null;
+    lastMessageAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface WhatsAppUserLink {
+    id: string;
+    whatsappPhone: string;
+    whatsappName: string | null;
+    workspaceId: string;
+    userId: string | null;
+    verifiedAt: string | null;
+    lastMessageAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
 export interface BrowserProfile {
     id: string;
     workspaceId: string;
@@ -517,4 +558,61 @@ export interface WorkflowStats {
     successCount: number;
     failCount: number;
     avgDurationMs: number;
+}
+
+// --- User Management ---
+
+export interface WorkspaceInvitation {
+    id: string;
+    workspaceId: string;
+    email: string;
+    role: 'admin' | 'member';
+    invitedBy: string;
+    token: string;
+    status: 'pending' | 'accepted' | 'expired' | 'revoked';
+    expiresAt: string;
+    acceptedAt: string | null;
+    createdAt: string;
+}
+
+export interface MemberWithCredits {
+    memberId: string;
+    userId: string;
+    role: 'owner' | 'admin' | 'member';
+    joinedAt: string;
+    userName: string;
+    userEmail: string;
+    creditLimit: number | null;
+    creditsUsed: number | null;
+    periodStart: string | null;
+    periodEnd: string | null;
+}
+
+export interface UserCreditLimit {
+    id: string;
+    workspaceId: string;
+    userId: string;
+    creditLimit: number;
+    creditsUsed: number;
+    periodStart: string;
+    periodEnd: string | null;
+    updatedAt: string;
+}
+
+export interface UserAgentAccess {
+    id: string;
+    workspaceId: string;
+    userId: string;
+    agentId: string;
+    allowed: boolean;
+    createdAt: string;
+}
+
+export interface InvitationDetails {
+    id: string;
+    workspaceName: string;
+    email: string;
+    role: string;
+    status: string;
+    expiresAt: string;
 }

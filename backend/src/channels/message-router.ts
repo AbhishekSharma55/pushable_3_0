@@ -142,6 +142,37 @@ function formatApprovalMessage(
     return lines.join("\n");
 }
 
+function formatConfirmationMessage(payload: {
+    question: string;
+    context?: string;
+}): string {
+    const lines = ["⚠️ *Confirmation Required*\n"];
+    lines.push(payload.question);
+    if (payload.context) {
+        lines.push("");
+        lines.push(payload.context);
+    }
+    lines.push("");
+    lines.push("Reply *yes* to approve or *no* to reject.");
+    return lines.join("\n");
+}
+
+const APPROVE_PATTERNS = /^(yes|y|approve|ok|confirm|go|proceed|sure|do it)$/i;
+const REJECT_PATTERNS = /^(no|n|reject|cancel|stop|don't|nope|abort)$/i;
+
+/** Check if a message is an approval/rejection for a pending confirmation */
+function findPendingApprovalForUser(
+    connectionId: string,
+    threadId: string
+): { sessionId: string; pending: PendingApproval } | null {
+    for (const [sessionId, pending] of pendingChannelApprovals) {
+        if (pending.connectionId === connectionId && pending.threadId === threadId) {
+            return { sessionId, pending };
+        }
+    }
+    return null;
+}
+
 async function findOrCreateSession(
     workspaceId: string,
     agentId: string,
@@ -166,6 +197,46 @@ async function findOrCreateSession(
 
 export async function routeMessage(message: NormalizedMessage): Promise<void> {
     try {
+        // Check if this user has a pending approval and the message is a yes/no response
+        if (message.threadId) {
+            const pendingMatch = findPendingApprovalForUser(
+                message.connectionId,
+                message.threadId
+            );
+            if (pendingMatch) {
+                const text = message.text.trim();
+                const isApprove = APPROVE_PATTERNS.test(text);
+                const isReject = REJECT_PATTERNS.test(text);
+
+                if (isApprove || isReject) {
+                    const decision = isApprove ? "approve" : "reject";
+
+                    // Save user message
+                    await messageRepository.create({
+                        workspaceId: message.workspaceId,
+                        sessionId: pendingMatch.sessionId,
+                        role: "user",
+                        content: message.text,
+                        tokenCount: 0,
+                    });
+
+                    const result = await resolveChannelApproval(
+                        pendingMatch.sessionId,
+                        decision
+                    );
+                    if (result && result.content && sendResponseFn) {
+                        await sendResponseFn(result.connectionId, {
+                            text: result.content,
+                            threadId: result.threadId,
+                        });
+                    }
+                    return;
+                }
+                // If not a yes/no reply, treat as a regular message
+                // (remove pending approval so agent gets the new context)
+            }
+        }
+
         // Find or create session for this user+agent pair
         const sessionId = await findOrCreateSession(
             message.workspaceId,
@@ -184,11 +255,41 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
         });
 
         // Create agent graph and invoke (non-streaming for channels)
-        // Use channel externalUserId for memory scoping
-        const { graph } = await createAgentGraph(message.agentId, message.workspaceId, message.externalUserId);
+        const graphUserId = message.platformUserId || undefined;
+        const { graph } = await createAgentGraph(message.agentId, message.workspaceId, graphUserId);
+
+        // Build multimodal HumanMessage if attachments are present
+        let humanMessage: HumanMessage;
+        if (message.attachments && message.attachments.length > 0) {
+            const contentParts: Array<unknown> = [{ type: "text", text: message.text }];
+
+            // Add document attachments as additional text blocks
+            for (const att of message.attachments.filter(a => a.type === "document")) {
+                contentParts.push({
+                    type: "text",
+                    text: `\n[Attachment: ${att.filename}]\n${att.content}`,
+                });
+            }
+
+            // Add image attachments as image_url blocks
+            for (const att of message.attachments.filter(a => a.type === "image")) {
+                contentParts.push({
+                    type: "image_url",
+                    image_url: { url: att.content },
+                });
+            }
+
+            humanMessage = new HumanMessage({ content: contentParts as never });
+            logger.info(
+                { images: message.attachments.filter(a => a.type === "image").length, docs: message.attachments.filter(a => a.type === "document").length },
+                "Built multimodal message for channel"
+            );
+        } else {
+            humanMessage = new HumanMessage(message.text);
+        }
 
         const result = await graph.invoke(
-            { messages: [new HumanMessage(message.text)] },
+            { messages: [humanMessage] },
             { configurable: { thread_id: sessionId } }
         );
 
@@ -202,11 +303,14 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
 
         if (pendingInterrupts.length > 0) {
             const interruptPayload = pendingInterrupts[0]?.value as {
+                type?: string;
+                question?: string;
+                context?: string;
                 toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
             };
 
-            if (interruptPayload?.toolCalls && sendApprovalFn && message.threadId) {
-                // Store pending approval
+            // Store pending approval for both interrupt types
+            if (message.threadId && (interruptPayload?.toolCalls || interruptPayload?.type === "confirmation")) {
                 pendingChannelApprovals.set(sessionId, {
                     sessionId,
                     agentId: message.agentId,
@@ -216,23 +320,36 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
                     threadId: message.threadId,
                 });
 
-                // Send approval message with inline keyboard
-                const approvalText = formatApprovalMessage(interruptPayload.toolCalls);
-                await sendApprovalFn(
-                    message.connectionId,
-                    message.threadId,
-                    approvalText,
-                    sessionId
-                );
+                // Format and send the appropriate approval message
+                let approvalText: string;
+                if (interruptPayload.type === "confirmation") {
+                    approvalText = formatConfirmationMessage({
+                        question: interruptPayload.question || "Do you want to proceed?",
+                        context: interruptPayload.context,
+                    });
+                } else {
+                    approvalText = formatApprovalMessage(interruptPayload.toolCalls!);
+                }
+
+                if (sendApprovalFn) {
+                    await sendApprovalFn(
+                        message.connectionId,
+                        message.threadId,
+                        approvalText,
+                        sessionId
+                    );
+                }
 
                 logger.info(
-                    { sessionId, toolCount: interruptPayload.toolCalls.length },
+                    { sessionId, type: interruptPayload.type || "toolCalls" },
                     "Channel HITL: approval request sent"
                 );
             }
 
-            // Update last message timestamp
-            await channelRepository.updateLastMessageAt(message.connectionId);
+            // Update last message timestamp (skip for platform bot — handled by telegram-link repo)
+            if (message.connectionId !== "platform-telegram" && message.connectionId !== "platform-slack" && message.connectionId !== "platform-whatsapp" && message.connectionId !== "platform-email") {
+                await channelRepository.updateLastMessageAt(message.connectionId);
+            }
             return; // Don't send normal response — waiting for approval
         }
 
@@ -262,8 +379,10 @@ export async function routeMessage(message: NormalizedMessage): Promise<void> {
             tokenCount: 0,
         });
 
-        // Update last message timestamp
-        await channelRepository.updateLastMessageAt(message.connectionId);
+        // Update last message timestamp (skip for platform bots — not channel_connections rows)
+        if (message.connectionId !== "platform-telegram" && message.connectionId !== "platform-slack" && message.connectionId !== "platform-whatsapp" && message.connectionId !== "platform-email") {
+            await channelRepository.updateLastMessageAt(message.connectionId);
+        }
 
         // Send response back through channel
         if (sendResponseFn) {

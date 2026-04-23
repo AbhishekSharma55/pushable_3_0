@@ -1,9 +1,17 @@
 import { workspaceRepository } from "../repositories/workspace.repository.ts";
+import { emailWorkspaceAddressRepository } from "../repositories/email-workspace-address.repository.ts";
 import { ceoService } from "./ceo.service.ts";
 import { testerService } from "./tester.service.ts";
 import { ForbiddenError } from "../lib/errors.ts";
 import { randomUUID } from "crypto";
 import { logger } from "../lib/logger.ts";
+
+function generateEmailAddress(slug: string): string {
+    const domain = process.env.EMAIL_DOMAIN || "pushable.ai";
+    // Use the slug directly (already has random suffix from generateSlug)
+    const prefix = slug.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+    return `${prefix}@${domain}`;
+}
 
 function generateSlug(name: string): string {
     const base = name.toLowerCase().replace(/\s+/g, "-");
@@ -47,6 +55,19 @@ export const workspaceService = {
             await testerService.getOrCreateTester(workspace.id);
         } catch (error) {
             logger.warn({ error, workspaceId: workspace.id }, "Failed to auto-create Tester agent for workspace");
+        }
+
+        // Auto-generate workspace email address
+        try {
+            const emailAddress = generateEmailAddress(slug);
+            await emailWorkspaceAddressRepository.create({
+                workspaceId: workspace.id,
+                address: emailAddress,
+                displayName: data.name,
+            });
+            logger.info({ workspaceId: workspace.id, emailAddress }, "Auto-generated workspace email address");
+        } catch (error) {
+            logger.warn({ error, workspaceId: workspace.id }, "Failed to auto-generate email address for workspace");
         }
 
         return workspace;

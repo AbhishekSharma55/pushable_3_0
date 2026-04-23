@@ -19,15 +19,18 @@ import {
     PlugZap,
     LogOut,
     User,
+    Users,
     FolderOpen,
     Layers,
     FlaskConical,
     Route,
+    Mail,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
 import { getCreditBalance } from '@/lib/api/credits';
+import { getMyMemberInfo, type MyMemberInfo } from '@/lib/api/members';
 import { Button } from '@/components/ui/button';
 import {
     DropdownMenu,
@@ -66,7 +69,9 @@ const navItems = [
     { label: 'Tools', href: '/tools', icon: Wrench },
     { label: 'Schedules', href: '/schedules', icon: Clock },
     { label: 'Credits', href: '/credits', icon: CreditCard },
+    { label: 'Members', href: '/members', icon: Users },
     { label: 'Channels', href: '/channels', icon: Radio },
+    { label: 'Mailbox', href: '/email', icon: Mail },
 ];
 
 export function Sidebar() {
@@ -104,6 +109,7 @@ export function Sidebar() {
         getActiveWorkspace
     );
     const [creditBalance, setCreditBalance] = useState<number | null>(null);
+    const [memberInfo, setMemberInfo] = useState<MyMemberInfo | null>(null);
     const user = getUser();
 
     const handleLogout = () => {
@@ -123,19 +129,34 @@ export function Sidebar() {
             .slice(0, 2)
         : '?';
 
-    // Fetch credit balance
+    // Fetch credit balance + user role
     useEffect(() => {
         const ws = getActiveWorkspace();
         if (!ws) return;
-        getCreditBalance(ws.id)
-            .then((bal) => setCreditBalance(bal.availableCredits))
-            .catch(() => {});
-        // Refresh every 30 seconds
-        const interval = setInterval(() => {
-            getCreditBalance(ws.id)
-                .then((bal) => setCreditBalance(bal.availableCredits))
-                .catch(() => {});
-        }, 30000);
+
+        const fetchInfo = () => {
+            getMyMemberInfo(ws.id)
+                .then((info) => {
+                    setMemberInfo(info);
+                    // If user has a personal credit limit, show that; otherwise show workspace credits
+                    if (info.creditsRemaining !== null) {
+                        setCreditBalance(info.creditsRemaining);
+                    } else {
+                        getCreditBalance(ws.id)
+                            .then((bal) => setCreditBalance(bal.availableCredits))
+                            .catch(() => {});
+                    }
+                })
+                .catch(() => {
+                    // Fallback to workspace credits
+                    getCreditBalance(ws.id)
+                        .then((bal) => setCreditBalance(bal.availableCredits))
+                        .catch(() => {});
+                });
+        };
+
+        fetchInfo();
+        const interval = setInterval(fetchInfo, 30000);
         return () => clearInterval(interval);
     }, []);
 
@@ -216,7 +237,15 @@ export function Sidebar() {
 
                 {/* Nav */}
                 <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-3">
-                    {navItems.map((item) => {
+                    {navItems
+                        .filter((item) => {
+                            // Only workspace owner can see Members page (hidden until confirmed owner)
+                            if (item.href === '/members') {
+                                return memberInfo?.role === 'owner';
+                            }
+                            return true;
+                        })
+                        .map((item) => {
                         const isActive =
                             pathname === item.href ||
                             (item.href !== '/' && pathname.startsWith(item.href));

@@ -41,6 +41,13 @@ import { runReportRoutes } from "./routes/runReports.ts";
 import { testingRoutes } from "./routes/testing.ts";
 import { workflowRoutes } from "./routes/workflows.ts";
 import { cdpAnalyzerRoutes } from "./routes/cdp-analyzer.ts";
+import { invitationRoutes } from "./routes/invitations.ts";
+import { memberRoutes } from "./routes/members.ts";
+import { telegramLinkRoutes } from "./routes/telegram-link.ts";
+import { slackLinkRoutes } from "./routes/slack-link.ts";
+import { slackOAuthRoutes } from "./routes/slack-oauth.ts";
+import { whatsappLinkRoutes } from "./routes/whatsapp-link.ts";
+import { emailRoutes } from "./routes/email.ts";
 import { browserService } from "./services/browser.service.ts";
 
 const app = Fastify({ logger: false });
@@ -114,9 +121,16 @@ await app.register(runReportRoutes, { prefix: "/api" });
 await app.register(testingRoutes, { prefix: "/api" });
 await app.register(workflowRoutes, { prefix: "/api" });
 await app.register(cdpAnalyzerRoutes, { prefix: "/api" });
+await app.register(invitationRoutes, { prefix: "/api" });
+await app.register(memberRoutes, { prefix: "/api" });
+await app.register(telegramLinkRoutes, { prefix: "/api" });
+await app.register(slackLinkRoutes, { prefix: "/api" });
+await app.register(whatsappLinkRoutes, { prefix: "/api" });
+await app.register(emailRoutes, { prefix: "/api" });
 
-// Webhook routes — NO auth, external platforms call these
+// Webhook routes + OAuth routes — NO auth, external platforms call these
 await app.register(webhookRoutes);
+await app.register(slackOAuthRoutes);
 
 const port = Number(process.env.PORT) || 4000;
 await app.listen({ port, host: "0.0.0.0" });
@@ -132,12 +146,20 @@ await seedProxies();
 startWorkers();
 await initScheduler();
 await channelManager.initializeAllActive();
+await channelManager.initializePlatformTelegram();
+await channelManager.initializePlatformSlack();
+await channelManager.initializePlatformWhatsApp();
+await channelManager.initializePlatformEmail();
 
 logger.info(`Server running on port ${port}`);
 
 // Graceful shutdown
 const shutdown = async () => {
   logger.info("Shutting down...");
+  await channelManager.shutdownPlatformTelegram();
+  await channelManager.shutdownPlatformSlack();
+  await channelManager.shutdownPlatformWhatsApp();
+  await channelManager.shutdownPlatformEmail();
   await stopWorkers();
   await scheduleQueue.close();
   await app.close();

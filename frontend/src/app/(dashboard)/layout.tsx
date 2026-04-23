@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Topbar } from '@/components/layout/topbar';
+import { PendingInvitesBanner } from '@/components/layout/pending-invites-banner';
 import { getToken } from '@/lib/auth';
 import { getWorkspaces } from '@/lib/api/workspaces';
 import { WORKSPACES_KEY, ACTIVE_WORKSPACE_KEY } from '@/lib/constants';
@@ -81,7 +82,10 @@ export default function DashboardLayout({
             <Sidebar />
             <div className="pl-64">
                 <Topbar />
-                <main className="p-6">{children}</main>
+                <main className="p-6">
+                    <PendingInvitesBanner />
+                    {children}
+                </main>
             </div>
         </div>
     );

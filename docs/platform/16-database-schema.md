@@ -1,6 +1,6 @@
 # Database Schema
 
-The platform uses PostgreSQL 16 with the pgvector extension for vector similarity search. The ORM is Drizzle ORM 0.45.1. This document lists all 33+ tables with their columns, types, and relationships.
+The platform uses PostgreSQL 16 with the pgvector extension for vector similarity search. The ORM is Drizzle ORM 0.45.1. This document lists all 36+ tables with their columns, types, and relationships.
 
 ---
 
@@ -10,7 +10,8 @@ The platform uses PostgreSQL 16 with the pgvector extension for vector similarit
 Users & Workspaces
   ├── users
   ├── workspaces
-  └── workspace_members
+  ├── workspace_members
+  └── workspace_invitations
 
 Agents
   ├── agents
@@ -53,6 +54,11 @@ Channels & Integrations
   ├── input_channels
   └── channel_connections
 
+Email
+  ├── email_workspace_addresses
+  ├── email_approved_senders
+  └── inbound_emails
+
 Vault
   ├── vault_connections
   └── vault_audit_logs
@@ -60,7 +66,11 @@ Vault
 Credits & Billing
   ├── credits
   ├── credit_logs
-  └── credit_ledger
+  ├── credit_ledger
+  └── user_credit_limits
+
+User Management
+  └── user_agent_access
 
 Files
   └── bucket_files
@@ -105,6 +115,12 @@ CREATE TYPE proxy_test_status AS ENUM ('success', 'failed', 'untested');
 CREATE TYPE channel_type AS ENUM ('telegram', 'slack');
 CREATE TYPE connection_status AS ENUM ('active', 'inactive', 'error');
 
+-- Email
+CREATE TYPE email_status AS ENUM (
+  'received', 'routing', 'processing', 'awaiting_approval',
+  'approved', 'rejected', 'completed', 'failed', 'spam'
+);
+
 -- Integrations
 CREATE TYPE integration_status AS ENUM ('active', 'inactive', 'pending', 'failed');
 
@@ -119,6 +135,9 @@ CREATE TYPE file_source AS ENUM ('chat_upload', 'agent_generated', 'api_upload')
 -- LLM
 CREATE TYPE llm_provider AS ENUM ('openai', 'anthropic', 'google', 'deepseek', 'meta');
 CREATE TYPE plan_tier AS ENUM ('free', 'starter', 'pro', 'scale');
+
+-- Invitations
+CREATE TYPE invitation_status AS ENUM ('pending', 'accepted', 'expired', 'revoked');
 
 -- Credits
 CREATE TYPE ledger_type AS ENUM (
@@ -163,6 +182,21 @@ CREATE TYPE ledger_type AS ENUM (
 | `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
 | `user_id` | UUID | NOT NULL, FK → users(id) CASCADE |
 | `role` | member_role | NOT NULL, default 'member' |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+
+### workspace_invitations
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `email` | TEXT | NOT NULL |
+| `role` | member_role | NOT NULL, default 'member' |
+| `invited_by` | UUID | NOT NULL, FK → users(id) |
+| `token` | TEXT | NOT NULL, UNIQUE |
+| `status` | invitation_status | NOT NULL, default 'pending' |
+| `expires_at` | TIMESTAMP | NOT NULL |
+| `accepted_at` | TIMESTAMP | Nullable |
 | `created_at` | TIMESTAMP | NOT NULL, default NOW |
 
 ---
@@ -570,6 +604,81 @@ CREATE TYPE ledger_type AS ENUM (
 | `created_at` | TIMESTAMP | NOT NULL, default NOW |
 | `updated_at` | TIMESTAMP | NOT NULL, default NOW |
 
+### telegram_user_links
+
+Maps Telegram user IDs to workspaces for the shared platform bot.
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `telegram_user_id` | TEXT | NOT NULL, UNIQUE |
+| `telegram_username` | TEXT | Nullable |
+| `telegram_first_name` | TEXT | Nullable |
+| `telegram_chat_id` | TEXT | Nullable |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `user_id` | UUID | Nullable, FK → users(id) SET NULL |
+| `verified_at` | TIMESTAMP | Nullable |
+| `last_message_at` | TIMESTAMP | Nullable |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+| `updated_at` | TIMESTAMP | NOT NULL, default NOW |
+
+**Indexes:** `idx_telegram_links_workspace`, `idx_telegram_links_telegram_user_id`
+
+---
+
+## Email
+
+### email_workspace_addresses
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE, UNIQUE |
+| `address` | TEXT | NOT NULL, UNIQUE |
+| `display_name` | TEXT | Nullable |
+| `custom_instructions` | TEXT | Nullable |
+| `enabled` | BOOLEAN | NOT NULL, default true |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+| `updated_at` | TIMESTAMP | NOT NULL, default NOW |
+
+### email_approved_senders
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `sender_pattern` | TEXT | NOT NULL |
+| `note` | TEXT | Nullable |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+
+### inbound_emails
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `email_address_id` | UUID | NOT NULL, FK → email_workspace_addresses(id) CASCADE |
+| `session_id` | UUID | Nullable, FK → sessions(id) SET NULL |
+| `from_address` | TEXT | NOT NULL |
+| `from_name` | TEXT | Nullable |
+| `to_address` | TEXT | NOT NULL |
+| `subject` | TEXT | Nullable |
+| `body_text` | TEXT | Nullable |
+| `body_html` | TEXT | Nullable |
+| `cc` | TEXT | Nullable |
+| `message_id` | TEXT | Nullable |
+| `in_reply_to` | TEXT | Nullable |
+| `references` | TEXT | Nullable |
+| `status` | email_status | NOT NULL, default 'received' |
+| `routed_to_agent_id` | UUID | Nullable, FK → agents(id) SET NULL |
+| `status_history` | JSONB | Nullable |
+| `reply_sent` | BOOLEAN | NOT NULL, default false |
+| `reply_content` | TEXT | Nullable |
+| `error_message` | TEXT | Nullable |
+| `raw_payload` | JSONB | Nullable |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+| `updated_at` | TIMESTAMP | NOT NULL, default NOW |
+
 ---
 
 ## Vault
@@ -644,6 +753,38 @@ CREATE TYPE ledger_type AS ENUM (
 | `credits_deducted` | INTEGER | NOT NULL, default 0 |
 | `model` | TEXT | Nullable |
 | `created_at` | TIMESTAMP | NOT NULL, default NOW |
+
+### user_credit_limits
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `user_id` | UUID | NOT NULL, FK → users(id) CASCADE |
+| `credit_limit` | INTEGER | NOT NULL |
+| `credits_used` | INTEGER | NOT NULL, default 0 |
+| `period_start` | TIMESTAMP | NOT NULL |
+| `period_end` | TIMESTAMP | NOT NULL |
+| `updated_at` | TIMESTAMP | NOT NULL, default NOW |
+
+**Unique constraint:** `(workspace_id, user_id)`
+
+---
+
+## User Management
+
+### user_agent_access
+
+| Column | Type | Constraints |
+|--------|------|------------|
+| `id` | UUID | PK, default random |
+| `workspace_id` | UUID | NOT NULL, FK → workspaces(id) CASCADE |
+| `user_id` | UUID | NOT NULL, FK → users(id) CASCADE |
+| `agent_id` | UUID | NOT NULL, FK → agents(id) CASCADE |
+| `allowed` | BOOLEAN | NOT NULL, default true |
+| `created_at` | TIMESTAMP | NOT NULL, default NOW |
+
+**Unique constraint:** `(workspace_id, user_id, agent_id)`
 
 ---
 
@@ -738,9 +879,14 @@ CREATE TYPE ledger_type AS ENUM (
 workspaces → agents, sessions, knowledge_bases, schedules, tools, skills,
              integrations, input_channels, channel_connections, credits,
              credit_ledger, credit_logs, bucket_files, browser_profiles,
-             browser_proxies, vault_connections, blogs
+             browser_proxies, vault_connections, blogs,
+             workspace_invitations, user_credit_limits, user_agent_access,
+             email_workspace_addresses, email_approved_senders, inbound_emails
 
-agents → sessions, schedules, agent_permissions, agent_integrations, agent_memories
+email_workspace_addresses → inbound_emails
+
+agents → sessions, schedules, agent_permissions, agent_integrations, agent_memories,
+         user_agent_access
 
 sessions → messages, runs
 
@@ -763,6 +909,8 @@ browser_profiles.assigned_agent_id → agents (SET NULL)
 browser_sessions.agent_id → agents (SET NULL)
 bucket_files.session_id → sessions (SET NULL)
 bucket_files.agent_id → agents (SET NULL)
+inbound_emails.session_id → sessions (SET NULL)
+inbound_emails.routed_to_agent_id → agents (SET NULL)
 ```
 
 ---

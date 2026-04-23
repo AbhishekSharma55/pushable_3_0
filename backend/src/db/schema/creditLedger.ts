@@ -1,6 +1,6 @@
 import {
-    integer,
     jsonb,
+    numeric,
     pgEnum,
     pgTable,
     timestamp,
@@ -30,9 +30,9 @@ export const creditLedger = pgTable("credit_ledger", {
     workspaceId: uuid("workspace_id")
         .notNull()
         .references(() => workspaces.id, { onDelete: "cascade" }),
-    amount: integer("amount").notNull(),
+    amount: numeric("amount", { precision: 12, scale: 4 }).notNull(),
     type: ledgerTypeEnum("type").notNull(),
-    creditsAfter: integer("credits_after").notNull(),
+    creditsAfter: numeric("credits_after", { precision: 12, scale: 4 }).notNull(),
     metadata: jsonb("metadata").default({}).notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
 });

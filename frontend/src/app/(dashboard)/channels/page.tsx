@@ -13,6 +13,7 @@ import {
     ChevronDown,
     ChevronRight,
     ExternalLink,
+    MessageCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -56,12 +57,34 @@ import {
     getConnectionConfig,
 } from '@/lib/api/channels';
 import type { BotInfo } from '@/lib/api/channels';
+import {
+    getTelegramStatus,
+    initiateTelegramLink,
+    checkTelegramLinkStatus,
+    unlinkTelegram,
+} from '@/lib/api/telegram';
+import type { TelegramStatus } from '@/lib/api/telegram';
+import {
+    getSlackStatus,
+    initiateSlackLink,
+    checkSlackLinkStatus,
+    unlinkSlack,
+} from '@/lib/api/slack';
+import type { SlackStatus } from '@/lib/api/slack';
+import {
+    getWhatsAppStatus,
+    initiateWhatsAppLink,
+    checkWhatsAppLinkStatus,
+    unlinkWhatsApp,
+} from '@/lib/api/whatsapp';
+import type { WhatsAppStatus } from '@/lib/api/whatsapp';
 import { getAgents } from '@/lib/api/agents';
-import type { ChannelConnection, Agent } from '@/types';
+import type { ChannelConnection, Agent, TelegramUserLink, SlackUserLink, WhatsAppUserLink } from '@/types';
 import { QRCodeSVG } from 'qrcode.react';
 
 function ChannelIcon({ type, className = 'h-4 w-4' }: { type: string; className?: string }) {
     if (type === 'telegram') return <Send className={className} />;
+    if (type === 'whatsapp') return <MessageCircle className={className} />;
     return <Hash className={className} />;
 }
 
@@ -76,10 +99,14 @@ export default function ChannelsPage() {
     const [agents, setAgents] = useState<Agent[]>([]);
     const [loading, setLoading] = useState(true);
     const [selected, setSelected] = useState<ChannelConnection | null>(null);
+    const [selectedTelegramLink, setSelectedTelegramLink] = useState<TelegramUserLink | null>(null);
+    const [selectedSlackLink, setSelectedSlackLink] = useState<SlackUserLink | null>(null);
+    const [selectedWhatsAppLink, setSelectedWhatsAppLink] = useState<WhatsAppUserLink | null>(null);
     const [sheetOpen, setSheetOpen] = useState(false);
 
     // Create form state
     const [channelType, setChannelType] = useState<'telegram' | 'slack' | null>(null);
+    const [telegramSubType, setTelegramSubType] = useState<'universal' | 'custom' | null>(null);
     const [formName, setFormName] = useState('');
     const [formAgentId, setFormAgentId] = useState('');
     const [formBotToken, setFormBotToken] = useState('');
@@ -99,6 +126,29 @@ export default function ChannelsPage() {
     const [savingConfig, setSavingConfig] = useState(false);
     const [showQr, setShowQr] = useState(false);
 
+    // Platform Telegram state
+    const [telegramStatus, setTelegramStatus] = useState<TelegramStatus | null>(null);
+    const [telegramLoading, setTelegramLoading] = useState(true);
+    const [verificationCode, setVerificationCode] = useState<string | null>(null);
+    const [verificationBotUsername, setVerificationBotUsername] = useState<string | null>(null);
+    const [verificationBotLink, setVerificationBotLink] = useState<string | null>(null);
+    const [linkingInProgress, setLinkingInProgress] = useState(false);
+    const [pollingVerification, setPollingVerification] = useState(false);
+
+    // Platform Slack state
+    const [slackStatus, setSlackStatus] = useState<SlackStatus | null>(null);
+    const [slackLoading, setSlackLoading] = useState(true);
+    const [slackVerificationCode, setSlackVerificationCode] = useState<string | null>(null);
+    const [slackLinkingInProgress, setSlackLinkingInProgress] = useState(false);
+    const [pollingSlackVerification, setPollingSlackVerification] = useState(false);
+
+    // Platform WhatsApp state
+    const [whatsappStatus, setWhatsappStatus] = useState<WhatsAppStatus | null>(null);
+    const [whatsappLoading, setWhatsappLoading] = useState(true);
+    const [whatsappVerificationCode, setWhatsappVerificationCode] = useState<string | null>(null);
+    const [whatsappLinkingInProgress, setWhatsappLinkingInProgress] = useState(false);
+    const [pollingWhatsappVerification, setPollingWhatsappVerification] = useState(false);
+
     const fetchData = useCallback(async () => {
         if (!workspace) return;
         try {
@@ -116,7 +166,50 @@ export default function ChannelsPage() {
         }
     }, [workspace]);
 
+    const fetchTelegramStatus = useCallback(async () => {
+        if (!workspace) return;
+        try {
+            setTelegramLoading(true);
+            const status = await getTelegramStatus(workspace.id);
+            setTelegramStatus(status);
+        } catch {
+            // Platform bot not configured — hide section
+            setTelegramStatus(null);
+        } finally {
+            setTelegramLoading(false);
+        }
+    }, [workspace]);
+
+    const fetchSlackStatus = useCallback(async () => {
+        if (!workspace) return;
+        try {
+            setSlackLoading(true);
+            const status = await getSlackStatus(workspace.id);
+            setSlackStatus(status);
+        } catch {
+            setSlackStatus(null);
+        } finally {
+            setSlackLoading(false);
+        }
+    }, [workspace]);
+
+    const fetchWhatsAppStatus = useCallback(async () => {
+        if (!workspace) return;
+        try {
+            setWhatsappLoading(true);
+            const status = await getWhatsAppStatus(workspace.id);
+            setWhatsappStatus(status);
+        } catch {
+            setWhatsappStatus(null);
+        } finally {
+            setWhatsappLoading(false);
+        }
+    }, [workspace]);
+
     useEffect(() => { fetchData(); }, [fetchData]);
+    useEffect(() => { fetchTelegramStatus(); }, [fetchTelegramStatus]);
+    useEffect(() => { fetchSlackStatus(); }, [fetchSlackStatus]);
+    useEffect(() => { fetchWhatsAppStatus(); }, [fetchWhatsAppStatus]);
 
     // Load config + bot info when a Telegram connection is selected
     useEffect(() => {
@@ -181,8 +274,152 @@ export default function ChannelsPage() {
         saveAllowedUsers(allowedUserIds.filter((u) => u !== id));
     };
 
+    // Platform Telegram: initiate link
+    const handleTelegramConnect = async () => {
+        if (!workspace) return;
+        setLinkingInProgress(true);
+        try {
+            const result = await initiateTelegramLink(workspace.id);
+            setVerificationCode(result.code);
+            setVerificationBotUsername(result.botUsername);
+            setVerificationBotLink(result.botLink);
+            setPollingVerification(true);
+        } catch (err: unknown) {
+            const error = err as { response?: { data?: { error?: { message?: string } } } };
+            toast.error(error.response?.data?.error?.message || 'Failed to generate verification code');
+        } finally {
+            setLinkingInProgress(false);
+        }
+    };
+
+    // Platform Telegram: unlink
+    const handleTelegramUnlink = async (linkId: string) => {
+        if (!workspace) return;
+        try {
+            await unlinkTelegram(workspace.id, linkId);
+            toast.success('Telegram account unlinked');
+            fetchTelegramStatus();
+        } catch {
+            toast.error('Failed to unlink');
+        }
+    };
+
+    // Poll for verification completion
+    useEffect(() => {
+        if (!pollingVerification || !workspace) return;
+        const interval = setInterval(async () => {
+            try {
+                const status = await checkTelegramLinkStatus(workspace.id);
+                if (status.verified) {
+                    setPollingVerification(false);
+                    setVerificationCode(null);
+                    toast.success(`Telegram linked! ${status.telegramUsername ? `@${status.telegramUsername}` : 'Account connected.'}`);
+                    fetchTelegramStatus();
+                }
+            } catch {
+                // Ignore polling errors
+            }
+        }, 3000);
+        return () => clearInterval(interval);
+    }, [pollingVerification, workspace, fetchTelegramStatus]);
+
+    // Platform Slack: initiate link
+    const handleSlackConnect = async () => {
+        if (!workspace) return;
+        setSlackLinkingInProgress(true);
+        try {
+            const result = await initiateSlackLink(workspace.id);
+            setSlackVerificationCode(result.code);
+            setPollingSlackVerification(true);
+        } catch (err: unknown) {
+            const error = err as { response?: { data?: { error?: { message?: string } } } };
+            toast.error(error.response?.data?.error?.message || 'Failed to generate verification code');
+        } finally {
+            setSlackLinkingInProgress(false);
+        }
+    };
+
+    // Platform Slack: unlink
+    const handleSlackUnlink = async (linkId: string) => {
+        if (!workspace) return;
+        try {
+            await unlinkSlack(workspace.id, linkId);
+            toast.success('Slack account unlinked');
+            fetchSlackStatus();
+        } catch {
+            toast.error('Failed to unlink');
+        }
+    };
+
+    // Poll for Slack verification completion
+    useEffect(() => {
+        if (!pollingSlackVerification || !workspace) return;
+        const interval = setInterval(async () => {
+            try {
+                const status = await checkSlackLinkStatus(workspace.id);
+                if (status.verified) {
+                    setPollingSlackVerification(false);
+                    setSlackVerificationCode(null);
+                    toast.success(`Slack linked! ${status.slackUsername ? `@${status.slackUsername}` : 'Account connected.'}`);
+                    fetchSlackStatus();
+                }
+            } catch {
+                // Ignore polling errors
+            }
+        }, 3000);
+        return () => clearInterval(interval);
+    }, [pollingSlackVerification, workspace, fetchSlackStatus]);
+
+    // Platform WhatsApp: initiate link
+    const handleWhatsAppConnect = async () => {
+        if (!workspace) return;
+        setWhatsappLinkingInProgress(true);
+        try {
+            const result = await initiateWhatsAppLink(workspace.id);
+            setWhatsappVerificationCode(result.code);
+            setPollingWhatsappVerification(true);
+        } catch (err: unknown) {
+            const error = err as { response?: { data?: { error?: { message?: string } } } };
+            toast.error(error.response?.data?.error?.message || 'Failed to generate verification code');
+        } finally {
+            setWhatsappLinkingInProgress(false);
+        }
+    };
+
+    // Platform WhatsApp: unlink
+    const handleWhatsAppUnlink = async (linkId: string) => {
+        if (!workspace) return;
+        try {
+            await unlinkWhatsApp(workspace.id, linkId);
+            toast.success('WhatsApp account unlinked');
+            fetchWhatsAppStatus();
+        } catch {
+            toast.error('Failed to unlink');
+        }
+    };
+
+    // Poll for WhatsApp verification completion
+    useEffect(() => {
+        if (!pollingWhatsappVerification || !workspace) return;
+        const interval = setInterval(async () => {
+            try {
+                const status = await checkWhatsAppLinkStatus(workspace.id);
+                if (status.verified) {
+                    setPollingWhatsappVerification(false);
+                    setWhatsappVerificationCode(null);
+                    toast.success(`WhatsApp linked! ${status.whatsappName || status.whatsappPhone || 'Account connected.'}`);
+                    fetchWhatsAppStatus();
+                }
+            } catch {
+                // Ignore polling errors
+            }
+        }, 3000);
+        return () => clearInterval(interval);
+    }, [pollingWhatsappVerification, workspace, fetchWhatsAppStatus]);
+
     const resetForm = () => {
         setChannelType(null);
+        setTelegramSubType(null);
         setFormName('');
         setFormAgentId('');
         setFormBotToken('');
@@ -262,7 +499,7 @@ export default function ChannelsPage() {
                     <div>
                         <h1 className="text-2xl font-bold tracking-tight">Channels</h1>
                         <p className="text-sm text-muted-foreground">
-                            Connect agents to Telegram and Slack
+                            Connect to Telegram, Slack, and WhatsApp
                         </p>
                     </div>
                 </div>
@@ -282,14 +519,14 @@ export default function ChannelsPage() {
                         </h2>
                     </div>
                     <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
-                        {loading ? (
+                        {loading || telegramLoading || slackLoading || whatsappLoading ? (
                             Array.from({ length: 3 }).map((_, i) => (
                                 <div key={i} className="p-3 space-y-2">
                                     <Skeleton className="h-4 w-32" />
                                     <Skeleton className="h-3 w-24" />
                                 </div>
                             ))
-                        ) : connections.length === 0 ? (
+                        ) : connections.length === 0 && (!telegramStatus || telegramStatus.links.length === 0) && (!slackStatus || slackStatus.links.length === 0) && (!whatsappStatus || whatsappStatus.links.length === 0) ? (
                             <div className="flex flex-col items-center justify-center h-full text-center px-6 gap-3">
                                 <Radio className="h-8 w-8 text-muted-foreground/30" />
                                 <div>
@@ -300,45 +537,392 @@ export default function ChannelsPage() {
                                 </div>
                             </div>
                         ) : (
-                            connections.map((conn) => (
-                                <div
-                                    key={conn.id}
-                                    className={`group flex items-center gap-3 rounded-lg px-3 py-3 cursor-pointer transition-colors ${
-                                        selected?.id === conn.id ? 'bg-accent ring-1 ring-border' : 'hover:bg-accent/50'
-                                    }`}
-                                    onClick={() => { setSelected(conn); setTestResult(null); }}
-                                >
-                                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted flex-shrink-0">
-                                        <ChannelIcon type={conn.channelType} className="h-4 w-4 text-muted-foreground" />
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-2">
-                                            <p className="text-sm font-medium truncate">{conn.name}</p>
-                                            <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-                                                {conn.channelType}
-                                            </Badge>
+                            <>
+                                {/* Telegram platform links */}
+                                {telegramStatus?.links.map((link) => (
+                                    <div
+                                        key={link.id}
+                                        className={`group flex items-center gap-3 rounded-lg px-3 py-3 cursor-pointer transition-colors ${
+                                            selectedTelegramLink?.id === link.id ? 'bg-accent ring-1 ring-border' : 'hover:bg-accent/50'
+                                        }`}
+                                        onClick={() => { setSelectedTelegramLink(link); setSelected(null); setTestResult(null); }}
+                                    >
+                                        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-500/10 flex-shrink-0">
+                                            <Send className="h-4 w-4 text-blue-500" />
                                         </div>
-                                        <div className="flex items-center gap-2 mt-0.5">
-                                            <StatusDot status={conn.status} />
-                                            <span className="text-[11px] text-muted-foreground">
-                                                {agentNameMap[conn.agentId] || 'Agent'}
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2">
+                                                <p className="text-sm font-medium truncate">
+                                                    {link.telegramFirstName || 'Telegram'}
+                                                    {link.telegramUsername ? ` @${link.telegramUsername}` : ''}
+                                                </p>
+                                                <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                                    telegram
+                                                </Badge>
+                                            </div>
+                                            <div className="flex items-center gap-2 mt-0.5">
+                                                <StatusDot status="active" />
+                                                <span className="text-[11px] text-muted-foreground">CEO Agent</span>
+                                            </div>
+                                        </div>
+                                        {link.lastMessageAt && (
+                                            <span className="text-[10px] text-muted-foreground/60 flex-shrink-0">
+                                                {new Date(link.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                                             </span>
-                                        </div>
+                                        )}
                                     </div>
-                                    {conn.lastMessageAt && (
-                                        <span className="text-[10px] text-muted-foreground/60 flex-shrink-0">
-                                            {new Date(conn.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                                        </span>
-                                    )}
-                                </div>
-                            ))
+                                ))}
+
+                                {/* Slack platform links */}
+                                {slackStatus?.links.map((link) => (
+                                    <div
+                                        key={link.id}
+                                        className={`group flex items-center gap-3 rounded-lg px-3 py-3 cursor-pointer transition-colors ${
+                                            selectedSlackLink?.id === link.id ? 'bg-accent ring-1 ring-border' : 'hover:bg-accent/50'
+                                        }`}
+                                        onClick={() => { setSelectedSlackLink(link); setSelected(null); setSelectedTelegramLink(null); setTestResult(null); }}
+                                    >
+                                        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-purple-500/10 flex-shrink-0">
+                                            <Hash className="h-4 w-4 text-purple-500" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2">
+                                                <p className="text-sm font-medium truncate">
+                                                    {link.slackDisplayName || link.slackUsername || 'Slack User'}
+                                                </p>
+                                                <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                                    slack
+                                                </Badge>
+                                            </div>
+                                            <div className="flex items-center gap-2 mt-0.5">
+                                                <StatusDot status="active" />
+                                                <span className="text-[11px] text-muted-foreground">CEO Agent</span>
+                                            </div>
+                                        </div>
+                                        {link.lastMessageAt && (
+                                            <span className="text-[10px] text-muted-foreground/60 flex-shrink-0">
+                                                {new Date(link.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                            </span>
+                                        )}
+                                    </div>
+                                ))}
+
+                                {/* WhatsApp platform links */}
+                                {whatsappStatus?.links.map((link) => (
+                                    <div
+                                        key={link.id}
+                                        className={`group flex items-center gap-3 rounded-lg px-3 py-3 cursor-pointer transition-colors ${
+                                            selectedWhatsAppLink?.id === link.id ? 'bg-accent ring-1 ring-border' : 'hover:bg-accent/50'
+                                        }`}
+                                        onClick={() => { setSelectedWhatsAppLink(link); setSelected(null); setSelectedTelegramLink(null); setSelectedSlackLink(null); setTestResult(null); }}
+                                    >
+                                        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-green-500/10 flex-shrink-0">
+                                            <MessageCircle className="h-4 w-4 text-green-500" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2">
+                                                <p className="text-sm font-medium truncate">
+                                                    {link.whatsappName || link.whatsappPhone}
+                                                </p>
+                                                <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                                    whatsapp
+                                                </Badge>
+                                            </div>
+                                            <div className="flex items-center gap-2 mt-0.5">
+                                                <StatusDot status="active" />
+                                                <span className="text-[11px] text-muted-foreground">CEO Agent</span>
+                                            </div>
+                                        </div>
+                                        {link.lastMessageAt && (
+                                            <span className="text-[10px] text-muted-foreground/60 flex-shrink-0">
+                                                {new Date(link.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                            </span>
+                                        )}
+                                    </div>
+                                ))}
+
+                                {/* Per-workspace connections */}
+                                {connections.map((conn) => (
+                                    <div
+                                        key={conn.id}
+                                        className={`group flex items-center gap-3 rounded-lg px-3 py-3 cursor-pointer transition-colors ${
+                                            selected?.id === conn.id ? 'bg-accent ring-1 ring-border' : 'hover:bg-accent/50'
+                                        }`}
+                                        onClick={() => { setSelected(conn); setSelectedTelegramLink(null); setTestResult(null); }}
+                                    >
+                                        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted flex-shrink-0">
+                                            <ChannelIcon type={conn.channelType} className="h-4 w-4 text-muted-foreground" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2">
+                                                <p className="text-sm font-medium truncate">{conn.name}</p>
+                                                <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                                    {conn.channelType}
+                                                </Badge>
+                                            </div>
+                                            <div className="flex items-center gap-2 mt-0.5">
+                                                <StatusDot status={conn.status} />
+                                                <span className="text-[11px] text-muted-foreground">
+                                                    {agentNameMap[conn.agentId] || 'Agent'}
+                                                </span>
+                                            </div>
+                                        </div>
+                                        {conn.lastMessageAt && (
+                                            <span className="text-[10px] text-muted-foreground/60 flex-shrink-0">
+                                                {new Date(conn.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                            </span>
+                                        )}
+                                    </div>
+                                ))}
+                            </>
                         )}
                     </div>
                 </div>
 
                 {/* Right — Detail panel */}
                 <div className="flex-1 rounded-xl border border-border/60 bg-card overflow-y-auto">
-                    {selected ? (
+                    {selectedWhatsAppLink ? (
+                        <div className="p-6 space-y-6">
+                            <div className="flex items-start justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-green-500/10">
+                                        <MessageCircle className="h-5 w-5 text-green-500" />
+                                    </div>
+                                    <div>
+                                        <h2 className="text-lg font-semibold">
+                                            {selectedWhatsAppLink.whatsappName || selectedWhatsAppLink.whatsappPhone}
+                                        </h2>
+                                        <div className="flex items-center gap-2 mt-0.5">
+                                            <StatusDot status="active" />
+                                            <span className="text-sm text-muted-foreground">Connected</span>
+                                            <Badge variant="outline" className="text-xs">whatsapp</Badge>
+                                        </div>
+                                    </div>
+                                </div>
+                                <AlertDialog>
+                                    <AlertDialogTrigger asChild>
+                                        <Button variant="outline" size="sm" className="text-destructive hover:text-destructive gap-1.5">
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                            Unlink
+                                        </Button>
+                                    </AlertDialogTrigger>
+                                    <AlertDialogContent>
+                                        <AlertDialogHeader>
+                                            <AlertDialogTitle>Unlink WhatsApp Account</AlertDialogTitle>
+                                            <AlertDialogDescription>
+                                                This will disconnect this WhatsApp account. Messages from this number will no longer reach your CEO agent.
+                                            </AlertDialogDescription>
+                                        </AlertDialogHeader>
+                                        <AlertDialogFooter>
+                                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                            <AlertDialogAction
+                                                onClick={() => { handleWhatsAppUnlink(selectedWhatsAppLink.id); setSelectedWhatsAppLink(null); }}
+                                                className="bg-destructive text-destructive-foreground"
+                                            >
+                                                Unlink
+                                            </AlertDialogAction>
+                                        </AlertDialogFooter>
+                                    </AlertDialogContent>
+                                </AlertDialog>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Phone Number</p>
+                                    <p className="text-sm font-mono font-medium">+{selectedWhatsAppLink.whatsappPhone}</p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Connected Agent</p>
+                                    <p className="text-sm font-medium">CEO Agent</p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Linked At</p>
+                                    <p className="text-sm font-medium">
+                                        {selectedWhatsAppLink.verifiedAt
+                                            ? new Date(selectedWhatsAppLink.verifiedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                            : 'Pending'}
+                                    </p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Last Message</p>
+                                    <p className="text-sm font-medium">
+                                        {selectedWhatsAppLink.lastMessageAt
+                                            ? new Date(selectedWhatsAppLink.lastMessageAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                            : 'None yet'}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    ) : selectedSlackLink ? (
+                        <div className="p-6 space-y-6">
+                            <div className="flex items-start justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-purple-500/10">
+                                        <Hash className="h-5 w-5 text-purple-500" />
+                                    </div>
+                                    <div>
+                                        <h2 className="text-lg font-semibold">
+                                            {selectedSlackLink.slackDisplayName || selectedSlackLink.slackUsername || 'Slack User'}
+                                            {selectedSlackLink.slackUsername && (
+                                                <span className="text-muted-foreground font-normal ml-2">@{selectedSlackLink.slackUsername}</span>
+                                            )}
+                                        </h2>
+                                        <div className="flex items-center gap-2 mt-0.5">
+                                            <StatusDot status="active" />
+                                            <span className="text-sm text-muted-foreground">Connected</span>
+                                            <Badge variant="outline" className="text-xs">slack</Badge>
+                                        </div>
+                                    </div>
+                                </div>
+                                <AlertDialog>
+                                    <AlertDialogTrigger asChild>
+                                        <Button variant="outline" size="sm" className="text-destructive hover:text-destructive gap-1.5">
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                            Unlink
+                                        </Button>
+                                    </AlertDialogTrigger>
+                                    <AlertDialogContent>
+                                        <AlertDialogHeader>
+                                            <AlertDialogTitle>Unlink Slack Account</AlertDialogTitle>
+                                            <AlertDialogDescription>
+                                                This will disconnect this Slack account. Messages from this user will no longer reach your CEO agent.
+                                            </AlertDialogDescription>
+                                        </AlertDialogHeader>
+                                        <AlertDialogFooter>
+                                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                            <AlertDialogAction
+                                                onClick={() => { handleSlackUnlink(selectedSlackLink.id); setSelectedSlackLink(null); }}
+                                                className="bg-destructive text-destructive-foreground"
+                                            >
+                                                Unlink
+                                            </AlertDialogAction>
+                                        </AlertDialogFooter>
+                                    </AlertDialogContent>
+                                </AlertDialog>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Slack User</p>
+                                    <p className="text-sm font-mono font-medium">{selectedSlackLink.slackUserId}</p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Connected Agent</p>
+                                    <p className="text-sm font-medium">CEO Agent</p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Team ID</p>
+                                    <p className="text-sm font-mono font-medium">{selectedSlackLink.slackTeamId}</p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Linked At</p>
+                                    <p className="text-sm font-medium">
+                                        {selectedSlackLink.verifiedAt
+                                            ? new Date(selectedSlackLink.verifiedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                            : 'Pending'}
+                                    </p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Last Message</p>
+                                    <p className="text-sm font-medium">
+                                        {selectedSlackLink.lastMessageAt
+                                            ? new Date(selectedSlackLink.lastMessageAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                            : 'None yet'}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    ) : selectedTelegramLink ? (
+                        <div className="p-6 space-y-6">
+                            <div className="flex items-start justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-500/10">
+                                        <Send className="h-5 w-5 text-blue-500" />
+                                    </div>
+                                    <div>
+                                        <h2 className="text-lg font-semibold">
+                                            {selectedTelegramLink.telegramFirstName || 'Telegram'}
+                                            {selectedTelegramLink.telegramUsername && (
+                                                <span className="text-muted-foreground font-normal ml-2">@{selectedTelegramLink.telegramUsername}</span>
+                                            )}
+                                        </h2>
+                                        <div className="flex items-center gap-2 mt-0.5">
+                                            <StatusDot status="active" />
+                                            <span className="text-sm text-muted-foreground">Connected</span>
+                                            <Badge variant="outline" className="text-xs">telegram</Badge>
+                                        </div>
+                                    </div>
+                                </div>
+                                <AlertDialog>
+                                    <AlertDialogTrigger asChild>
+                                        <Button variant="outline" size="sm" className="text-destructive hover:text-destructive gap-1.5">
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                            Unlink
+                                        </Button>
+                                    </AlertDialogTrigger>
+                                    <AlertDialogContent>
+                                        <AlertDialogHeader>
+                                            <AlertDialogTitle>Unlink Telegram Account</AlertDialogTitle>
+                                            <AlertDialogDescription>
+                                                This will disconnect this Telegram account. Messages from this user will no longer reach your CEO agent.
+                                            </AlertDialogDescription>
+                                        </AlertDialogHeader>
+                                        <AlertDialogFooter>
+                                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                            <AlertDialogAction
+                                                onClick={() => { handleTelegramUnlink(selectedTelegramLink.id); setSelectedTelegramLink(null); }}
+                                                className="bg-destructive text-destructive-foreground"
+                                            >
+                                                Unlink
+                                            </AlertDialogAction>
+                                        </AlertDialogFooter>
+                                    </AlertDialogContent>
+                                </AlertDialog>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Telegram User ID</p>
+                                    <p className="text-sm font-mono font-medium">{selectedTelegramLink.telegramUserId}</p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Connected Agent</p>
+                                    <p className="text-sm font-medium">CEO Agent</p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Linked At</p>
+                                    <p className="text-sm font-medium">
+                                        {selectedTelegramLink.verifiedAt
+                                            ? new Date(selectedTelegramLink.verifiedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                            : 'Pending'}
+                                    </p>
+                                </div>
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Last Message</p>
+                                    <p className="text-sm font-medium">
+                                        {selectedTelegramLink.lastMessageAt
+                                            ? new Date(selectedTelegramLink.lastMessageAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                            : 'None yet'}
+                                    </p>
+                                </div>
+                            </div>
+
+                            {telegramStatus?.botUsername && (
+                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4">
+                                    <p className="text-xs font-medium text-muted-foreground mb-1">Bot</p>
+                                    <a
+                                        href={`https://t.me/${telegramStatus.botUsername}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-sm text-blue-600 hover:underline font-medium inline-flex items-center gap-1"
+                                    >
+                                        @{telegramStatus.botUsername}
+                                        <ExternalLink className="h-3 w-3" />
+                                    </a>
+                                </div>
+                            )}
+                        </div>
+                    ) : selected ? (
                         <div className="p-6 space-y-6">
                             <div className="flex items-start justify-between">
                                 <div className="flex items-center gap-3">
@@ -565,7 +1149,7 @@ export default function ChannelsPage() {
             </div>
 
             {/* Create Channel Sheet */}
-            <Sheet open={sheetOpen} onOpenChange={(v) => { setSheetOpen(v); if (!v) resetForm(); }}>
+            <Sheet open={sheetOpen} onOpenChange={(v) => { setSheetOpen(v); if (!v) { resetForm(); setVerificationCode(null); setPollingVerification(false); setSlackVerificationCode(null); setPollingSlackVerification(false); setWhatsappVerificationCode(null); setPollingWhatsappVerification(false); } }}>
                 <SheetContent className="sm:max-w-lg overflow-y-auto px-6">
                     <SheetHeader>
                         <SheetTitle className="text-xl font-semibold">Add Channel</SheetTitle>
@@ -576,17 +1160,19 @@ export default function ChannelsPage() {
                         {/* Step 1 — Choose type */}
                         {!channelType && (
                             <div className="grid grid-cols-2 gap-3">
-                                <button
-                                    type="button"
-                                    className="flex flex-col items-center gap-3 rounded-xl border-2 border-border p-6 hover:border-primary hover:bg-primary/5 transition-all"
-                                    onClick={() => setChannelType('telegram')}
-                                >
-                                    <Send className="h-8 w-8 text-blue-500" />
-                                    <div className="text-center">
-                                        <p className="text-sm font-semibold">Telegram</p>
-                                        <p className="text-[11px] text-muted-foreground mt-1">Connect a Telegram bot</p>
-                                    </div>
-                                </button>
+                                {telegramStatus?.available && (
+                                    <button
+                                        type="button"
+                                        className="flex flex-col items-center gap-3 rounded-xl border-2 border-border p-6 hover:border-primary hover:bg-primary/5 transition-all"
+                                        onClick={() => setChannelType('telegram')}
+                                    >
+                                        <Send className="h-8 w-8 text-blue-500" />
+                                        <div className="text-center">
+                                            <p className="text-sm font-semibold">Telegram</p>
+                                            <p className="text-[11px] text-muted-foreground mt-1">Chat with your CEO agent</p>
+                                        </div>
+                                    </button>
+                                )}
                                 <button
                                     type="button"
                                     className="flex flex-col items-center gap-3 rounded-xl border-2 border-border p-6 hover:border-primary hover:bg-primary/5 transition-all"
@@ -598,81 +1184,495 @@ export default function ChannelsPage() {
                                         <p className="text-[11px] text-muted-foreground mt-1">Connect to your Slack workspace</p>
                                     </div>
                                 </button>
+                                {whatsappStatus?.available && (
+                                    <button
+                                        type="button"
+                                        className="flex flex-col items-center gap-3 rounded-xl border-2 border-border p-6 hover:border-primary hover:bg-primary/5 transition-all"
+                                        onClick={() => setChannelType('whatsapp' as any)}
+                                    >
+                                        <MessageCircle className="h-8 w-8 text-green-500" />
+                                        <div className="text-center">
+                                            <p className="text-sm font-semibold">WhatsApp</p>
+                                            <p className="text-[11px] text-muted-foreground mt-1">Chat via WhatsApp Business</p>
+                                        </div>
+                                    </button>
+                                )}
                             </div>
                         )}
 
-                        {/* Step 2 — Configure */}
-                        {channelType && (
+                        {/* Step 2 — Telegram connect flow */}
+                        {channelType === 'telegram' && !telegramSubType && (
                             <>
                                 <div className="flex items-center gap-2 mb-2">
                                     <button onClick={resetForm} className="text-xs text-muted-foreground hover:text-foreground">&larr; Back</button>
-                                    <Badge variant="outline">{channelType}</Badge>
+                                    <Badge variant="outline">telegram</Badge>
                                 </div>
 
-                                <div className="space-y-2">
-                                    <Label>Connection Name</Label>
-                                    <Input placeholder="e.g. Support Bot" value={formName} onChange={(e) => setFormName(e.target.value)} />
+                                <div className="grid grid-cols-1 gap-3">
+                                    {telegramStatus?.available && (
+                                        <button
+                                            type="button"
+                                            className="flex items-center gap-4 rounded-xl border-2 border-border p-5 hover:border-primary hover:bg-primary/5 transition-all text-left"
+                                            onClick={() => setTelegramSubType('universal')}
+                                        >
+                                            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/10 flex-shrink-0">
+                                                <Send className="h-5 w-5 text-blue-500" />
+                                            </div>
+                                            <div>
+                                                <p className="text-sm font-semibold">Connect to Universal Bot</p>
+                                                <p className="text-[11px] text-muted-foreground mt-0.5">Link your Telegram account to chat with your CEO agent</p>
+                                            </div>
+                                        </button>
+                                    )}
+                                    <button
+                                        type="button"
+                                        className="flex items-center gap-4 rounded-xl border-2 border-border p-5 hover:border-primary hover:bg-primary/5 transition-all text-left"
+                                        onClick={() => setTelegramSubType('custom')}
+                                    >
+                                        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-orange-500/10 flex-shrink-0">
+                                            <Send className="h-5 w-5 text-orange-500" />
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-semibold">Connect Custom Bot</p>
+                                            <p className="text-[11px] text-muted-foreground mt-0.5">Use your own Telegram bot token with a specific agent</p>
+                                        </div>
+                                    </button>
                                 </div>
 
-                                <div className="space-y-2">
-                                    <Label>Assign to Agent</Label>
-                                    <Select value={formAgentId} onValueChange={setFormAgentId}>
-                                        <SelectTrigger><SelectValue placeholder="Select agent" /></SelectTrigger>
-                                        <SelectContent>
-                                            {agents.map((a) => (
-                                                <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
-                                            ))}
-                                        </SelectContent>
-                                    </Select>
+                                <div className="rounded-lg bg-amber-500/5 border border-amber-500/20 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                                    A Telegram account can only be connected to one bot at a time across the platform. Unlink first to switch.
+                                </div>
+                            </>
+                        )}
+
+                        {/* Telegram — Universal Bot flow */}
+                        {channelType === 'telegram' && telegramSubType === 'universal' && (
+                            <>
+                                <div className="flex items-center gap-2 mb-2">
+                                    <button onClick={() => { setTelegramSubType(null); setVerificationCode(null); setPollingVerification(false); }} className="text-xs text-muted-foreground hover:text-foreground">&larr; Back</button>
+                                    <Badge variant="outline">universal bot</Badge>
                                 </div>
 
-                                <div className="space-y-2">
-                                    <Label>Bot Token</Label>
-                                    <Input
-                                        type="password"
-                                        placeholder={channelType === 'telegram' ? 'e.g. 123456:ABC-DEF...' : 'xoxb-...'}
-                                        value={formBotToken}
-                                        onChange={(e) => setFormBotToken(e.target.value)}
-                                    />
-                                </div>
-
-                                {channelType === 'slack' && (
+                                {/* Linked accounts */}
+                                {telegramStatus && telegramStatus.links.length > 0 && (
                                     <div className="space-y-2">
-                                        <Label>Signing Secret</Label>
-                                        <Input type="password" placeholder="Signing secret from Basic Information" value={formSigningSecret} onChange={(e) => setFormSigningSecret(e.target.value)} />
+                                        <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                            Linked Accounts
+                                        </Label>
+                                        <div className="space-y-1.5">
+                                            {telegramStatus.links.map((link: TelegramUserLink) => (
+                                                <div
+                                                    key={link.id}
+                                                    className="flex items-center justify-between rounded-lg bg-muted/50 border border-border/40 px-4 py-3"
+                                                >
+                                                    <div className="flex items-center gap-3">
+                                                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500/10">
+                                                            <Send className="h-3.5 w-3.5 text-blue-500" />
+                                                        </div>
+                                                        <div>
+                                                            <p className="text-sm font-medium">
+                                                                {link.telegramFirstName || 'Telegram User'}
+                                                                {link.telegramUsername && (
+                                                                    <span className="text-muted-foreground font-normal ml-1.5">
+                                                                        @{link.telegramUsername}
+                                                                    </span>
+                                                                )}
+                                                            </p>
+                                                            <p className="text-[11px] text-muted-foreground font-mono">
+                                                                ID: {link.telegramUserId}
+                                                                {link.lastMessageAt && (
+                                                                    <span className="ml-2">
+                                                                        Last active: {new Date(link.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                                                    </span>
+                                                                )}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                    <AlertDialog>
+                                                        <AlertDialogTrigger asChild>
+                                                            <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive">
+                                                                <Trash2 className="h-3.5 w-3.5" />
+                                                            </Button>
+                                                        </AlertDialogTrigger>
+                                                        <AlertDialogContent>
+                                                            <AlertDialogHeader>
+                                                                <AlertDialogTitle>Unlink Telegram Account</AlertDialogTitle>
+                                                                <AlertDialogDescription>
+                                                                    This will disconnect this Telegram account. Messages from this user will no longer reach your CEO agent.
+                                                                </AlertDialogDescription>
+                                                            </AlertDialogHeader>
+                                                            <AlertDialogFooter>
+                                                                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                                                <AlertDialogAction
+                                                                    onClick={() => handleTelegramUnlink(link.id)}
+                                                                    className="bg-destructive text-destructive-foreground"
+                                                                >
+                                                                    Unlink
+                                                                </AlertDialogAction>
+                                                            </AlertDialogFooter>
+                                                        </AlertDialogContent>
+                                                    </AlertDialog>
+                                                </div>
+                                            ))}
+                                        </div>
                                     </div>
                                 )}
 
-                                {/* Setup guide */}
-                                {channelType === 'telegram' && (
+                                {/* Verification code flow */}
+                                {verificationCode ? (
+                                    <div className="rounded-lg border-2 border-dashed border-blue-500/30 bg-blue-500/5 p-6 text-center space-y-4">
+                                        <div>
+                                            <p className="text-xs font-medium text-muted-foreground mb-2">
+                                                Send this code to the bot on Telegram
+                                            </p>
+                                            <p className="text-4xl font-mono font-bold tracking-[0.3em] text-blue-600 dark:text-blue-400">
+                                                {verificationCode}
+                                            </p>
+                                        </div>
+                                        <div className="space-y-2">
+                                            {verificationBotLink && verificationBotUsername && (
+                                                <a
+                                                    href={verificationBotLink}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:underline font-medium"
+                                                >
+                                                    Open @{verificationBotUsername} on Telegram
+                                                    <ExternalLink className="h-3.5 w-3.5" />
+                                                </a>
+                                            )}
+                                            <p className="text-[11px] text-muted-foreground">
+                                                Code expires in 10 minutes. Waiting for verification...
+                                            </p>
+                                            {pollingVerification && (
+                                                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                                    Listening for verification...
+                                                </div>
+                                            )}
+                                        </div>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="text-xs"
+                                            onClick={() => {
+                                                setVerificationCode(null);
+                                                setPollingVerification(false);
+                                            }}
+                                        >
+                                            Cancel
+                                        </Button>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-4">
+                                        <div className="rounded-lg bg-muted/50 border border-border/40 p-4 space-y-2">
+                                            <p className="text-sm font-medium">How it works</p>
+                                            <div className="text-xs text-muted-foreground space-y-1.5">
+                                                <p>1. Click <strong>Connect Telegram</strong> below to get a verification code</p>
+                                                <p>2. Open Telegram and search for <strong>@{telegramStatus?.botUsername || 'our bot'}</strong></p>
+                                                <p>3. Send the code to the bot</p>
+                                                <p>4. Done! You can now chat with your CEO agent from Telegram</p>
+                                            </div>
+                                        </div>
+                                        <Button
+                                            className="w-full gap-1.5"
+                                            onClick={handleTelegramConnect}
+                                            disabled={linkingInProgress}
+                                        >
+                                            {linkingInProgress ? (
+                                                <><Loader2 className="h-4 w-4 animate-spin" />Generating code...</>
+                                            ) : (
+                                                <><Send className="h-4 w-4" />Connect Telegram</>
+                                            )}
+                                        </Button>
+                                    </div>
+                                )}
+                            </>
+                        )}
+
+                        {/* Telegram — Custom Bot flow */}
+                        {channelType === 'telegram' && telegramSubType === 'custom' && (
+                            <>
+                                <div className="flex items-center gap-2 mb-2">
+                                    <button onClick={() => setTelegramSubType(null)} className="text-xs text-muted-foreground hover:text-foreground">&larr; Back</button>
+                                    <Badge variant="outline">custom bot</Badge>
+                                </div>
+
+                                <div className="space-y-4">
+                                    <div className="space-y-2">
+                                        <Label>Connection Name</Label>
+                                        <Input placeholder="e.g. Support Bot" value={formName} onChange={(e) => setFormName(e.target.value)} />
+                                    </div>
+
+                                    <div className="space-y-2">
+                                        <Label>Assign to Agent</Label>
+                                        <Select value={formAgentId} onValueChange={setFormAgentId}>
+                                            <SelectTrigger><SelectValue placeholder="Select agent" /></SelectTrigger>
+                                            <SelectContent>
+                                                {agents.map((a) => (
+                                                    <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+
+                                    <div className="space-y-2">
+                                        <Label>Bot Token</Label>
+                                        <Input
+                                            type="password"
+                                            placeholder="Paste your bot token from @BotFather"
+                                            value={formBotToken}
+                                            onChange={(e) => setFormBotToken(e.target.value)}
+                                        />
+                                    </div>
+
+                                    {/* Setup guide */}
                                     <div className="rounded-lg border border-border/60">
                                         <button
                                             type="button"
                                             className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-muted-foreground hover:text-foreground"
                                             onClick={() => setShowTelegramGuide(!showTelegramGuide)}
                                         >
-                                            How to get your bot token
+                                            How to create a Telegram bot
                                             {showTelegramGuide ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                                         </button>
                                         {showTelegramGuide && (
                                             <div className="px-4 pb-3 text-xs text-muted-foreground space-y-1.5 border-t border-border/40 pt-2.5">
                                                 <p>1. Open Telegram and search for <strong>@BotFather</strong></p>
-                                                <p>2. Send <code>/newbot</code> and follow the prompts</p>
-                                                <p>3. Copy the token BotFather gives you</p>
-                                                <p>4. Paste it in the field above</p>
+                                                <p>2. Send <code>/newbot</code> and follow the instructions</p>
+                                                <p>3. Copy the bot token and paste it above</p>
+                                                <p>4. Each bot token can only be used in one workspace</p>
                                             </div>
                                         )}
                                     </div>
+
+                                    <Button
+                                        className="w-full"
+                                        disabled={creating || !formName || !formAgentId || !formBotToken}
+                                        onClick={handleSubmit}
+                                    >
+                                        {creating ? (
+                                            <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Connecting...</>
+                                        ) : (
+                                            'Connect Custom Bot'
+                                        )}
+                                    </Button>
+                                </div>
+                            </>
+                        )}
+
+                        {/* Step 2 — Slack connect flow (platform + per-workspace) */}
+                        {channelType === 'slack' && (
+                            <>
+                                <div className="flex items-center gap-2 mb-2">
+                                    <button onClick={() => { resetForm(); setSlackVerificationCode(null); setPollingSlackVerification(false); }} className="text-xs text-muted-foreground hover:text-foreground">&larr; Back</button>
+                                    <Badge variant="outline">slack</Badge>
+                                </div>
+
+                                {/* Platform Slack — Connect to CEO Agent */}
+                                {slackStatus?.available && (
+                                    <div className="space-y-4">
+                                        <div>
+                                            <h3 className="text-sm font-semibold">Connect to CEO Agent</h3>
+                                            <p className="text-xs text-muted-foreground mt-0.5">
+                                                Link your Slack account to chat with your CEO agent via DM.
+                                            </p>
+                                        </div>
+
+                                        {/* Linked Slack accounts */}
+                                        {slackStatus.links.length > 0 && (
+                                            <div className="space-y-2">
+                                                <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                                    Linked Accounts
+                                                </Label>
+                                                <div className="space-y-1.5">
+                                                    {slackStatus.links.map((link: SlackUserLink) => (
+                                                        <div
+                                                            key={link.id}
+                                                            className="flex items-center justify-between rounded-lg bg-muted/50 border border-border/40 px-4 py-3"
+                                                        >
+                                                            <div className="flex items-center gap-3">
+                                                                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-purple-500/10">
+                                                                    <Hash className="h-3.5 w-3.5 text-purple-500" />
+                                                                </div>
+                                                                <div>
+                                                                    <p className="text-sm font-medium">
+                                                                        {link.slackDisplayName || link.slackUsername || 'Slack User'}
+                                                                        {link.slackUsername && (
+                                                                            <span className="text-muted-foreground font-normal ml-1.5">
+                                                                                @{link.slackUsername}
+                                                                            </span>
+                                                                        )}
+                                                                    </p>
+                                                                    <p className="text-[11px] text-muted-foreground font-mono">
+                                                                        Team: {link.slackTeamId}
+                                                                        {link.lastMessageAt && (
+                                                                            <span className="ml-2">
+                                                                                Last active: {new Date(link.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                                                            </span>
+                                                                        )}
+                                                                    </p>
+                                                                </div>
+                                                            </div>
+                                                            <AlertDialog>
+                                                                <AlertDialogTrigger asChild>
+                                                                    <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive">
+                                                                        <Trash2 className="h-3.5 w-3.5" />
+                                                                    </Button>
+                                                                </AlertDialogTrigger>
+                                                                <AlertDialogContent>
+                                                                    <AlertDialogHeader>
+                                                                        <AlertDialogTitle>Unlink Slack Account</AlertDialogTitle>
+                                                                        <AlertDialogDescription>
+                                                                            This will disconnect this Slack account. Messages from this user will no longer reach your CEO agent.
+                                                                        </AlertDialogDescription>
+                                                                    </AlertDialogHeader>
+                                                                    <AlertDialogFooter>
+                                                                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                                                        <AlertDialogAction
+                                                                            onClick={() => handleSlackUnlink(link.id)}
+                                                                            className="bg-destructive text-destructive-foreground"
+                                                                        >
+                                                                            Unlink
+                                                                        </AlertDialogAction>
+                                                                    </AlertDialogFooter>
+                                                                </AlertDialogContent>
+                                                            </AlertDialog>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Slack verification code flow */}
+                                        {slackVerificationCode ? (
+                                            <div className="rounded-lg border-2 border-dashed border-purple-500/30 bg-purple-500/5 p-6 text-center space-y-4">
+                                                <div>
+                                                    <p className="text-xs font-medium text-muted-foreground mb-2">
+                                                        Send this code to the Pushable bot in Slack
+                                                    </p>
+                                                    <p className="text-4xl font-mono font-bold tracking-[0.3em] text-purple-600 dark:text-purple-400">
+                                                        {slackVerificationCode}
+                                                    </p>
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <p className="text-[11px] text-muted-foreground">
+                                                        Open Slack, find the Pushable bot in DMs, and send this code.
+                                                        Code expires in 10 minutes.
+                                                    </p>
+                                                    {pollingSlackVerification && (
+                                                        <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                                                            <Loader2 className="h-3 w-3 animate-spin" />
+                                                            Listening for verification...
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <Button
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    className="text-xs"
+                                                    onClick={() => {
+                                                        setSlackVerificationCode(null);
+                                                        setPollingSlackVerification(false);
+                                                    }}
+                                                >
+                                                    Cancel
+                                                </Button>
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-4">
+                                                <div className="rounded-lg bg-muted/50 border border-border/40 p-4 space-y-2">
+                                                    <p className="text-sm font-medium">How it works</p>
+                                                    <div className="text-xs text-muted-foreground space-y-1.5">
+                                                        <p>1. Make sure the Pushable app is installed in your Slack workspace</p>
+                                                        <p>2. Click <strong>Connect Slack</strong> below to get a verification code</p>
+                                                        <p>3. Open Slack and DM the Pushable bot with the code</p>
+                                                        <p>4. Done! You can now chat with your CEO agent from Slack</p>
+                                                    </div>
+                                                </div>
+                                                {slackStatus.installUrl && (
+                                                    <a
+                                                        href={slackStatus.installUrl}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="flex items-center justify-center gap-2 w-full rounded-lg border border-border/60 px-4 py-2.5 text-sm font-medium hover:bg-accent transition-colors"
+                                                    >
+                                                        <ExternalLink className="h-4 w-4" />
+                                                        Add to Slack (if not installed)
+                                                    </a>
+                                                )}
+                                                <Button
+                                                    className="w-full gap-1.5"
+                                                    onClick={handleSlackConnect}
+                                                    disabled={slackLinkingInProgress}
+                                                >
+                                                    {slackLinkingInProgress ? (
+                                                        <><Loader2 className="h-4 w-4 animate-spin" />Generating code...</>
+                                                    ) : (
+                                                        <><Hash className="h-4 w-4" />Connect Slack</>
+                                                    )}
+                                                </Button>
+                                            </div>
+                                        )}
+
+                                        <div className="border-t border-border/40 pt-4 mt-4">
+                                            <p className="text-xs text-muted-foreground text-center">
+                                                Or set up a custom per-workspace Slack connection below
+                                            </p>
+                                        </div>
+                                    </div>
                                 )}
 
-                                {channelType === 'slack' && (
+                                {/* Per-workspace Slack setup (existing) */}
+                                <div className="space-y-4">
+                                    {!slackStatus?.available && (
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <p className="text-xs text-muted-foreground">
+                                                Platform Slack bot is not configured. Set up a custom connection below.
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    <div className="space-y-2">
+                                        <Label>Connection Name</Label>
+                                        <Input placeholder="e.g. Support Bot" value={formName} onChange={(e) => setFormName(e.target.value)} />
+                                    </div>
+
+                                    <div className="space-y-2">
+                                        <Label>Assign to Agent</Label>
+                                        <Select value={formAgentId} onValueChange={setFormAgentId}>
+                                            <SelectTrigger><SelectValue placeholder="Select agent" /></SelectTrigger>
+                                            <SelectContent>
+                                                {agents.map((a) => (
+                                                    <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+
+                                    <div className="space-y-2">
+                                        <Label>Bot Token</Label>
+                                        <Input
+                                            type="password"
+                                            placeholder="xoxb-..."
+                                            value={formBotToken}
+                                            onChange={(e) => setFormBotToken(e.target.value)}
+                                        />
+                                    </div>
+
+                                    <div className="space-y-2">
+                                        <Label>Signing Secret</Label>
+                                        <Input type="password" placeholder="Signing secret from Basic Information" value={formSigningSecret} onChange={(e) => setFormSigningSecret(e.target.value)} />
+                                    </div>
+
+                                    {/* Setup guide */}
                                     <div className="rounded-lg border border-border/60">
                                         <button
                                             type="button"
                                             className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-muted-foreground hover:text-foreground"
                                             onClick={() => setShowSlackGuide(!showSlackGuide)}
                                         >
-                                            How to set up Slack app
+                                            How to set up a custom Slack app
                                             {showSlackGuide ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                                         </button>
                                         {showSlackGuide && (
@@ -686,19 +1686,148 @@ export default function ChannelsPage() {
                                             </div>
                                         )}
                                     </div>
+
+                                    <Button
+                                        className="w-full"
+                                        disabled={creating || !formName || !formAgentId || !formBotToken}
+                                        onClick={handleSubmit}
+                                    >
+                                        {creating ? (
+                                            <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Connecting...</>
+                                        ) : (
+                                            'Connect Custom Channel'
+                                        )}
+                                    </Button>
+                                </div>
+                            </>
+                        )}
+                        {/* Step 2 — WhatsApp connect flow */}
+                        {(channelType as string) === 'whatsapp' && (
+                            <>
+                                <div className="flex items-center gap-2 mb-2">
+                                    <button onClick={() => { resetForm(); setWhatsappVerificationCode(null); setPollingWhatsappVerification(false); }} className="text-xs text-muted-foreground hover:text-foreground">&larr; Back</button>
+                                    <Badge variant="outline">whatsapp</Badge>
+                                </div>
+
+                                {/* Linked WhatsApp accounts */}
+                                {whatsappStatus && whatsappStatus.links.length > 0 && (
+                                    <div className="space-y-2">
+                                        <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                            Linked Accounts
+                                        </Label>
+                                        <div className="space-y-1.5">
+                                            {whatsappStatus.links.map((link: WhatsAppUserLink) => (
+                                                <div
+                                                    key={link.id}
+                                                    className="flex items-center justify-between rounded-lg bg-muted/50 border border-border/40 px-4 py-3"
+                                                >
+                                                    <div className="flex items-center gap-3">
+                                                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-green-500/10">
+                                                            <MessageCircle className="h-3.5 w-3.5 text-green-500" />
+                                                        </div>
+                                                        <div>
+                                                            <p className="text-sm font-medium">
+                                                                {link.whatsappName || 'WhatsApp User'}
+                                                            </p>
+                                                            <p className="text-[11px] text-muted-foreground font-mono">
+                                                                +{link.whatsappPhone}
+                                                                {link.lastMessageAt && (
+                                                                    <span className="ml-2">
+                                                                        Last active: {new Date(link.lastMessageAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                                                    </span>
+                                                                )}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                    <AlertDialog>
+                                                        <AlertDialogTrigger asChild>
+                                                            <Button variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive">
+                                                                <Trash2 className="h-3.5 w-3.5" />
+                                                            </Button>
+                                                        </AlertDialogTrigger>
+                                                        <AlertDialogContent>
+                                                            <AlertDialogHeader>
+                                                                <AlertDialogTitle>Unlink WhatsApp Account</AlertDialogTitle>
+                                                                <AlertDialogDescription>
+                                                                    This will disconnect this WhatsApp number. Messages from this user will no longer reach your CEO agent.
+                                                                </AlertDialogDescription>
+                                                            </AlertDialogHeader>
+                                                            <AlertDialogFooter>
+                                                                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                                                <AlertDialogAction
+                                                                    onClick={() => handleWhatsAppUnlink(link.id)}
+                                                                    className="bg-destructive text-destructive-foreground"
+                                                                >
+                                                                    Unlink
+                                                                </AlertDialogAction>
+                                                            </AlertDialogFooter>
+                                                        </AlertDialogContent>
+                                                    </AlertDialog>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
                                 )}
 
-                                <Button
-                                    className="w-full"
-                                    disabled={creating || !formName || !formAgentId || !formBotToken}
-                                    onClick={handleSubmit}
-                                >
-                                    {creating ? (
-                                        <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Connecting...</>
-                                    ) : (
-                                        'Connect Channel'
-                                    )}
-                                </Button>
+                                {/* WhatsApp verification code flow */}
+                                {whatsappVerificationCode ? (
+                                    <div className="rounded-lg border-2 border-dashed border-green-500/30 bg-green-500/5 p-6 text-center space-y-4">
+                                        <div>
+                                            <p className="text-xs font-medium text-muted-foreground mb-2">
+                                                Send this code to the WhatsApp Business number
+                                            </p>
+                                            <p className="text-4xl font-mono font-bold tracking-[0.3em] text-green-600 dark:text-green-400">
+                                                {whatsappVerificationCode}
+                                            </p>
+                                        </div>
+                                        <div className="space-y-2">
+                                            <p className="text-[11px] text-muted-foreground">
+                                                Open WhatsApp and send this code to the Pushable Business number.
+                                                Code expires in 10 minutes.
+                                            </p>
+                                            {pollingWhatsappVerification && (
+                                                <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                                    Listening for verification...
+                                                </div>
+                                            )}
+                                        </div>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="text-xs"
+                                            onClick={() => {
+                                                setWhatsappVerificationCode(null);
+                                                setPollingWhatsappVerification(false);
+                                            }}
+                                        >
+                                            Cancel
+                                        </Button>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-4">
+                                        <div className="rounded-lg bg-muted/50 border border-border/40 p-4 space-y-2">
+                                            <p className="text-sm font-medium">How it works</p>
+                                            <div className="text-xs text-muted-foreground space-y-1.5">
+                                                <p>1. Click <strong>Connect WhatsApp</strong> below to get a verification code</p>
+                                                <p>2. Open WhatsApp and message the Pushable Business number</p>
+                                                <p>3. Send the 6-character code</p>
+                                                <p>4. Done! You can now chat with your CEO agent from WhatsApp</p>
+                                            </div>
+                                        </div>
+                                        <Button
+                                            className="w-full gap-1.5"
+                                            onClick={handleWhatsAppConnect}
+                                            disabled={whatsappLinkingInProgress}
+                                        >
+                                            {whatsappLinkingInProgress ? (
+                                                <><Loader2 className="h-4 w-4 animate-spin" />Generating code...</>
+                                            ) : (
+                                                <><MessageCircle className="h-4 w-4" />Connect WhatsApp</>
+                                            )}
+                                        </Button>
+                                    </div>
+                                )}
                             </>
                         )}
                     </div>

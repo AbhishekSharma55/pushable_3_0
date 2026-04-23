@@ -1,5 +1,6 @@
 import { channelRepository } from "../repositories/channel.repository.ts";
 import { channelManager } from "../channels/channel-manager.ts";
+import { telegramExclusivityService } from "./telegram-exclusivity.service.ts";
 import { NotFoundError, AppError } from "../lib/errors.ts";
 import { Bot } from "grammy";
 import { WebClient } from "@slack/web-api";
@@ -16,6 +17,14 @@ export const channelService = {
         },
         workspaceId: string
     ) {
+        // Check bot token exclusivity for Telegram
+        if (data.channelType === "telegram") {
+            const botToken = (data.credentials as { botToken?: string })?.botToken;
+            if (botToken) {
+                await telegramExclusivityService.assertBotTokenNotInUse(botToken);
+            }
+        }
+
         const connection = await channelRepository.create({
             ...data,
             workspaceId,
@@ -88,6 +97,26 @@ export const channelService = {
     ) {
         const existing = await channelRepository.findById(id, workspaceId);
         if (!existing) throw new NotFoundError("Connection not found");
+
+        // Check bot token exclusivity when credentials change
+        if (data.credentials && existing.channelType === "telegram") {
+            const botToken = (data.credentials as { botToken?: string })?.botToken;
+            if (botToken) {
+                await telegramExclusivityService.assertBotTokenNotInUse(botToken, existing.workspaceId);
+            }
+        }
+
+        // Check Telegram user exclusivity when allowedUserIds change
+        if (data.config?.allowedUserIds && existing.channelType === "telegram") {
+            const existingAllowed = ((existing.config as Record<string, unknown>)?.allowedUserIds as string[]) || [];
+            const newAllowed = data.config.allowedUserIds as string[];
+            const addedUserIds = newAllowed.filter((uid: string) => uid !== "*" && !existingAllowed.includes(uid));
+
+            for (const uid of addedUserIds) {
+                await telegramExclusivityService.assertNotInUniversalBot(uid);
+                await telegramExclusivityService.assertNotInCustomBot(uid, id);
+            }
+        }
 
         const updated = await channelRepository.update(id, workspaceId, data);
         if (!updated) throw new NotFoundError("Connection not found");

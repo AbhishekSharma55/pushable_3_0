@@ -6,6 +6,8 @@ import { AppError, UnauthorizedError } from "../lib/errors.ts";
 import { invalidateGraphCache, getStore } from "../graphs/agent.graph.ts";
 import { memoryRepository } from "../repositories/memory.repository.ts";
 import { logger } from "../lib/logger.ts";
+import { workspaceRepository } from "../repositories/workspace.repository.ts";
+import { userAgentAccessRepository } from "../repositories/userAgentAccess.repository.ts";
 
 const createAgentSchema = z.object({
     name: z.string().min(1, "Name is required"),
@@ -70,7 +72,19 @@ export async function agentRoutes(fastify: FastifyInstance) {
     // GET /agents
     fastify.get("/agents", async (request) => {
         const workspaceId = request.headers["x-workspace-id"] as string;
-        const agents = await agentService.getAgents(workspaceId);
+        const user = request.user as { userId: string };
+        let agents = await agentService.getAgents(workspaceId);
+
+        // Filter agents based on user access (owners see all, members only see allowed)
+        const isOwnerOrAdmin = await workspaceRepository.isOwnerOrAdmin(workspaceId, user.userId);
+        if (!isOwnerOrAdmin) {
+            const accessList = await userAgentAccessRepository.findByUser(workspaceId, user.userId);
+            const allowedIds = new Set(
+                accessList.filter((a) => a.allowed).map((a) => a.agentId)
+            );
+            agents = agents.filter((agent) => allowedIds.has(agent.id));
+        }
+
         return { data: agents };
     });
 

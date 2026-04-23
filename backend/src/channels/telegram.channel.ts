@@ -1,6 +1,8 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { logger } from "../lib/logger.ts";
 import { channelRepository } from "../repositories/channel.repository.ts";
+import { telegramExclusivityService } from "../services/telegram-exclusivity.service.ts";
+import { AppError } from "../lib/errors.ts";
 import type {
     ChannelAdapter,
     ChannelConnection,
@@ -66,6 +68,19 @@ export class TelegramAdapter implements ChannelAdapter {
                     await ctx.reply(
                         `You're already registered! Go ahead and send me a message.`
                     );
+                    return;
+                }
+
+                // Check exclusivity before self-registration
+                try {
+                    await telegramExclusivityService.assertNotInUniversalBot(userId);
+                    await telegramExclusivityService.assertNotInCustomBot(userId, connection.id);
+                } catch (error) {
+                    if (error instanceof AppError) {
+                        await ctx.reply(error.message);
+                    } else {
+                        await ctx.reply("Something went wrong. Please try again.");
+                    }
                     return;
                 }
 

@@ -244,6 +244,104 @@ KB upload:
 
 ---
 
+## Per-User Credit Limits
+
+Workspace owners can set per-user spending caps that limit how many credits an individual member can consume from the shared workspace pool. This prevents any single user from exhausting the workspace balance.
+
+### How It Works
+
+```
+Workspace Credit Pool (shared)
+  ├── User A: limit 500, used 320  → 180 remaining
+  ├── User B: limit 1000, used 50  → 950 remaining
+  └── Owner:  no limit (exempt)
+```
+
+Each user can optionally have a `user_credit_limits` record:
+
+```sql
+user_credit_limits
+  ├── id           UUID
+  ├── workspaceId  UUID (FK → workspaces)
+  ├── userId       UUID (FK → users)
+  ├── creditLimit  INTEGER (spending cap)
+  ├── creditsUsed  INTEGER (consumed so far in period)
+  ├── periodStart  TIMESTAMP
+  ├── periodEnd    TIMESTAMP
+  └── updatedAt    TIMESTAMP
+```
+
+**Unique constraint:** `(workspace_id, user_id)`
+
+### Credit Check with User Limits
+
+When a user triggers an action, the system checks both the workspace balance and the user's individual limit:
+
+```typescript
+async function checkUserCredits(workspaceId, userId, requiredCredits): Promise<{
+  allowed: boolean;
+  reason?: string;
+}>
+```
+
+```
+1. Check workspace-level credits (existing logic)
+2. If user has a credit limit:
+   a. If creditsUsed + requiredCredits > creditLimit → denied
+   b. Message: "Contact your workspace admin to increase your limit"
+3. Workspace owner is always exempt from per-user limits
+```
+
+### User Credit Deduction
+
+After an action completes, per-user usage is tracked alongside workspace deduction:
+
+```typescript
+async function deductUserCredits(workspaceId, userId, amount): Promise<void>
+```
+
+This increments `creditsUsed` on the user's `user_credit_limits` record. The workspace-level deduction still happens as normal -- per-user limits are an additional layer, not a replacement.
+
+### Exemptions
+
+- **Workspace owners** bypass per-user credit limits entirely
+- **Users with no `user_credit_limits` record** have unlimited access to the workspace pool (no cap)
+
+### Management Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `PUT` | `/api/members/:userId/credit-limit` | Set per-user credit limit |
+| `DELETE` | `/api/members/:userId/credit-limit` | Remove limit (unlimited access) |
+| `POST` | `/api/members/:userId/credit-limit/reset` | Reset used credits to zero |
+
+---
+
+## Per-User Agent Access
+
+Workspace owners and admins can restrict which agents a member is allowed to use. This is managed via the `user_agent_access` table.
+
+### Access Rules
+
+- **No rows for a user** = full access to all agents (default)
+- **Any rows exist** = restricted to only agents where `allowed = true`
+- **Owners and admins** bypass agent access checks entirely
+
+### When Checked
+
+Agent access is enforced at two points:
+1. **Session creation** -- user cannot create a session with a restricted agent
+2. **Chat message** -- user cannot send messages to a session with a restricted agent
+
+### Management Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/members/:userId/agent-access` | Get user's agent access config |
+| `PUT` | `/api/members/:userId/agent-access` | Set user's agent access config |
+
+---
+
 ## Plan Tiers
 
 The platform supports four plan tiers:
@@ -354,6 +452,12 @@ checkCredits(workspaceId, 5 × modelMultiplier)
   ├─ Not enough? → Return 402 INSUFFICIENT_CREDITS
   │
   ▼ (allowed)
+checkUserCredits(workspaceId, userId, 5 × modelMultiplier)
+  │
+  ├─ Over per-user limit? → Return 403 "Contact admin to increase limit"
+  ├─ Owner? → Skip check (exempt)
+  │
+  ▼ (allowed)
 Execute agent graph
   │
   ▼
@@ -368,6 +472,11 @@ deductCredits({
   ├─ topupCredits -= min(topupCredits, remaining)
   ├─ balance updated
   └─ Ledger entry created
+  │
+  ▼
+deductUserCredits(workspaceId, userId, amount)
+  │
+  └─ creditsUsed += amount (on user_credit_limits record)
 ```
 
 ---

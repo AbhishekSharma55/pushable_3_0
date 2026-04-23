@@ -92,7 +92,9 @@
       "Bash(find /home/ibr-ai-agent/Desktop/pushable3_0/pushable_3_0 -name \"package.json\" -not -path \"*/node_modules/*\" -exec grep -l \"whatsapp\\\\|baileys\\\\|whiskeysockets\" {} \\\\;)",
       "WebSearch",
       "WebFetch(domain:manus.im)",
-      "Bash(docker-compose restart:*)"
+      "Bash(docker-compose restart:*)",
+      "Bash(git rebase *)",
+      "Bash(git push *)"
     ]
   }
 }

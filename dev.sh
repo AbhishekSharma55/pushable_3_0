@@ -24,7 +24,7 @@ if grep -q "CLAUDE_CLI_PROXY_URL" .env 2>/dev/null; then
     PROXY_PORT=${PROXY_PORT:-4006}
 
     echo "Starting Claude CLI proxy on port $PROXY_PORT..."
-    node claude-proxy.mjs &
+    node scripts/claude-proxy.mjs &
     PROXY_PID=$!
     sleep 1
 
